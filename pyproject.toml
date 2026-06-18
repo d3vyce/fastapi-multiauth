@@ -1,0 +1,101 @@
+[project]
+name = "fastapi-multiauth"
+version = "0.4.0"
+description = "Composable authentication sources for FastAPI: bring your own validator, combine multiple schemes, correct OpenAPI by construction"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [
+    { name = "d3vyce", email = "contact@d3vyce.fr" }
+]
+keywords = ["fastapi", "authentication", "security", "oauth", "api-key", "bearer", "cookie"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: AsyncIO",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Internet :: WWW/HTTP :: Session",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+dependencies = [
+    "anyio>=3.7",
+    "async-lru>=2.0",
+    "fastapi>=0.100.0",
+    "httpx>=0.25.0",
+    "itsdangerous>=2.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/d3vyce/fastapi-multiauth"
+Documentation = "https://fastapi-multiauth.d3vyce.fr/"
+Repository = "https://github.com/d3vyce/fastapi-multiauth"
+Issues = "https://github.com/d3vyce/fastapi-multiauth/issues"
+
+[project.optional-dependencies]
+jwt = [
+    "pyjwt[crypto]>=2.8",
+]
+oauth = [
+    "httpx-oauth>=0.16",
+]
+
+[dependency-groups]
+dev = [
+    {include-group = "tests"},
+    {include-group = "docs"},
+    "fastapi_multiauth[jwt,oauth]",
+    "prek>=0.3.8",
+    "ruff>=0.1.0",
+    "ty>=0.0.34",
+]
+tests = [
+    "coverage>=7.0.0",
+    "pytest-anyio>=0.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest>=8.0.0",
+    "respx>=0.22",
+]
+docs = [
+    "mkdocstrings-python>=2.0.2",
+    "zensical>=0.0.30",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.8,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.ruff.lint]
+# "S" = flake8-bandit security rules, scoped to the library source.
+extend-select = ["S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+anyio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["src/fastapi_multiauth"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
