@@ -44,7 +44,7 @@ Issues = "https://github.com/d3vyce/fastapi-multiauth/issues"
 
 [project.optional-dependencies]
 jwt = [
-    "pyjwt[crypto]>=2.8",
+    "pyjwt[crypto]>=2.13.0",
 ]
 oauth = [
     "httpx-oauth>=0.16",
