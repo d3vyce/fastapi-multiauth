@@ -1,6 +1,6 @@
 [project]
 name = "fastapi-multiauth"
-version = "0.4.0"
+version = "0.1.0"
 description = "Composable authentication sources for FastAPI: bring your own validator, combine multiple schemes, correct OpenAPI by construction"
 readme = "README.md"
 license = "MIT"
