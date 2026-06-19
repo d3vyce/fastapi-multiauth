@@ -31,7 +31,7 @@ classifiers = [
 dependencies = [
     "anyio>=3.7",
     "async-lru>=2.0",
-    "fastapi>=0.100.0",
+    "fastapi>=0.137.2",
     "httpx>=0.25.0",
     "itsdangerous>=2.1",
 ]
