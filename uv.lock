@@ -424,7 +424,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.25.0" },
     { name = "httpx-oauth", marker = "extra == 'oauth'", specifier = ">=0.16" },
     { name = "itsdangerous", specifier = ">=2.1" },
-    { name = "pyjwt", extras = ["crypto"], marker = "extra == 'jwt'", specifier = ">=2.8" },
+    { name = "pyjwt", extras = ["crypto"], marker = "extra == 'jwt'", specifier = ">=2.13.0" },
 ]
 provides-extras = ["jwt", "oauth"]
 
