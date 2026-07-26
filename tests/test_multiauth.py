@@ -1597,6 +1597,14 @@ class TestEncodeDecodeOAuthState:
             == "/"
         )
 
+    def test_decode_empty_expected_token_returns_fallback(self):
+        """An empty stored token (session miss) must never match an empty "n"."""
+        encoded = oauth_encode_state("https://evil.example.com/x", "")
+        assert (
+            oauth_decode_state(encoded, expected_state_token="", fallback="/home")
+            == "/home"
+        )
+
     def test_generate_state_token_is_random(self):
         assert oauth_generate_state_token() != oauth_generate_state_token()
 

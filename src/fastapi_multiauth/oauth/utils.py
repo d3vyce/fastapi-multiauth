@@ -125,7 +125,8 @@ def oauth_decode_state(
     Args:
         state: Raw ``state`` query parameter from the callback.
         expected_state_token: Token stored before the authorization redirect;
-            a mismatch returns ``fallback``.
+            a mismatch — or an empty token (e.g. a session miss) — returns
+            ``fallback``.
         fallback: URL returned when ``state`` is absent, malformed, or fails
             verification.
         allowed_hosts: Open-redirect guard — the decoded destination must be a
@@ -135,6 +136,10 @@ def oauth_decode_state(
     Returns:
         The destination URL embedded in ``state``, or ``fallback``.
     """
+    # An empty expected token (e.g. session.get(..., "") on a session miss)
+    # must never match — compare_digest("", "") is True.
+    if not expected_state_token:
+        return fallback
     if not state or state == "null":  # "null" guards against JS JSON.stringify(null)
         return fallback
     try:
