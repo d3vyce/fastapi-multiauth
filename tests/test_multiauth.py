@@ -3443,6 +3443,19 @@ class TestCallableInstanceValidator:
         response = client.get("/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
         assert response.status_code == 200
 
+    async def test_sync_validator_runs_in_worker_thread(self):
+        """A blocking sync validator must not run on the event loop."""
+        import threading
+
+        from fastapi_multiauth.utils import ensure_async
+
+        loop_thread = threading.get_ident()
+
+        def validator(token: str) -> int:
+            return threading.get_ident()
+
+        assert await ensure_async(validator)("x") != loop_thread
+
 
 class TestJWTValidatorJWKSRobustness:
     JWKS_URL = "https://idp.example.com/jwks"

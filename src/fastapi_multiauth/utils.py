@@ -6,6 +6,7 @@ import hmac
 import inspect
 from typing import Any, Callable
 
+import anyio.to_thread
 from fastapi import HTTPException, Request
 
 
@@ -43,7 +44,7 @@ def ensure_async(fn: Callable[..., Any]) -> Callable[..., Any]:
 
     @functools.wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        result = fn(*args, **kwargs)
+        result = await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
         if inspect.isawaitable(result):
             return await result
         return result
