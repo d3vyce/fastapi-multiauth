@@ -2277,6 +2277,17 @@ class TestDecodeStateOpenRedirectGuard:
         """Browsers normalize "/\\evil.com" into a scheme-relative redirect."""
         assert self._decode("/\\evil.example.com", ("app.example.com",)) == "/fallback"
 
+    def test_tab_path_rejected(self):
+        """Browsers strip tabs/newlines, turning "/\\t/evil.com" into "//evil.com"."""
+        assert self._decode("/\t/evil.example.com", ("app.example.com",)) == (
+            "/fallback"
+        )
+
+    def test_newline_path_rejected(self):
+        assert self._decode("/\n/evil.example.com", ("app.example.com",)) == (
+            "/fallback"
+        )
+
     def test_non_http_scheme_rejected(self):
         assert self._decode("javascript:alert(1)", ("app.example.com",)) == "/fallback"
 
