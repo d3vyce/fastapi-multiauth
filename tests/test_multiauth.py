@@ -1597,6 +1597,14 @@ class TestEncodeDecodeOAuthState:
             == "/"
         )
 
+    def test_decode_empty_expected_token_returns_fallback(self):
+        """An empty stored token (session miss) must never match an empty "n"."""
+        encoded = oauth_encode_state("https://evil.example.com/x", "")
+        assert (
+            oauth_decode_state(encoded, expected_state_token="", fallback="/home")
+            == "/home"
+        )
+
     def test_generate_state_token_is_random(self):
         assert oauth_generate_state_token() != oauth_generate_state_token()
 
@@ -2268,6 +2276,17 @@ class TestDecodeStateOpenRedirectGuard:
     def test_backslash_path_rejected(self):
         """Browsers normalize "/\\evil.com" into a scheme-relative redirect."""
         assert self._decode("/\\evil.example.com", ("app.example.com",)) == "/fallback"
+
+    def test_tab_path_rejected(self):
+        """Browsers strip tabs/newlines, turning "/\\t/evil.com" into "//evil.com"."""
+        assert self._decode("/\t/evil.example.com", ("app.example.com",)) == (
+            "/fallback"
+        )
+
+    def test_newline_path_rejected(self):
+        assert self._decode("/\n/evil.example.com", ("app.example.com",)) == (
+            "/fallback"
+        )
 
     def test_non_http_scheme_rejected(self):
         assert self._decode("javascript:alert(1)", ("app.example.com",)) == "/fallback"

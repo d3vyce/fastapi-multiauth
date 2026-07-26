@@ -98,9 +98,10 @@ def oauth_encode_state(url: str, state_token: str) -> str:
 
 def _destination_allowed(destination: str, allowed_hosts: Sequence[str]) -> bool:
     """Check a decoded destination against the open-redirect allowlist."""
-    # Browsers normalize backslashes to slashes, turning "/\evil.com" into a
-    # scheme-relative redirect — reject them outright.
-    if "\\" in destination:
+    # Browsers normalize backslashes to slashes ("/\evil.com" becomes a
+    # scheme-relative redirect) and strip tabs/newlines before parsing
+    # ("/\t/evil.com" becomes "//evil.com") — reject control chars outright.
+    if "\\" in destination or any(ch <= " " for ch in destination):
         return False
     parsed = urlsplit(destination)
     if not parsed.scheme and not parsed.netloc:
@@ -125,7 +126,8 @@ def oauth_decode_state(
     Args:
         state: Raw ``state`` query parameter from the callback.
         expected_state_token: Token stored before the authorization redirect;
-            a mismatch returns ``fallback``.
+            a mismatch — or an empty token (e.g. a session miss) — returns
+            ``fallback``.
         fallback: URL returned when ``state`` is absent, malformed, or fails
             verification.
         allowed_hosts: Open-redirect guard — the decoded destination must be a
@@ -135,6 +137,10 @@ def oauth_decode_state(
     Returns:
         The destination URL embedded in ``state``, or ``fallback``.
     """
+    # An empty expected token (e.g. session.get(..., "") on a session miss)
+    # must never match — compare_digest("", "") is True.
+    if not expected_state_token:
+        return fallback
     if not state or state == "null":  # "null" guards against JS JSON.stringify(null)
         return fallback
     try:
