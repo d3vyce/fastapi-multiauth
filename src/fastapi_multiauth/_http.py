@@ -15,7 +15,7 @@ DEFAULT_TIMEOUT = 10.0
 def _require_https(url: str, description: str) -> str:
     """Reject non-string URLs and URLs that would send credentials over plaintext HTTP."""
     if not isinstance(url, str):
-        raise ValueError(f"{description} must be a string URL (got {url!r})")
+        raise ValueError(f"{description} must be a string URL (got {url!r})")  # noqa: TRY004
     parsed = urlsplit(url)
     if parsed.scheme == "https":
         return url

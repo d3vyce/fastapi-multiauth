@@ -2,8 +2,8 @@
 
 import logging
 import time
-from collections.abc import Sequence
-from typing import Any, Callable
+from collections.abc import Callable, Sequence
+from typing import Any
 
 import anyio
 from fastapi import HTTPException, status

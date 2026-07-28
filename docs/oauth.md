@@ -22,6 +22,7 @@ from fastapi_multiauth.oauth import (
     oauth_resolve_provider_urls,
 )
 
+
 @app.get("/oauth/login")
 async def oauth_login(request: Request, next: str = "/"):
     endpoints = await oauth_resolve_provider_urls(settings.OIDC_DISCOVERY_URL)
@@ -40,15 +41,14 @@ async def oauth_login(request: Request, next: str = "/"):
         code_challenge=code_challenge,
     )
 
+
 @app.get("/oauth/callback")
 async def oauth_callback(request: Request, code: str, state: str | None = None):
     endpoints = await oauth_resolve_provider_urls(settings.OIDC_DISCOVERY_URL)
     expected = request.session.pop("oauth_state", "")  # single-use
     code_verifier = request.session.pop("oauth_code_verifier", None)
     # Open-redirect guard: by default only relative paths are accepted.
-    destination = oauth_decode_state(
-        state, expected_state_token=expected, fallback="/"
-    )
+    destination = oauth_decode_state(state, expected_state_token=expected, fallback="/")
     try:
         token = await oauth_exchange_code(
             token_url=endpoints.token_endpoint,

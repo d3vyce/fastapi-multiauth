@@ -38,7 +38,13 @@ uv add "fastapi-multiauth[jwt,oauth]"
 
 ```python
 from fastapi import FastAPI, Security
-from fastapi_multiauth import HTTPBearerAuth, APIKeyCookieAuth, MultiAuth, UnauthorizedError
+from fastapi_multiauth import (
+    HTTPBearerAuth,
+    APIKeyCookieAuth,
+    MultiAuth,
+    UnauthorizedError,
+)
+
 
 async def validate_token(token: str) -> dict:
     user = await lookup_user_by_token(token)
@@ -46,8 +52,10 @@ async def validate_token(token: str) -> dict:
         raise UnauthorizedError()
     return user
 
+
 async def validate_session(value: str) -> dict:
     return await lookup_user_by_session(value)
+
 
 bearer = HTTPBearerAuth(validate_token, prefix="user_")
 session = APIKeyCookieAuth("session", validate_session, secret_key="...")
@@ -56,6 +64,7 @@ session = APIKeyCookieAuth("session", validate_session, secret_key="...")
 auth = MultiAuth(bearer, session)
 
 app = FastAPI()
+
 
 @app.get("/me")
 async def me(user=Security(auth)):

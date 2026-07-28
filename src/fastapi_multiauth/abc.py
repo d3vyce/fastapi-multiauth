@@ -3,7 +3,8 @@
 import copy
 import inspect
 from abc import ABC, abstractmethod
-from typing import Annotated, Any, Callable, TypeVar
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import SecurityScopes
@@ -12,7 +13,8 @@ from fastapi.security.base import SecurityBase
 from fastapi_multiauth.exceptions import UnauthorizedError
 from fastapi_multiauth.utils import add_challenge, challenge_headers, ensure_async
 
-_V = TypeVar("_V", bound="ValidatedAuthSource")
+if TYPE_CHECKING:
+    from typing_extensions import Self
 
 
 def _reject_scopes_kwarg(kwargs: dict[str, Any]) -> None:
@@ -71,7 +73,7 @@ class _DocOnlyScheme(SecurityBase):
         self.model = scheme.model
         self.scheme_name = scheme.scheme_name
 
-    async def __call__(self, request: Request) -> None:  # noqa: ARG002
+    async def __call__(self, request: Request) -> None:
         return None
 
 
@@ -212,7 +214,7 @@ class ValidatedAuthSource(AuthSource):
         """Validate a credential, forwarding route-declared scopes to the validator."""
         return await self._call_validator(credential, scopes=scopes)
 
-    def require(self: _V, **kwargs: Any) -> _V:
+    def require(self, **kwargs: Any) -> "Self":
         """Return a copy of this source with additional (or overriding) validator kwargs."""
         _reject_scopes_kwarg(kwargs)
         clone = copy.copy(self)

@@ -4,7 +4,8 @@ import functools
 import hashlib
 import hmac
 import inspect
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import anyio.to_thread
 from fastapi import HTTPException, Request

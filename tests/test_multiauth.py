@@ -14,23 +14,23 @@ import pytest
 import respx
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI, HTTPException, Security
-from jwt.algorithms import RSAAlgorithm
 from fastapi.testclient import TestClient
+from jwt.algorithms import RSAAlgorithm
 
-from fastapi_multiauth.exceptions import UnauthorizedError
 from fastapi_multiauth import (
+    APIKeyCookieAuth,
     APIKeyHeaderAuth,
     APIKeyQueryAuth,
     AuthSource,
+    ForbiddenError,
     HTTPBasicAuth,
     HTTPBearerAuth,
-    APIKeyCookieAuth,
-    ForbiddenError,
     JWTValidator,
     MultiAuth,
     hash_token,
     verify_token_hash,
 )
+from fastapi_multiauth.exceptions import UnauthorizedError
 from fastapi_multiauth.oauth import (
     OAuthDiscoveryError,
     OAuthExchangeError,
@@ -1402,7 +1402,8 @@ class TestSecurityScopes:
 
     def test_accepts_scopes_non_introspectable_callable(self):
         """Callables without an inspectable signature are treated as scope-less."""
-        from typing import Any, Callable, cast
+        from collections.abc import Callable
+        from typing import Any, cast
 
         from fastapi_multiauth.abc import _accepts_scopes
 

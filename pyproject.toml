@@ -80,7 +80,7 @@ build-backend = "uv_build"
 extend-select = ["S"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S"]
+"tests/**" = ["S", "B008"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
