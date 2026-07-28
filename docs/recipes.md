@@ -9,8 +9,13 @@ The flagship pattern: browser users authenticate with a signed session cookie, a
 ```python
 from fastapi import FastAPI, Response, Security
 from fastapi_multiauth import (
-    HTTPBearerAuth, APIKeyCookieAuth, MultiAuth, UnauthorizedError, hash_token,
+    HTTPBearerAuth,
+    APIKeyCookieAuth,
+    MultiAuth,
+    UnauthorizedError,
+    hash_token,
 )
+
 
 async def validate_session(user_id: str) -> User:
     user = await db.get_user(user_id)
@@ -18,17 +23,20 @@ async def validate_session(user_id: str) -> User:
         raise UnauthorizedError()
     return user
 
+
 async def validate_api_token(token: str) -> User:
     row = await db.get_api_token(token_hash=hash_token(token))
     if row is None or row.revoked:
         raise UnauthorizedError()
     return row.user
 
+
 session = APIKeyCookieAuth("session", validate_session, secret_key=settings.SECRET_KEY)
 api = HTTPBearerAuth(validate_api_token, prefix="user_")
 auth = MultiAuth(api, session)  # bearer first: API clients never hit cookie parsing
 
 app = FastAPI()
+
 
 @app.get("/me")
 async def me(user: User = Security(auth)):
@@ -44,10 +52,11 @@ user_tokens = HTTPBearerAuth(validate_user_token, prefix="user_")
 org_tokens = HTTPBearerAuth(validate_org_token, prefix="org_")
 auth = MultiAuth(user_tokens, org_tokens)
 
+
 # Issuing: store the hash, hand out the token once:
 @app.post("/tokens")
 async def create_token(user: User = Security(session)):
-    token = user_tokens.generate_token()           # "user_Xk3..."
+    token = user_tokens.generate_token()  # "user_Xk3..."
     await db.save_api_token(user.id, hash_token(token))
     return {"token": token}  # the only time it is ever visible
 ```
@@ -82,6 +91,7 @@ from fastapi_multiauth.oauth import (
     oauth_resolve_provider_urls,
 )
 
+
 @app.get("/oauth/login")
 async def oauth_login(request: Request, next: str = "/"):
     endpoints = await oauth_resolve_provider_urls(settings.OIDC_DISCOVERY_URL)
@@ -98,6 +108,7 @@ async def oauth_login(request: Request, next: str = "/"):
         state_token=state_token,
         code_challenge=code_challenge,
     )
+
 
 @app.get("/oauth/callback")
 async def oauth_callback(request: Request, code: str, state: str | None = None):
@@ -153,13 +164,14 @@ async def validate_session(user_id: str, *, role: str | None = None) -> User:
     if user is None:
         raise UnauthorizedError()
     if role is not None and user.role != role:
-        raise ForbiddenError()          # authenticated, but not allowed → 403
+        raise ForbiddenError()  # authenticated, but not allowed → 403
     return user
+
 
 session = APIKeyCookieAuth("session", validate_session, secret_key=settings.SECRET_KEY)
 admin_session = session.require(role="admin")
 
+
 @app.get("/admin/stats")
-async def stats(user: User = Security(admin_session)):
-    ...
+async def stats(user: User = Security(admin_session)): ...
 ```

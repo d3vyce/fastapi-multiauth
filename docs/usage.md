@@ -7,6 +7,7 @@ Every source wraps a callable you provide. It can be sync or async, receives the
 ```python
 from fastapi_multiauth import UnauthorizedError
 
+
 async def validate_token(token: str) -> User:
     user = await db.get_user_by_token(token)
     if user is None:
@@ -24,6 +25,7 @@ The same applies per route: `.require(**kwargs)` returns a copy of the source wi
 
 ```python
 bearer = HTTPBearerAuth(validate_token)
+
 
 @app.get("/admin")
 async def admin(user=Security(bearer.require(role=Role.ADMIN))):
@@ -46,6 +48,7 @@ bearer = HTTPBearerAuth(validate_token)
 
 app = FastAPI()
 
+
 @app.get("/me")
 async def me(user=Security(bearer)):
     return user
@@ -67,8 +70,9 @@ org_bearer = HTTPBearerAuth(validate_org_token, prefix="org_")
 ```python
 from fastapi_multiauth import hash_token, verify_token_hash
 
-token = user_bearer.generate_token()   # "user_Xk3...": show it to the user once
+token = user_bearer.generate_token()  # "user_Xk3...": show it to the user once
 await db.save_api_token(user_id, token_hash=hash_token(token))
+
 
 async def validate_user_token(token: str) -> User:
     row = await db.get_api_token(token_hash=hash_token(token))
@@ -91,14 +95,16 @@ session = APIKeyCookieAuth(
     validate_session,
     secret_key=settings.SECRET_KEY,  # ≥ 32 bytes, enforced at startup
     ttl=86400,
-    samesite="lax",   # default; also: domain=..., path=...
+    samesite="lax",  # default; also: domain=..., path=...
 )
+
 
 @app.post("/login")
 async def login(response: Response, credentials: LoginForm):
     user = await check_password(credentials)
     session.set_cookie(response, str(user.id))
     return {"ok": True}
+
 
 @app.post("/logout")
 async def logout(response: Response):
@@ -151,6 +157,7 @@ api_key = APIKeyQueryAuth("api_key", validate_api_key)
 import secrets
 from fastapi_multiauth import HTTPBasicAuth, UnauthorizedError
 
+
 async def validate_basic(username: str, password: str) -> dict:
     user = await db.get_user(username)
     if user is None or not secrets.compare_digest(
@@ -158,6 +165,7 @@ async def validate_basic(username: str, password: str) -> dict:
     ):
         raise UnauthorizedError()
     return user
+
 
 basic = HTTPBasicAuth(validate_basic, realm="api")
 ```
@@ -172,6 +180,7 @@ The `realm` shows up in the `WWW-Authenticate: Basic realm="api"` challenge on 4
 from fastapi_multiauth import MultiAuth
 
 auth = MultiAuth(bearer, session)
+
 
 @app.get("/me")
 async def me(user=Security(auth)):
@@ -189,11 +198,12 @@ async def validate_token(token: str, scopes: list[str]) -> User:
         raise UnauthorizedError()
     return user
 
+
 bearer = HTTPBearerAuth(validate_token)
 
+
 @app.post("/challenges")
-async def create(user=Security(bearer, scopes=["challenges:write"])):
-    ...
+async def create(user=Security(bearer, scopes=["challenges:write"])): ...
 ```
 
 !!! note "Scopes and OpenAPI"
@@ -219,6 +229,7 @@ bearer = HTTPBearerAuth(
         issuer="https://idp.example.com/realms/main",
     )
 )
+
 
 @app.get("/me")
 async def me(claims=Security(bearer)):

@@ -1,7 +1,8 @@
 """HTTP Basic authentication source."""
 
 import base64
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from fastapi import Request
 from fastapi.security import HTTPBasic

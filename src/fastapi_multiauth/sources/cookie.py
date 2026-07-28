@@ -1,8 +1,8 @@
 """Cookie-based authentication source."""
 
 import hashlib
-from collections.abc import Sequence
-from typing import Any, Callable, Literal
+from collections.abc import Callable, Sequence
+from typing import Any, Literal
 
 from fastapi import Request, Response
 from fastapi.security import APIKeyCookie

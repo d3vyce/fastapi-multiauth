@@ -1,6 +1,7 @@
 """API key query-string authentication source."""
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from fastapi import Request
 from fastapi.security import APIKeyQuery
