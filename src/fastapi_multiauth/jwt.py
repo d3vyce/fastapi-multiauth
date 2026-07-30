@@ -149,7 +149,7 @@ class JWTValidator:
                 leeway=self._leeway,
                 options=self._decode_options,
             )
-        except self._jwt.InvalidTokenError:
+        except (self._jwt.exceptions.PyJWTError, TypeError, ValueError):
             raise UnauthorizedError() from None
         if scopes:
             missing = set(scopes) - self._granted_scopes(claims)
