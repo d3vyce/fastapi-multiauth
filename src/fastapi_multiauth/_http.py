@@ -1,5 +1,6 @@
 """Shared HTTP transport hygiene for the OAuth and JWT modules."""
 
+import contextlib
 import json
 from typing import Any
 from urllib.parse import urlsplit
@@ -31,11 +32,16 @@ async def _get_json(
     error_cls: type[Exception],
     description: str,
     headers: dict[str, str] | None = None,
+    client: httpx.AsyncClient | None = None,
 ) -> Any:
     """GET *url* and decode the JSON body, mapping failures to *error_cls*."""
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with (
+        contextlib.nullcontext(client)
+        if client is not None
+        else httpx.AsyncClient(timeout=timeout)
+    ) as http:
         try:
-            resp = await client.get(url, headers=headers)
+            resp = await http.get(url, headers=headers)
             resp.raise_for_status()
             return resp.json()
         except httpx.HTTPError as exc:

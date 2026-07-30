@@ -70,6 +70,8 @@ async def oauth_callback(request: Request, code: str, state: str | None = None):
 
 `oauth_exchange_code` returns the full token response: `access_token` plus whatever the provider granted (`refresh_token`, `id_token`, `scope`, …), so refresh and ID-token flows stay possible. `oauth_resolve_provider_urls` returns an `OIDCEndpoints` named tuple that also carries `jwks_uri`, `end_session_endpoint`, and `issuer` when the provider advertises them. Providers that require HTTP Basic authentication on the token endpoint are supported via `oauth_exchange_code(..., token_endpoint_auth_method="client_secret_basic")`.
 
+By default each call opens a fresh HTTPS connection. `oauth_exchange_code` and `oauth_fetch_userinfo` accept an optional `client=`: pass a long-lived `httpx.AsyncClient` (e.g. created in your app's lifespan) to reuse its connection pool across the two callback calls and avoid the extra TLS handshake. The client is borrowed, never closed, and its own configuration (timeouts included) governs the requests.
+
 ## Error handling
 
 All flow errors derive from `OAuthError`, so a single `except` covers the callback; catch the specific classes when you need to react differently:

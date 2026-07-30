@@ -2013,6 +2013,17 @@ class TestExchangeCode:
 
     @pytest.mark.anyio
     @respx.mock
+    async def test_borrowed_client_is_reused_and_left_open(self):
+        route = respx.post(self.TOKEN_URL).respond(json={"access_token": "tok123"})
+
+        async with httpx.AsyncClient() as client:
+            token = await self._exchange(client=client)
+            assert token["access_token"] == "tok123"
+            assert not client.is_closed
+        assert route.call_count == 1
+
+    @pytest.mark.anyio
+    @respx.mock
     async def test_posts_correct_token_request(self):
         route = respx.post(self.TOKEN_URL).respond(json={"access_token": "tok123"})
 
@@ -2153,6 +2164,22 @@ class TestFetchUserinfo:
 
         assert result == {"sub": "user-1", "email": "alice@example.com"}
         assert route.calls.last.request.headers["Authorization"] == "Bearer tok123"
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_borrowed_client_is_reused_and_left_open(self):
+        route = respx.get(self.USERINFO_URL).respond(json={"sub": "user-1"})
+
+        async with httpx.AsyncClient() as client:
+            for _ in range(2):
+                result = await oauth_fetch_userinfo(
+                    userinfo_url=self.USERINFO_URL,
+                    access_token="tok123",
+                    client=client,
+                )
+            assert result == {"sub": "user-1"}
+            assert not client.is_closed
+        assert route.call_count == 2
 
     @pytest.mark.anyio
     @respx.mock
