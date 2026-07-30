@@ -1,5 +1,6 @@
 """OAuth 2.0 / OIDC network operations: discovery, code exchange, userinfo."""
 
+import contextlib
 import functools
 from typing import Any, Literal, NamedTuple
 
@@ -74,6 +75,7 @@ def _oauth2_client_class() -> type:
             access_token_endpoint: str,
             timeout: float,
             token_endpoint_auth_method: TokenEndpointAuthMethod,
+            client: httpx.AsyncClient | None,
         ) -> None:
             super().__init__(
                 client_id,
@@ -85,8 +87,13 @@ def _oauth2_client_class() -> type:
                 token_endpoint_auth_method=token_endpoint_auth_method,
             )
             self._timeout = timeout
+            self._client = client
 
-        def get_httpx_client(self) -> httpx.AsyncClient:
+        def get_httpx_client(self) -> Any:
+            # httpx-oauth only uses the return value as an async context
+            # manager, so a borrowed client is wrapped to survive the exit.
+            if self._client is not None:
+                return contextlib.nullcontext(self._client)
             return httpx.AsyncClient(timeout=self._timeout)
 
     return _TimeoutOAuth2
@@ -159,6 +166,7 @@ async def oauth_exchange_code(
     code_verifier: str | None = None,
     token_endpoint_auth_method: TokenEndpointAuthMethod = "client_secret_post",  # noqa: S107 — method name, not a secret
     timeout: float = DEFAULT_TIMEOUT,
+    client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     """Exchange an authorization code for tokens and return the token response.
 
@@ -176,7 +184,11 @@ async def oauth_exchange_code(
             (from :func:`~fastapi_multiauth.oauth.oauth_generate_pkce_pair`).
         token_endpoint_auth_method: How credentials are sent — in the POST body
             (``client_secret_post``, default) or as a Basic header.
-        timeout: Timeout in seconds for the token request.
+        timeout: Timeout in seconds for the token request. Ignored when
+            *client* is provided.
+        client: Optional ``httpx.AsyncClient`` to reuse (connection pooling
+            across the login flow). Borrowed, not closed; its own configuration
+            (timeouts included) governs the request.
 
     Returns:
         The full token response as a ``dict`` (``access_token`` plus whatever
@@ -190,7 +202,7 @@ async def oauth_exchange_code(
     _require_https(token_url, "OAuth token_url")
 
     oauth_client = _oauth2_client_class()(
-        client_id, client_secret, token_url, timeout, token_endpoint_auth_method
+        client_id, client_secret, token_url, timeout, token_endpoint_auth_method, client
     )
     try:
         token_data = await oauth_client.get_access_token(
@@ -221,13 +233,18 @@ async def oauth_fetch_userinfo(
     userinfo_url: str,
     access_token: str,
     timeout: float = DEFAULT_TIMEOUT,
+    client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     """Fetch the userinfo payload with a bearer access token.
 
     Args:
         userinfo_url: Provider's userinfo endpoint.
         access_token: Access token from :func:`oauth_exchange_code`.
-        timeout: Timeout in seconds for the userinfo request.
+        timeout: Timeout in seconds for the userinfo request. Ignored when
+            *client* is provided.
+        client: Optional ``httpx.AsyncClient`` to reuse (connection pooling
+            across the login flow). Borrowed, not closed; its own configuration
+            (timeouts included) governs the request.
 
     Returns:
         The JSON payload returned by the userinfo endpoint as a plain ``dict``.
@@ -243,4 +260,5 @@ async def oauth_fetch_userinfo(
         error_cls=OAuthUserinfoError,
         description="userinfo",
         headers={"Authorization": f"Bearer {access_token}"},
+        client=client,
     )
