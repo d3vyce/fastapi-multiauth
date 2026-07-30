@@ -2834,6 +2834,19 @@ def _hs_token(claims=None, *, secret=JWT_SECRET, **encode_kwargs) -> str:
     return pyjwt.encode(claims or _claims(), secret, algorithm="HS256", **encode_kwargs)
 
 
+def _forged_token(alg: str, *, kid: str | None = "key1", claims=None) -> str:
+    """Token with an attacker-chosen 'alg' header and a junk signature."""
+
+    def segment(payload: dict) -> str:
+        raw = json.dumps(payload).encode()
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    header = {"alg": alg, "typ": "JWT"}
+    if kid:
+        header["kid"] = kid
+    return f"{segment(header)}.{segment(claims or _claims())}.AAAA"
+
+
 def _auth_client(validator) -> TestClient:
     bearer = HTTPBearerAuth(validator)
 
@@ -2969,6 +2982,14 @@ class TestJWTValidatorSymmetric:
         client = _auth_client(validator)
         response = client.get("/me", headers={"Authorization": f"Bearer {_hs_token()}"})
         assert response.json() == {"id": "user-1", "via": "async"}
+
+    def test_asymmetric_alg_header_fails_closed(self):
+        """An allowlisted 'alg' the secret cannot satisfy is a 401, not a 500."""
+        validator = JWTValidator(secret=JWT_SECRET, algorithms=["HS256", "ES256"])
+        client = _auth_client(validator)
+        token = _forged_token("ES256", kid=None)
+        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 401
 
 
 class TestJWTValidatorScopes:
@@ -3499,6 +3520,16 @@ class TestJWTValidatorJWKSRobustness:
         )
         response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
         assert response.status_code == 200
+
+    @respx.mock
+    def test_alg_header_not_matching_jwks_key_rejected(self):
+        """A cross-family 'alg' header against an RSA JWKS key is a 401, not a 500."""
+        respx.get(self.JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
+        client = _auth_client(JWTValidator(jwks_url=self.JWKS_URL))
+        response = client.get(
+            "/me", headers={"Authorization": f"Bearer {_forged_token('ES256')}"}
+        )
+        assert response.status_code == 401
 
     @pytest.mark.anyio
     @pytest.mark.parametrize("document", [["not", "an", "object"], {"keys": "nope"}])
