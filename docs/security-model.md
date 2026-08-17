@@ -26,9 +26,11 @@ Signed is not encrypted. The signed cookie payload and JWT claims are **readable
 
 ## Signed cookie properties
 
-- HMAC-SHA256 via `itsdangerous.TimestampSigner`, salt = `fastapi-multiauth.cookie.{name}` → cookies are bound to their name.
+- HMAC-SHA256 via `itsdangerous.TimestampSigner`, salt = `fastapi-multiauth.cookie.{name}` (`.sid` appended when `session_id=True`) → cookies are bound to their name and to their payload layout.
 - The timestamp is inside the signed payload: expiry cannot be extended by the client.
-- **Not individually revocable**: a stolen cookie stays valid until `ttl` expires; `delete_cookie` only clears one browser. For revocation, store a session ID in the cookie and check a server-side store in the validator.
+- **Not revocable on their own**: a stolen cookie stays valid until `ttl` expires; `delete_cookie` only clears one browser. `session_id=True` mints a per-session id you can store and check in your validator, which is what makes revocation possible; the library stays stateless and never reads your store itself.
+- **Rotate the id after a privilege change** (password change, elevation): mint with `set_cookie` before revoking the id `session_id_of(request)` returned, so a failure mid-way leaves the user signed in rather than leaving the old id valid.
+- The session id is a bearer credential (128 bits of `secrets.token_urlsafe`): do not log it, and treat a leaked id as a leaked session.
 - Keep `ttl` as short as the UX tolerates (default 24 h). Long-lived "remember me" sessions should be server-side sessions, not signed cookies.
 - `secret_key` accepts a key list for rotation: first key signs, all verify. Rotate by prepending and waiting one `ttl` before removing the old key.
 

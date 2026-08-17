@@ -128,8 +128,63 @@ Deploy with both keys, wait until `ttl` has passed, then drop the old key.
 
 Cookies are bound to their name: two `APIKeyCookieAuth` instances sharing a `secret_key` (e.g. `session` and `admin_session`) can never accept each other's cookies.
 
-!!! warning "Signed cookies are not revocable"
-    A signed stateless cookie stays valid until its `ttl` expires: there is no server-side entry to delete, and `delete_cookie` only clears the one browser it responds to. If you need individual session revocation, back your validator with a store and treat the cookie value as a session ID.
+!!! warning "Signed cookies are not revocable on their own"
+    A signed stateless cookie stays valid until its `ttl` expires: there is no server-side entry to delete, and `delete_cookie` only clears the one browser it responds to. Use `session_id=True` below to get a handle you can revoke.
+
+#### Per-session identity
+
+`session_id=True` mints a random id on every `set_cookie`, carries it inside the signed payload, and injects it into your validator as `session_id`. The library stays stateless: it mints and forwards the id, you decide what to store and what revoked means.
+
+```python
+session = APIKeyCookieAuth(
+    "session",
+    validate_session,
+    secret_key=settings.SECRET_KEY,  # required with session_id
+    session_id=True,
+)
+
+
+async def validate_session(user_id: str, *, session_id: str) -> User:
+    if await revoked(session_id):  # your store
+        raise UnauthorizedError()
+    return await db.get_user(user_id)
+
+
+@app.post("/login")
+async def login(response: Response, credentials: LoginForm):
+    user = await check_password(credentials)
+    sid = session.set_cookie(response, str(user.id))
+    await db.create_session(sid, user.id)
+    return {"ok": True}
+
+
+@app.post("/logout")
+async def logout(request: Request, response: Response):
+    sid = session.delete_cookie(
+        response, request
+    )  # None if the cookie was absent/invalid
+    if sid:
+        await db.revoke_session(sid)  # this device only
+    return {"ok": True}
+```
+
+`session_id_of(request)` reads the id off the request's cookie without running the validator, so a route can name the session it is serving: mark "this device" in a session list, or spare it from a bulk revoke. It returns `None` when `session_id` is off, or the cookie is absent, expired or forged.
+
+```python
+@app.post("/sessions/revoke-others")
+async def revoke_others(request: Request, user=Security(session)):
+    await db.revoke_sessions(user.id, except_id=session.session_id_of(request))
+    return {"ok": True}
+```
+
+Points to watch:
+
+- The validator **must** declare a `session_id` parameter and `secret_key` **must** be set; both are checked at construction.
+- Turning `session_id` on or off changes the signing salt, so cookies minted the other way stop verifying: existing sessions are logged out on deploy.
+- Rotate after a privilege change (password change, elevation): mint the new id with `set_cookie` **before** revoking the old one, so a failure in between leaves the user signed in rather than the old id valid.
+- Your `revoked()` check is one lookup per authenticated request; verifying the cookie itself does zero I/O.
+- The validator receives the id but not the `Request`, so anything request-derived (IP, user-agent) has to be captured where you call `set_cookie`.
+- `name` and `ttl` are readable on the source: derive your session row's expiry from `session.ttl` instead of duplicating the constant.
 
 ### API keys
 
