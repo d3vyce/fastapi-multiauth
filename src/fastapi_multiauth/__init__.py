@@ -23,7 +23,7 @@ from .sources import (
 )
 from .utils import hash_token, verify_token_hash
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "APIKeyCookieAuth",
