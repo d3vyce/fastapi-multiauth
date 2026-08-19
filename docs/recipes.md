@@ -154,7 +154,16 @@ async def logout(response: Response):
     return {"ok": True}
 ```
 
-This clears the cookie in that one browser. The signed cookie itself remains cryptographically valid until its `ttl` passes; if you need hard logout (stolen-cookie scenario), make the cookie value a server-side session ID and delete the session row here instead.
+This clears the cookie in that one browser. The signed cookie itself remains cryptographically valid until its `ttl` passes; for hard logout (stolen-cookie scenario), enable [`session_id=True`](usage.md#per-session-identity) (your validator then declares a `session_id` parameter), pass the request to `delete_cookie`, and revoke the id it returns:
+
+```python
+@app.post("/logout")
+async def logout(request: Request, response: Response):
+    sid = session.delete_cookie(response, request)
+    if sid:
+        await db.revoke_session(sid)
+    return {"ok": True}
+```
 
 ## Admin-only dependency with `require()`
 

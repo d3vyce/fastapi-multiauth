@@ -17,23 +17,29 @@ if TYPE_CHECKING:
     from typing_extensions import Self
 
 
-def _reject_scopes_kwarg(kwargs: dict[str, Any]) -> None:
-    """Reject ``scopes`` as a validator kwarg."""
-    if "scopes" in kwargs:
-        raise ValueError(
-            "'scopes' is a reserved validator kwarg: security scopes declared "
-            "on the route via Security(..., scopes=[...]) are injected "
-            "automatically. Use a different keyword name."
-        )
+_RESERVED_KWARGS = {
+    "scopes": "injected from the route by Security(..., scopes=[...])",
+    "session_id": "injected by APIKeyCookieAuth(session_id=True)",
+}
 
 
-def _accepts_scopes(fn: Callable[..., Any]) -> bool:
-    """Return whether *fn* declares a ``scopes`` parameter."""
+def _reject_reserved_kwargs(kwargs: dict[str, Any]) -> None:
+    """Reject validator kwargs the library injects itself."""
+    for name, injected in _RESERVED_KWARGS.items():
+        if name in kwargs:
+            raise ValueError(
+                f"'{name}' is a reserved validator kwarg ({injected}): "
+                "the library sets it. Use a different keyword name."
+            )
+
+
+def _accepts_kwarg(fn: Callable[..., Any], name: str) -> bool:
+    """Return whether *fn* declares a *name* parameter."""
     try:
         parameters = inspect.signature(fn).parameters
     except (TypeError, ValueError):
         return False
-    param = parameters.get("scopes")
+    param = parameters.get(name)
     return param is not None and param.kind in (
         inspect.Parameter.POSITIONAL_OR_KEYWORD,
         inspect.Parameter.KEYWORD_ONLY,
@@ -49,17 +55,6 @@ def _unenforceable_scopes_error(owner: object, scopes: list[str]) -> RuntimeErro
         "override authenticate_scoped()), or remove scopes=... from "
         "Security()."
     )
-
-
-def _scope_kwargs(
-    owner: object, accepts_scopes: bool, scopes: list[str]
-) -> dict[str, Any]:
-    """Return the ``scopes`` kwarg for a validator, failing closed when unsupported."""
-    if accepts_scopes:
-        return {"scopes": scopes}
-    if scopes:
-        raise _unenforceable_scopes_error(owner, scopes)
-    return {}
 
 
 class _DocOnlyScheme(SecurityBase):
@@ -193,18 +188,24 @@ class ValidatedAuthSource(AuthSource):
             validator: Sync or async callable returning the identity.
             scheme: Optional ``fastapi.security`` scheme for OpenAPI.
             **kwargs: Extra keyword arguments forwarded to the validator on
-                every call. ``scopes`` is reserved (injected from the route).
+                every call. Names the library injects itself are reserved:
+                ``scopes`` and ``session_id``.
         """
-        _reject_scopes_kwarg(kwargs)
+        _reject_reserved_kwargs(kwargs)
         self._validator = ensure_async(validator)
-        self._accepts_scopes = _accepts_scopes(validator)
+        self._accepts_scopes = _accepts_kwarg(validator, "scopes")
         self._kwargs = kwargs
         super().__init__(scheme)
 
-    async def _call_validator(self, *args: Any, scopes: list[str]) -> Any:
+    async def _call_validator(
+        self, *args: Any, scopes: list[str], **injected: Any
+    ) -> Any:
         """Invoke the validator with scope and configured kwargs forwarding."""
-        extra = _scope_kwargs(self, self._accepts_scopes, scopes)
-        return await self._validator(*args, **extra, **self._kwargs)
+        if self._accepts_scopes:
+            injected["scopes"] = scopes
+        elif scopes:  # fail closed: the validator cannot check them
+            raise _unenforceable_scopes_error(self, scopes)
+        return await self._validator(*args, **self._kwargs, **injected)
 
     async def authenticate(self, credential: str) -> Any:
         """Validate a credential and return the identity (no route scopes)."""
@@ -215,8 +216,11 @@ class ValidatedAuthSource(AuthSource):
         return await self._call_validator(credential, scopes=scopes)
 
     def require(self, **kwargs: Any) -> "Self":
-        """Return a copy of this source with additional (or overriding) validator kwargs."""
-        _reject_scopes_kwarg(kwargs)
+        """Return a copy of this source with additional (or overriding) validator kwargs.
+
+        Reserved names (``scopes``, ``session_id``) are rejected here too.
+        """
+        _reject_reserved_kwargs(kwargs)
         clone = copy.copy(self)
         clone._kwargs = {**self._kwargs, **kwargs}
         return clone

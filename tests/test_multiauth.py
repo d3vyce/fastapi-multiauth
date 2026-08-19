@@ -13,7 +13,7 @@ import jwt as pyjwt
 import pytest
 import respx
 from cryptography.hazmat.primitives.asymmetric import rsa
-from fastapi import FastAPI, HTTPException, Security
+from fastapi import FastAPI, HTTPException, Request, Response, Security
 from fastapi.testclient import TestClient
 from jwt.algorithms import RSAAlgorithm
 
@@ -57,6 +57,18 @@ def _app(*routes_setup_fns):
 
 VALID_TOKEN = "secret"
 VALID_COOKIE = "session123"
+COOKIE_SECRET = "unit-test-secret-key-32-bytes-minimum!"
+
+
+def _client(auth) -> TestClient:
+    """App exposing a single /me route guarded by *auth*."""
+
+    def setup(app: FastAPI):
+        @app.get("/me")
+        async def me(user=Security(auth)):
+            return user
+
+    return TestClient(_app(setup))
 
 
 async def simple_validator(credential: str) -> dict:
@@ -897,23 +909,13 @@ class TestSyncValidators:
 class TestCookieAuthSigned:
     """APIKeyCookieAuth with signed cookies (secret_key path, itsdangerous format)."""
 
-    SECRET = "unit-test-secret-key-32-bytes-minimum!"
-
-    def _client(self, auth) -> TestClient:
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        return TestClient(_app(setup))
-
     def test_valid_signed_cookie_via_set_cookie(self):
         """set_cookie signs the value; the signed cookie is verified on read."""
         from fastapi import Response
 
         # secure=False for test client which runs over plain HTTP
         auth = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=self.SECRET, secure=False
+            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
         )
 
         def setup(app: FastAPI):
@@ -936,7 +938,7 @@ class TestCookieAuthSigned:
         """set_cookie includes Secure flag when secure=True (the default)."""
         from starlette.responses import Response as StarletteResponse
 
-        auth = APIKeyCookieAuth("session", cookie_validator, secret_key=self.SECRET)
+        auth = APIKeyCookieAuth("session", cookie_validator, secret_key=COOKIE_SECRET)
         response = StarletteResponse()
         auth.set_cookie(response, "value")
         assert "secure" in response.headers["set-cookie"].lower()
@@ -946,7 +948,7 @@ class TestCookieAuthSigned:
         from starlette.responses import Response as StarletteResponse
 
         auth = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=self.SECRET, secure=False
+            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
         )
         response = StarletteResponse()
         auth.set_cookie(response, "value")
@@ -956,7 +958,7 @@ class TestCookieAuthSigned:
         """Review invariant: cookie defaults are HttpOnly + SameSite=lax."""
         from starlette.responses import Response as StarletteResponse
 
-        auth = APIKeyCookieAuth("session", cookie_validator, secret_key=self.SECRET)
+        auth = APIKeyCookieAuth("session", cookie_validator, secret_key=COOKIE_SECRET)
         response = StarletteResponse()
         auth.set_cookie(response, "value")
         header = response.headers["set-cookie"].lower()
@@ -969,7 +971,7 @@ class TestCookieAuthSigned:
         auth = APIKeyCookieAuth(
             "session",
             cookie_validator,
-            secret_key=self.SECRET,
+            secret_key=COOKIE_SECRET,
             samesite="strict",
             domain="example.com",
             path="/app",
@@ -988,7 +990,7 @@ class TestCookieAuthSigned:
         auth = APIKeyCookieAuth(
             "session",
             cookie_validator,
-            secret_key=self.SECRET,
+            secret_key=COOKIE_SECRET,
             domain="example.com",
             path="/app",
         )
@@ -1002,9 +1004,9 @@ class TestCookieAuthSigned:
     def test_tampered_value_returns_401(self):
         """Altering the signed payload invalidates the signature."""
         auth = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=self.SECRET, secure=False
+            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
         )
-        client = self._client(auth)
+        client = _client(auth)
         signed = auth._sign(VALID_COOKIE)
         payload, _, rest = signed.partition(".")
         tampered = f"forged{payload[6:]}.{rest}"
@@ -1013,9 +1015,9 @@ class TestCookieAuthSigned:
 
     def test_truncated_cookie_returns_401(self):
         auth = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=self.SECRET, secure=False
+            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
         )
-        client = self._client(auth)
+        client = _client(auth)
         signed = auth._sign(VALID_COOKIE)
         response = client.get("/me", cookies={"session": signed[:-5]})
         assert response.status_code == 401
@@ -1028,27 +1030,27 @@ class TestCookieAuthSigned:
             secret_key="another-secret-key-32-bytes-or-more!!",
         )
         auth = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=self.SECRET, secure=False
+            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
         )
-        client = self._client(auth)
+        client = _client(auth)
         response = client.get("/me", cookies={"session": other._sign(VALID_COOKIE)})
         assert response.status_code == 401
 
     def test_unsigned_raw_value_returns_401(self):
         """A bare (unsigned) value is rejected when signing is enabled."""
         auth = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=self.SECRET, secure=False
+            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
         )
-        client = self._client(auth)
+        client = _client(auth)
         response = client.get("/me", cookies={"session": VALID_COOKIE})
         assert response.status_code == 401
 
     def test_expired_signed_cookie_returns_401(self):
         """A signed cookie older than ttl is rejected; a fresh one accepted."""
         auth = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=self.SECRET, ttl=60, secure=False
+            "session", cookie_validator, secret_key=COOKIE_SECRET, ttl=60, secure=False
         )
-        client = self._client(auth)
+        client = _client(auth)
         signed = auth._sign(VALID_COOKIE)
 
         response = client.get("/me", cookies={"session": signed})
@@ -1061,13 +1063,13 @@ class TestCookieAuthSigned:
     def test_cookie_signed_for_other_name_returns_401(self):
         """Same secret_key, different cookie name → signature must not transfer."""
         session_auth = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=self.SECRET, secure=False
+            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
         )
         admin_auth = APIKeyCookieAuth(
-            "admin_session", cookie_validator, secret_key=self.SECRET
+            "admin_session", cookie_validator, secret_key=COOKIE_SECRET
         )
 
-        client = self._client(session_auth)
+        client = _client(session_auth)
         # A cookie minted by the admin_session instance, replayed under the
         # session cookie name, must be rejected despite the shared secret.
         forged = admin_auth._sign(VALID_COOKIE)
@@ -1083,9 +1085,9 @@ class TestCookieAuthSigned:
     def test_empty_cookie_value_returns_401(self):
         """A present-but-empty cookie is treated as absent, not validated."""
         auth = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=self.SECRET, secure=False
+            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
         )
-        client = self._client(auth)
+        client = _client(auth)
         response = client.get("/me", headers={"Cookie": "session="})
         assert response.status_code == 401
 
@@ -1114,6 +1116,163 @@ class TestCookieAuthSigned:
         assert "session" in response.headers["set-cookie"]
 
 
+async def sid_validator(value: str, *, session_id: str) -> dict:
+    return {"session": value, "sid": session_id}
+
+
+def _sid_client(auth, value=VALID_COOKIE) -> TestClient:
+    """App exposing the whole session-id surface of *auth*, one cookie jar."""
+
+    def setup(app: FastAPI):
+        @app.get("/login")
+        async def login(response: Response):
+            return {"sid": auth.set_cookie(response, value)}
+
+        @app.get("/logout")
+        async def logout(request: Request, response: Response):
+            return {"sid": auth.delete_cookie(response, request)}
+
+        @app.get("/whoami")
+        async def whoami(request: Request):
+            return {"sid": auth.session_id_of(request)}
+
+        @app.get("/me")
+        async def me(user=Security(auth)):
+            return user
+
+    return TestClient(_app(setup))
+
+
+class TestCookieSessionId:
+    """Per-session identity: minted by set_cookie, read back by session_id_of."""
+
+    def _auth(self, **kwargs):
+        return APIKeyCookieAuth(
+            "session",
+            sid_validator,
+            secret_key=COOKIE_SECRET,
+            session_id=True,
+            secure=False,
+            **kwargs,
+        )
+
+    def test_sid_reaches_validator_and_value_is_intact(self):
+        with _sid_client(self._auth()) as client:
+            minted = client.get("/login").json()["sid"]
+            response = client.get("/me")
+        assert response.status_code == 200
+        assert response.json() == {"session": VALID_COOKIE, "sid": minted}
+
+    def test_value_containing_delimiter_survives_roundtrip(self):
+        """The app's payload may contain dots: only the first one splits."""
+        with _sid_client(self._auth(), "user.42:v3") as client:
+            minted = client.get("/login").json()["sid"]
+            assert client.get("/me").json() == {"session": "user.42:v3", "sid": minted}
+
+    def test_each_set_cookie_mints_a_distinct_sid(self):
+        auth = self._auth()
+        first = auth.set_cookie(Response(), VALID_COOKIE)
+        second = auth.set_cookie(Response(), VALID_COOKIE)
+        assert first != second
+
+    def test_cookie_minted_without_session_id_returns_401(self):
+        """The salt differs, so pre-upgrade cookies fail closed instead of parsing."""
+        legacy = APIKeyCookieAuth(
+            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
+        )
+        response = _client(self._auth()).get(
+            "/me", cookies={"session": legacy._sign(VALID_COOKIE)}
+        )
+        assert response.status_code == 401
+
+    def test_returns_the_minted_sid_without_clearing_the_cookie(self):
+        with _sid_client(self._auth()) as client:
+            minted = client.get("/login").json()["sid"]
+            assert client.get("/whoami").json()["sid"] == minted
+            # the whole point: readable again, so it was not a one-shot
+            assert client.get("/whoami").json()["sid"] == minted
+            assert client.cookies.get("session")
+
+    @pytest.mark.parametrize(
+        "cookies",
+        [{}, {"session": "forged"}, {"session": ""}],
+        ids=["absent", "forged", "empty"],
+    )
+    def test_returns_none_for_unusable_cookie(self, cookies):
+        client = _sid_client(self._auth())
+        assert client.get("/whoami", cookies=cookies).json()["sid"] is None
+        assert client.get("/logout", cookies=cookies).json()["sid"] is None
+
+    def test_expired_cookie_reads_as_none(self):
+        with _sid_client(self._auth(ttl=60)) as client:
+            client.get("/login")
+            with patch("time.time", return_value=time.time() + 61):
+                assert client.get("/whoami").json()["sid"] is None
+
+    def test_delete_cookie_returns_sid_for_revocation(self):
+        with _sid_client(self._auth()) as client:
+            minted = client.get("/login").json()["sid"]
+            assert client.get("/logout").json()["sid"] == minted
+
+    def test_delete_cookie_returns_none_without_request(self):
+        assert self._auth().delete_cookie(Response()) is None
+
+    def test_rotating_the_cookie_swaps_the_sid_and_keeps_the_session(self):
+        """Session-fixation defence: the newest cookie wins on the next request."""
+        with _sid_client(self._auth()) as client:
+            first = client.get("/login").json()["sid"]
+            second = client.get("/login").json()["sid"]
+            assert second != first
+            assert client.get("/me").json() == {"session": VALID_COOKIE, "sid": second}
+
+    @pytest.mark.parametrize(
+        "auth_factory",
+        [
+            lambda: APIKeyCookieAuth(
+                "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
+            ),
+            lambda: APIKeyCookieAuth("session", cookie_validator, secure=False),
+        ],
+        ids=["signed", "unsigned"],
+    )
+    def test_reads_none_when_session_id_disabled(self, auth_factory):
+        """Nothing to read, and the unsigned path must never try to verify."""
+        with _sid_client(auth_factory()) as client:
+            client.get("/login")
+            assert client.get("/whoami").json()["sid"] is None
+            assert client.get("/logout").json()["sid"] is None
+
+    def test_requires_secret_key(self):
+        with pytest.raises(ValueError, match="session_id requires secret_key"):
+            APIKeyCookieAuth("session", sid_validator, session_id=True)
+
+    def test_requires_validator_accepting_session_id(self):
+        with pytest.raises(ValueError, match="declaring a 'session_id' parameter"):
+            APIKeyCookieAuth(
+                "session", cookie_validator, secret_key=COOKIE_SECRET, session_id=True
+            )
+
+    def test_session_id_kwarg_rejected_via_require(self):
+        """'session_id' is injected, so require() cannot override it."""
+        with pytest.raises(ValueError, match="reserved"):
+            self._auth().require(session_id="forged")
+
+    def test_set_cookie_returns_none_when_disabled(self):
+        auth = APIKeyCookieAuth("session", cookie_validator, secret_key=COOKIE_SECRET)
+        assert auth.set_cookie(Response(), VALID_COOKIE) is None
+
+
+class TestCookieAccessors:
+    """name and ttl are readable so callers stop duplicating them."""
+
+    def test_name_and_ttl_are_readable(self):
+        auth = APIKeyCookieAuth("sess", cookie_validator, ttl=1234)
+        assert (auth.name, auth.ttl) == ("sess", 1234)
+
+    def test_ttl_defaults_to_24h(self):
+        assert APIKeyCookieAuth("sess", cookie_validator).ttl == 86400
+
+
 class TestCookieSecretValidation:
     """SR-M5: weak secret_key configurations must fail at startup."""
 
@@ -1130,7 +1289,7 @@ class TestCookieSecretValidation:
             APIKeyCookieAuth("session", cookie_validator, secret_key=[])
 
     def test_short_key_in_sequence_rejected(self):
-        good = "unit-test-secret-key-32-bytes-minimum!"
+        good = COOKIE_SECRET
         with pytest.raises(ValueError, match="at least 32"):
             APIKeyCookieAuth("session", cookie_validator, secret_key=[good, "short"])
 
@@ -1152,20 +1311,12 @@ class TestCookieKeyRotation:
     OLD = "old-rotation-secret-key-32-bytes-min!"
     NEW = "new-rotation-secret-key-32-bytes-min!"
 
-    def _client(self, auth) -> TestClient:
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        return TestClient(_app(setup))
-
     def test_old_cookie_still_valid_after_rotation(self):
         old_auth = APIKeyCookieAuth("session", cookie_validator, secret_key=self.OLD)
         rotated = APIKeyCookieAuth(
             "session", cookie_validator, secret_key=[self.NEW, self.OLD], secure=False
         )
-        client = self._client(rotated)
+        client = _client(rotated)
         response = client.get("/me", cookies={"session": old_auth._sign(VALID_COOKIE)})
         assert response.status_code == 200
 
@@ -1176,7 +1327,7 @@ class TestCookieKeyRotation:
         new_only = APIKeyCookieAuth(
             "session", cookie_validator, secret_key=self.NEW, secure=False
         )
-        client = self._client(new_only)
+        client = _client(new_only)
         response = client.get("/me", cookies={"session": rotated._sign(VALID_COOKIE)})
         assert response.status_code == 200
 
@@ -1185,7 +1336,7 @@ class TestCookieKeyRotation:
         new_only = APIKeyCookieAuth(
             "session", cookie_validator, secret_key=[self.NEW], secure=False
         )
-        client = self._client(new_only)
+        client = _client(new_only)
         response = client.get("/me", cookies={"session": old_auth._sign(VALID_COOKIE)})
         assert response.status_code == 401
 
@@ -1405,10 +1556,10 @@ class TestSecurityScopes:
         from collections.abc import Callable
         from typing import Any, cast
 
-        from fastapi_multiauth.abc import _accepts_scopes
+        from fastapi_multiauth.abc import _accepts_kwarg
 
         not_introspectable = cast(Callable[..., Any], object())
-        assert _accepts_scopes(not_introspectable) is False
+        assert _accepts_kwarg(not_introspectable, "scopes") is False
 
     @pytest.mark.anyio
     async def test_bearer_authenticate_passes_no_scopes(self):
@@ -2551,21 +2702,13 @@ class TestMalformedAuthorizationHeader:
 class TestWWWAuthenticate:
     """SR-L3: 401 responses carry a WWW-Authenticate challenge (RFC 7235 §4.1)."""
 
-    def _client(self, auth) -> TestClient:
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        return TestClient(_app(setup))
-
     def test_bearer_missing_credentials_has_challenge(self):
-        response = self._client(HTTPBearerAuth(simple_validator)).get("/me")
+        response = _client(HTTPBearerAuth(simple_validator)).get("/me")
         assert response.status_code == 401
         assert response.headers["WWW-Authenticate"] == "Bearer"
 
     def test_bearer_invalid_token_has_challenge(self):
-        response = self._client(HTTPBearerAuth(simple_validator)).get(
+        response = _client(HTTPBearerAuth(simple_validator)).get(
             "/me", headers={"Authorization": "Bearer wrong"}
         )
         assert response.status_code == 401
@@ -2579,7 +2722,7 @@ class TestWWWAuthenticate:
                 headers={"WWW-Authenticate": 'Bearer error="invalid_token"'}
             )
 
-        response = self._client(HTTPBearerAuth(strict_validator)).get(
+        response = _client(HTTPBearerAuth(strict_validator)).get(
             "/me", headers={"Authorization": "Bearer whatever"}
         )
         assert response.status_code == 401
@@ -2587,16 +2730,12 @@ class TestWWWAuthenticate:
 
     def test_cookie_401_has_no_challenge(self):
         """No registered HTTP auth scheme exists for cookies."""
-        response = self._client(APIKeyCookieAuth("session", cookie_validator)).get(
-            "/me"
-        )
+        response = _client(APIKeyCookieAuth("session", cookie_validator)).get("/me")
         assert response.status_code == 401
         assert "WWW-Authenticate" not in response.headers
 
     def test_api_key_401_has_no_challenge(self):
-        response = self._client(APIKeyHeaderAuth("X-API-Key", simple_validator)).get(
-            "/me"
-        )
+        response = _client(APIKeyHeaderAuth("X-API-Key", simple_validator)).get("/me")
         assert response.status_code == 401
         assert "WWW-Authenticate" not in response.headers
 
@@ -2605,7 +2744,7 @@ class TestWWWAuthenticate:
             HTTPBearerAuth(simple_validator),
             APIKeyCookieAuth("session", cookie_validator),
         )
-        response = self._client(multi).get("/me")
+        response = _client(multi).get("/me")
         assert response.status_code == 401
         assert response.headers["WWW-Authenticate"] == "Bearer"
 
@@ -2614,7 +2753,7 @@ class TestWWWAuthenticate:
             HTTPBearerAuth(simple_validator, prefix="user_"),
             HTTPBearerAuth(simple_validator, prefix="org_"),
         )
-        response = self._client(multi).get("/me")
+        response = _client(multi).get("/me")
         assert response.headers["WWW-Authenticate"] == "Bearer"
 
     def test_multiauth_matched_source_challenge_on_invalid(self):
@@ -2623,23 +2762,13 @@ class TestWWWAuthenticate:
             APIKeyCookieAuth("session", cookie_validator),
             HTTPBearerAuth(simple_validator),
         )
-        response = self._client(multi).get(
-            "/me", headers={"Authorization": "Bearer wrong"}
-        )
+        response = _client(multi).get("/me", headers={"Authorization": "Bearer wrong"})
         assert response.status_code == 401
         assert response.headers["WWW-Authenticate"] == "Bearer"
 
 
 class TestHttpSemantics:
     """2.3: 401 = absent/invalid credentials, 403 = authenticated but denied."""
-
-    def _client(self, auth) -> TestClient:
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        return TestClient(_app(setup))
 
     @pytest.mark.parametrize(
         "auth_factory",
@@ -2651,7 +2780,7 @@ class TestHttpSemantics:
         ],
     )
     def test_absent_credentials_return_401(self, auth_factory):
-        response = self._client(auth_factory()).get("/me")
+        response = _client(auth_factory()).get("/me")
         assert response.status_code == 401
 
     def test_forbidden_error_returns_403(self):
@@ -2662,7 +2791,7 @@ class TestHttpSemantics:
                 raise UnauthorizedError()
             raise ForbiddenError("admin role required")
 
-        response = self._client(HTTPBearerAuth(admin_only)).get(
+        response = _client(HTTPBearerAuth(admin_only)).get(
             "/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
         )
         assert response.status_code == 403
@@ -2816,7 +2945,7 @@ class TestSecurityInvariants:
 
     def test_cookie_expiry_is_inside_signed_payload(self):
         """The timestamp is covered by the signature: it cannot be extended."""
-        secret = "unit-test-secret-key-32-bytes-minimum!"
+        secret = COOKIE_SECRET
         auth = APIKeyCookieAuth("session", cookie_validator, secret_key=secret, ttl=60)
         signed = auth._sign(VALID_COOKIE)
         value, timestamp, signature = signed.rsplit(".", 2)
@@ -3254,14 +3383,6 @@ class TestJWTValidatorJWKS:
 
 
 class TestBasicAuth:
-    def _client(self, auth) -> TestClient:
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        return TestClient(_app(setup))
-
     @staticmethod
     def _header(username: str, password: str) -> dict:
         blob = base64.b64encode(f"{username}:{password}".encode()).decode()
@@ -3274,40 +3395,40 @@ class TestBasicAuth:
         return {"user": username}
 
     def test_valid_credentials(self):
-        client = self._client(HTTPBasicAuth(self._validator))
+        client = _client(HTTPBasicAuth(self._validator))
         response = client.get("/me", headers=self._header("alice", "wonderland"))
         assert response.status_code == 200
         assert response.json() == {"user": "alice"}
 
     def test_wrong_password_returns_401(self):
-        client = self._client(HTTPBasicAuth(self._validator))
+        client = _client(HTTPBasicAuth(self._validator))
         response = client.get("/me", headers=self._header("alice", "nope"))
         assert response.status_code == 401
 
     def test_missing_header_401_with_challenge(self):
-        client = self._client(HTTPBasicAuth(self._validator))
+        client = _client(HTTPBasicAuth(self._validator))
         response = client.get("/me")
         assert response.status_code == 401
         assert response.headers["WWW-Authenticate"] == "Basic"
 
     def test_realm_in_challenge(self):
-        client = self._client(HTTPBasicAuth(self._validator, realm="api"))
+        client = _client(HTTPBasicAuth(self._validator, realm="api"))
         response = client.get("/me")
         assert response.headers["WWW-Authenticate"] == 'Basic realm="api"'
 
     def test_scheme_case_insensitive(self):
-        client = self._client(HTTPBasicAuth(self._validator))
+        client = _client(HTTPBasicAuth(self._validator))
         blob = base64.b64encode(b"alice:wonderland").decode()
         response = client.get("/me", headers={"Authorization": f"basic {blob}"})
         assert response.status_code == 200
 
     def test_invalid_base64_returns_401(self):
-        client = self._client(HTTPBasicAuth(self._validator))
+        client = _client(HTTPBasicAuth(self._validator))
         response = client.get("/me", headers={"Authorization": "Basic !!!"})
         assert response.status_code == 401
 
     def test_missing_colon_returns_401(self):
-        client = self._client(HTTPBasicAuth(self._validator))
+        client = _client(HTTPBasicAuth(self._validator))
         blob = base64.b64encode(b"alicewonderland").decode()
         response = client.get("/me", headers={"Authorization": f"Basic {blob}"})
         assert response.status_code == 401
@@ -3319,7 +3440,7 @@ class TestBasicAuth:
             received.append((username, password))
             return {"user": username}
 
-        client = self._client(HTTPBasicAuth(capturing))
+        client = _client(HTTPBasicAuth(capturing))
         response = client.get("/me", headers=self._header("alice", ""))
         assert response.status_code == 200
         assert received == [("alice", "")]
@@ -3328,13 +3449,13 @@ class TestBasicAuth:
         async def utf8_validator(username: str, password: str) -> dict:
             return {"user": username, "pw": password}
 
-        client = self._client(HTTPBasicAuth(utf8_validator))
+        client = _client(HTTPBasicAuth(utf8_validator))
         response = client.get("/me", headers=self._header("aliçé", "pässwörd"))
         assert response.status_code == 200
         assert response.json() == {"user": "aliçé", "pw": "pässwörd"}
 
     def test_wrong_scheme_returns_401(self):
-        client = self._client(HTTPBasicAuth(self._validator))
+        client = _client(HTTPBasicAuth(self._validator))
         response = client.get("/me", headers={"Authorization": "Bearer token"})
         assert response.status_code == 401
 
@@ -3347,8 +3468,8 @@ class TestBasicAuth:
             {"Authorization": "Basic !!!"},
         ]
         for headers in cases:
-            direct = self._client(auth).get("/me", headers=headers)
-            multi = self._client(MultiAuth(auth)).get("/me", headers=headers)
+            direct = _client(auth).get("/me", headers=headers)
+            multi = _client(MultiAuth(auth)).get("/me", headers=headers)
             assert direct.status_code == multi.status_code
 
     def test_openapi_scheme_documented(self):
@@ -3390,7 +3511,7 @@ class TestBasicAuth:
         auth = HTTPBasicAuth(role_basic)
         derived = auth.require(role="admin")
         assert derived is not auth
-        client = self._client(derived)
+        client = _client(derived)
         response = client.get("/me", headers=self._header("alice", "x"))
         assert response.json() == {"user": "alice", "role": "admin"}
 

@@ -77,7 +77,7 @@ async def me(user=Security(auth)):
 - **`MultiAuth`**: try several sources in order on a single route (e.g. web session cookie + API bearer token), with all schemes documented in OpenAPI.
 - **Built-in sources**: covering the standard `fastapi.security` schemes:
     - **`HTTPBearerAuth`**: bearer tokens with optional Stripe-style `user_`/`org_` prefixes to route different token types to different validators, plus `generate_token()` for secure token creation.
-    - **`APIKeyCookieAuth`**: cookie sessions with optional HMAC-SHA256 signing (via [itsdangerous](https://itsdangerous.palletsprojects.com/)), embedded expiry, and key rotation.
+    - **`APIKeyCookieAuth`**: cookie sessions with optional HMAC-SHA256 signing (via [itsdangerous](https://itsdangerous.palletsprojects.com/)), embedded expiry, key rotation, and optional per-session ids so your app can list and revoke sessions individually.
     - **`APIKeyHeaderAuth`**: `X-API-Key`-style schemes, with **`APIKeyQueryAuth`** for legacy clients that can only pass a query parameter.
     - **`HTTPBasicAuth`**: `validator(username, password)` with `WWW-Authenticate` realm support.
 - **Token hashing helpers**: `hash_token`/`verify_token_hash` package the "store the hash, never the token" pattern with constant-time comparison.
