@@ -15,6 +15,7 @@ import respx
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI, HTTPException, Request, Response, Security
 from fastapi.testclient import TestClient
+from itsdangerous import TimestampSigner
 from jwt.algorithms import RSAAlgorithm
 
 from fastapi_multiauth import (
@@ -1339,6 +1340,45 @@ class TestCookieKeyRotation:
         client = _client(new_only)
         response = client.get("/me", cookies={"session": old_auth._sign(VALID_COOKIE)})
         assert response.status_code == 401
+
+
+class TestCookieSignerWireFormat:
+    """Cookies stay byte-compatible with a stock signer despite precomputed keys."""
+
+    OLD = "old-rotation-secret-key-32-bytes-min!"
+    NEW = "new-rotation-secret-key-32-bytes-min!"
+
+    def _stock(self, *keys: str) -> TimestampSigner:
+        return TimestampSigner(
+            list(keys),
+            salt="fastapi-multiauth.cookie.session",
+            digest_method=hashlib.sha256,
+        )
+
+    def test_stock_signer_accepts_our_cookie(self):
+        auth = APIKeyCookieAuth("session", cookie_validator, secret_key=self.NEW)
+        signed = auth._sign(VALID_COOKIE).encode()
+        assert (
+            self._stock(self.NEW).unsign(signed, max_age=86400) == VALID_COOKIE.encode()
+        )
+
+    def test_we_accept_a_stock_cookie_from_the_rotated_out_key(self):
+        auth = APIKeyCookieAuth(
+            "session", cookie_validator, secret_key=[self.NEW, self.OLD]
+        )
+        signed = self._stock(self.OLD).sign(VALID_COOKIE.encode()).decode()
+        assert auth._verify(signed) == VALID_COOKIE
+
+    def test_session_id_salt_still_separates_the_two_layouts(self):
+        auth = APIKeyCookieAuth(
+            "session",
+            sid_validator,
+            secret_key=self.NEW,
+            session_id=True,
+        )
+        signed = self._stock(self.NEW).sign(VALID_COOKIE.encode()).decode()
+        with pytest.raises(UnauthorizedError):
+            auth._verify(signed)
 
 
 class TestSecurityScopes:
