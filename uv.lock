@@ -437,7 +437,7 @@ tests = [
 requires-dist = [
     { name = "anyio", specifier = ">=3.7" },
     { name = "async-lru", specifier = ">=2.0" },
-    { name = "fastapi", specifier = ">=0.100.0" },
+    { name = "fastapi", specifier = ">=0.108.0" },
     { name = "httpx", specifier = ">=0.25.0" },
     { name = "httpx-oauth", marker = "extra == 'oauth'", specifier = ">=0.16" },
     { name = "itsdangerous", specifier = ">=2.1" },
