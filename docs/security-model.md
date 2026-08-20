@@ -43,7 +43,7 @@ Signed is not encrypted. The signed cookie payload and JWT claims are **readable
 ## OAuth / OIDC flow requirements
 
 - `discovery_url`, `token_url`, `userinfo_url`, `jwks_url` must be HTTPS (loopback hosts excepted). The discovery URL must be **config-only**: deriving it from request input opens SSRF and cache poisoning.
-- The discovery document's `issuer` must match the URL it was fetched from.
+- The discovery document's `issuer` is always checked, and a document with no `issuer` is refused. On the standard `/.well-known/openid-configuration` path the expected issuer is derived from the URL exactly (query strings and fragments ignored, so provider-specific parameters such as Azure AD B2C's `?p=` do not weaken the check). A provider serving discovery from a non-standard path leaves nothing exact to derive, so the issuer is instead held to the origin the document was fetched from: still enough to refuse a document claiming to speak for another host.
 - `state` carries a CSRF token (constant-time verified, single-use, delete it from the session after the callback) and the post-login destination (allowlist-checked by default).
 - PKCE (S256) is supported and recommended for every client, including confidential ones (OAuth 2.1 / RFC 9700).
 - All network calls run under explicit timeouts (10 s default).
