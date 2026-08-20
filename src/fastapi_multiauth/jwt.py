@@ -256,5 +256,10 @@ class JWTValidator:
                 # provider's JWKS must not take down every login.
                 continue
             keys[entry.get("kid") or ""] = key
+        if not keys:
+            raise _JWKSFetchError(
+                f"JWKS document has no usable signing key "
+                f"({len(document['keys'])} entries)"
+            )
         self._keys = keys
         self._fetched_at = time.monotonic()

@@ -291,7 +291,7 @@ async def me(claims=Security(bearer)):
     return claims
 ```
 
-Signing keys are fetched over HTTPS with a timeout, cached for an hour, and refreshed once when a token carries an unknown `kid`: provider key rotation needs no restart. Symmetric mode is `JWTValidator(secret=...)` (HS256, secret ≥ 32 bytes); `HS*` algorithms are rejected in JWKS mode to close the classic key-confusion attack.
+Signing keys are fetched over HTTPS with a timeout, cached for an hour, and refreshed once when a token carries an unknown `kid`: provider key rotation needs no restart. A provider that breaks does not take your API down with it: whether the endpoint is unreachable, errors, or answers with a document carrying no usable key, the cached keys keep serving and the refresh is retried under a cooldown. Only a cold start with nothing cached fails, and it fails as a 503 rather than a 401, so clients retry instead of discarding valid tokens. Symmetric mode is `JWTValidator(secret=...)` (HS256, secret ≥ 32 bytes); `HS*` algorithms are rejected in JWKS mode to close the classic key-confusion attack.
 
 Every token is checked for signature, `exp`/`nbf`/`iat` (with configurable `leeway`), `aud`/`iss` when configured, and `exp` is **required** by default; pass `required_claims=()` if your provider really issues non-expiring tokens.
 
