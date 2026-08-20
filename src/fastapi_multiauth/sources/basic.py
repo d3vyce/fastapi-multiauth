@@ -13,6 +13,20 @@ from ..abc import ValidatedAuthSource
 from ..utils import authorization_credential
 
 
+def _basic_challenge(realm: str | None) -> str:
+    """Build the ``WWW-Authenticate`` challenge, escaping *realm* (RFC 7230 §3.2.6)."""
+    if realm is None:
+        return "Basic"
+    if not (realm.isascii() and realm.isprintable()):
+        raise ValueError(
+            f"realm must be printable US-ASCII (RFC 7617 §2.1), got {realm!r}: "
+            "control characters have no escaped form in a quoted-string, and "
+            "non-ASCII cannot be carried in a header value"
+        )
+    escaped = realm.replace("\\", "\\\\").replace('"', '\\"')
+    return f'Basic realm="{escaped}"'
+
+
 class HTTPBasicAuth(ValidatedAuthSource):
     """HTTP Basic authentication source (wraps ``HTTPBasic`` for OpenAPI, RFC 7617).
 
@@ -23,7 +37,7 @@ class HTTPBasicAuth(ValidatedAuthSource):
         validator: Sync or async callable receiving ``(username, password)`` and
             returning the identity; raises
             :class:`~fastapi_multiauth.exceptions.UnauthorizedError` on failure.
-        realm: Optional protection-space name for the ``WWW-Authenticate`` challenge.
+        realm: Optional protection-space name for the ``WWW-Authenticate``.
         scheme_name: OpenAPI security scheme name (default ``HTTPBasic``).
         **kwargs: Extra keyword arguments forwarded to the validator on every call.
     """
@@ -36,7 +50,7 @@ class HTTPBasicAuth(ValidatedAuthSource):
         scheme_name: str | None = None,
         **kwargs: Any,
     ) -> None:
-        self._realm = realm
+        self._challenge = _basic_challenge(realm)
         super().__init__(
             validator,
             HTTPBasic(auto_error=False, scheme_name=scheme_name),
@@ -45,9 +59,7 @@ class HTTPBasicAuth(ValidatedAuthSource):
 
     def www_authenticate(self) -> str:
         """``Basic`` challenge, with the realm when configured (RFC 7617 §2)."""
-        if self._realm is not None:
-            return f'Basic realm="{self._realm}"'
-        return "Basic"
+        return self._challenge
 
     async def extract(self, request: Request) -> str | None:
         """Return the base64 credentials blob, or ``None`` when absent or empty.
