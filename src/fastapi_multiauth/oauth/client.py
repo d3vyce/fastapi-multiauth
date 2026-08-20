@@ -3,6 +3,7 @@
 import contextlib
 import functools
 from typing import Any, Literal, NamedTuple
+from urllib.parse import urlsplit
 
 import httpx
 from async_lru import alru_cache
@@ -41,13 +42,25 @@ class OIDCEndpoints(NamedTuple):
 
 def _validate_issuer(discovery_url: str, issuer: Any) -> None:
     """Check the discovery document claims the issuer it was fetched from."""
-    if not discovery_url.endswith(_DISCOVERY_SUFFIX):
-        return
-    expected = discovery_url.removesuffix(_DISCOVERY_SUFFIX).rstrip("/")
-    if not isinstance(issuer, str) or issuer.rstrip("/") != expected:
+    if not isinstance(issuer, str) or not issuer:
         raise OAuthDiscoveryError(
-            f"discovery document issuer {issuer!r} does not match the "
-            f"expected issuer {expected!r} derived from the discovery URL"
+            f"discovery document has no usable 'issuer' (got {issuer!r})"
+        )
+    claimed = issuer.rstrip("/")
+    parts = urlsplit(discovery_url)
+    origin = f"{parts.scheme}://{parts.netloc}"
+    path = parts.path.rstrip("/")
+    if path.endswith(_DISCOVERY_SUFFIX):
+        expected = (origin + path.removesuffix(_DISCOVERY_SUFFIX)).rstrip("/")
+        if claimed != expected:
+            raise OAuthDiscoveryError(
+                f"discovery document issuer {issuer!r} does not match the "
+                f"expected issuer {expected!r} derived from the discovery URL"
+            )
+    elif claimed != origin and not claimed.startswith(f"{origin}/"):
+        raise OAuthDiscoveryError(
+            f"discovery document issuer {issuer!r} is not served by "
+            f"{origin!r}, the origin the document was fetched from"
         )
 
 

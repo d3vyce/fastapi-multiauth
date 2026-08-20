@@ -1876,7 +1876,8 @@ class TestBuildAuthorizationRedirect:
         assert params["client_id"] == ["my-client"]
 
 
-DISCOVERY_URL = "https://auth.example.com/.well-known/openid-configuration"
+_WELL_KNOWN = "/.well-known/openid-configuration"
+DISCOVERY_URL = f"https://auth.example.com{_WELL_KNOWN}"
 
 
 def _discovery_doc(*, userinfo=True, **overrides):
@@ -2115,17 +2116,81 @@ class TestOAuthHttpsEnforcement:
 
     @pytest.mark.anyio
     @respx.mock
-    async def test_nonstandard_discovery_url_skips_issuer_check(self):
-        """No expected issuer can be derived from a non-standard layout."""
-        respx.get("https://auth.example.com/custom/discovery.json").respond(
+    @pytest.mark.parametrize(
+        "url",
+        [
+            f"{DISCOVERY_URL}?p=B2C_1_signin",  # Azure AD B2C policy parameter
+            f"{DISCOVERY_URL}/",  # trailing slash
+        ],
+    )
+    async def test_issuer_checked_whatever_follows_the_wellknown_path(self, url):
+        """Query strings and trailing slashes must not skip the issuer check."""
+        respx.get(url).respond(
+            json=_discovery_doc(issuer="https://attacker.example.com")
+        )
+
+        oauth_resolve_provider_urls.cache_clear()
+        with pytest.raises(OAuthDiscoveryError, match="issuer"):
+            await oauth_resolve_provider_urls(url)
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_issuer_accepted_alongside_a_query_string(self):
+        """The honest Azure-style URL still resolves."""
+        url = f"{DISCOVERY_URL}?p=B2C_1_signin"
+        respx.get(url).respond(json=_discovery_doc())
+
+        oauth_resolve_provider_urls.cache_clear()
+        endpoints = await oauth_resolve_provider_urls(url)
+        assert endpoints.issuer == "https://auth.example.com"
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_nonstandard_discovery_url_rejects_foreign_issuer(self):
+        """Nothing exact can be derived, but another host is still refused."""
+        url = "https://auth.example.com/custom/discovery.json"
+        respx.get(url).respond(
             json=_discovery_doc(issuer="https://unrelated.example.com")
         )
 
         oauth_resolve_provider_urls.cache_clear()
-        endpoints = await oauth_resolve_provider_urls(
-            "https://auth.example.com/custom/discovery.json"
+        with pytest.raises(OAuthDiscoveryError, match="origin"):
+            await oauth_resolve_provider_urls(url)
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_nonstandard_discovery_url_accepts_same_origin_issuer(self):
+        url = "https://auth.example.com/custom/discovery.json"
+        respx.get(url).respond(
+            json=_discovery_doc(issuer="https://auth.example.com/t1")
         )
-        assert endpoints.token_endpoint == "https://auth.example.com/token"
+
+        oauth_resolve_provider_urls.cache_clear()
+        endpoints = await oauth_resolve_provider_urls(url)
+        assert endpoints.issuer == "https://auth.example.com/t1"
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_nonstandard_discovery_url_still_requires_an_issuer(self):
+        url = "https://auth.example.com/custom/discovery.json"
+        doc = _discovery_doc()
+        del doc["issuer"]
+        respx.get(url).respond(json=doc)
+
+        oauth_resolve_provider_urls.cache_clear()
+        with pytest.raises(OAuthDiscoveryError, match="issuer"):
+            await oauth_resolve_provider_urls(url)
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_issuer_embedded_in_an_attacker_url_path_rejected(self):
+        """The expectation comes from the whole URL, not a substring of it."""
+        url = f"https://attacker.example.com/https://auth.example.com{_WELL_KNOWN}"
+        respx.get(url).respond(json=_discovery_doc())
+
+        oauth_resolve_provider_urls.cache_clear()
+        with pytest.raises(OAuthDiscoveryError, match="issuer"):
+            await oauth_resolve_provider_urls(url)
 
     @pytest.mark.anyio
     @respx.mock
