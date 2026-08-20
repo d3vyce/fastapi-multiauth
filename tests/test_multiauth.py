@@ -3514,6 +3514,40 @@ class TestJWTValidatorJWKS:
 
     @pytest.mark.anyio
     @respx.mock
+    @pytest.mark.parametrize(
+        "document",
+        [
+            {"keys": []},
+            {"keys": [_jwk(_RSA_KEY_1, "key1", use="enc")]},
+            {"keys": [{"kty": "RSA", "kid": "key1"}]},
+        ],
+        ids=["empty", "encryption-only", "unparseable"],
+    )
+    async def test_unusable_jwks_falls_back_to_cached_keys(self, document):
+        """A 200 carrying no usable key is a broken provider, like a 500 is."""
+        route = respx.get(self.JWKS_URL)
+        route.side_effect = [
+            httpx.Response(200, json={"keys": [_jwk(_RSA_KEY_1, "key1")]}),
+            httpx.Response(200, json=document),
+        ]
+        validator = self._validator(jwks_cache_ttl=0, jwks_refresh_cooldown=0)
+        token = self._rs_token()
+        assert (await validator(token))["sub"] == "user-1"
+        assert (await validator(token))["sub"] == "user-1"
+        assert route.call_count == 2
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_unusable_jwks_cold_start_returns_503(self):
+        """With nothing cached to fall back on, it is still 503, not 401."""
+        respx.get(self.JWKS_URL).respond(json={"keys": []})
+        validator = self._validator()
+        with pytest.raises(HTTPException) as exc_info:
+            await validator(self._rs_token())
+        assert exc_info.value.status_code == 503
+
+    @pytest.mark.anyio
+    @respx.mock
     async def test_failed_fetch_retries_are_rate_limited(self):
         """A down provider is not hammered once per request."""
         route = respx.get(self.JWKS_URL).respond(500)
