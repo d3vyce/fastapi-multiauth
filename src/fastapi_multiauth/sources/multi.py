@@ -1,14 +1,14 @@
 """MultiAuth: combine multiple authentication sources into a single callable."""
 
 import inspect
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
-from fastapi import Request
+from fastapi import Depends, Request
 from fastapi.security import SecurityScopes
 
 from fastapi_multiauth.exceptions import UnauthorizedError
 
-from ..abc import AuthSource
+from ..abc import AuthSource, _carry_scheme
 from ..utils import challenge_headers
 
 
@@ -39,10 +39,6 @@ class MultiAuth:
                 )
         self._sources = sources
 
-        # Build a merged signature that includes the security-scheme Depends()
-        # parameters from every source so FastAPI registers them in OpenAPI
-        # docs. Parameters are renamed `_s{i}_{name}` — unique per source
-        # index — so two sources of the same type both keep their scheme.
         merged: list[inspect.Parameter] = [
             inspect.Parameter(
                 "request",
@@ -55,11 +51,20 @@ class MultiAuth:
                 annotation=SecurityScopes,
             ),
         ]
+        carried = sources[0].scheme if sources else None
+        if carried is not None:
+            _carry_scheme(self, carried)
         for i, source in enumerate(sources):
-            for name, param in inspect.signature(source).parameters.items():
-                if name in ("request", "security_scopes"):
-                    continue
-                merged.append(param.replace(name=f"_s{i}_{name}"))
+            if source.scheme is None or (i == 0 and carried is not None):
+                continue
+            merged.append(
+                inspect.Parameter(
+                    f"_s{i}_credentials",
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    annotation=Annotated[Any, Depends(cast(Any, source.scheme))],
+                    default=None,
+                )
+            )
         self.__signature__ = inspect.Signature(merged, return_annotation=Any)
 
         # The combined challenge is fixed once the sources are known; build it
