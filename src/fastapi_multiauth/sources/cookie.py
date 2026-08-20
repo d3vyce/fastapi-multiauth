@@ -36,6 +36,16 @@ def _normalize_secret_keys(secret_key: str | Sequence[str] | None) -> list[str]:
     return keys
 
 
+def _precomputed_signer(keys: list[str], salt: str) -> TimestampSigner:
+    """A ``TimestampSigner`` deriving its keys once here instead of per ``unsign``."""
+    probe = TimestampSigner(keys, salt=salt, digest_method=hashlib.sha256)
+    return TimestampSigner(
+        [probe.derive_key(key) for key in keys],
+        digest_method=hashlib.sha256,
+        key_derivation="none",
+    )
+
+
 class APIKeyCookieAuth(ValidatedAuthSource):
     """Cookie-based authentication source (wraps ``APIKeyCookie`` for OpenAPI).
 
@@ -98,10 +108,9 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         # the last one — reverse so the first configured key is the signer.
         # The salt also separates the two payload layouts.
         self._signer = (
-            TimestampSigner(
+            _precomputed_signer(
                 list(reversed(self._secret_keys)),
-                salt=f"{_SALT_PREFIX}{name}{'.sid' if session_id else ''}",
-                digest_method=hashlib.sha256,
+                f"{_SALT_PREFIX}{name}{'.sid' if session_id else ''}",
             )
             if self._secret_keys
             else None
