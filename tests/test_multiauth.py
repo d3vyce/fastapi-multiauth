@@ -31,6 +31,7 @@ from fastapi_multiauth import (
     hash_token,
     verify_token_hash,
 )
+from fastapi_multiauth.abc import _DocOnlyScheme
 from fastapi_multiauth.exceptions import UnauthorizedError
 from fastapi_multiauth.oauth import (
     OAuthDiscoveryError,
@@ -2917,6 +2918,42 @@ class TestOpenAPIDocumentation:
         assert schemes["APIKeyHeader_X-Org-Key"]["name"] == "X-Org-Key"
 
 
+class TestSchemeIsNotAPerRequestDependency:
+    """Doc-only schemes reach OpenAPI without being resolved on every request."""
+
+    @staticmethod
+    def _resolved(auth, monkeypatch) -> list[str]:
+        resolved: list[str] = []
+
+        async def counting(self, request: Request) -> None:
+            resolved.append(self.scheme_name)
+
+        monkeypatch.setattr(_DocOnlyScheme, "__call__", counting)
+        response = _client(auth).get(
+            "/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+        )
+        assert response.status_code == 200
+        return resolved
+
+    def test_single_source_resolves_no_scheme(self, monkeypatch):
+        auth = HTTPBearerAuth(simple_validator)
+        assert self._resolved(auth, monkeypatch) == []
+
+    def test_multiauth_resolves_one_scheme_per_source_after_the_first(
+        self, monkeypatch
+    ):
+        """The first source's scheme rides on MultiAuth's own dependency."""
+        multi = MultiAuth(
+            HTTPBearerAuth(simple_validator),
+            APIKeyHeaderAuth("X-API-Key", simple_validator),
+            APIKeyCookieAuth("session", cookie_validator),
+        )
+        assert self._resolved(multi, monkeypatch) == [
+            "APIKeyHeader_X-API-Key",
+            "APIKeyCookie_session",
+        ]
+
+
 class TestTokenHelpers:
     """2.2: store the hash, never the token."""
 
@@ -3653,6 +3690,7 @@ class TestCallableInstanceValidator:
         response = client.get("/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
         assert response.status_code == 200
 
+    @pytest.mark.anyio
     async def test_sync_validator_runs_in_worker_thread(self):
         """A blocking sync validator must not run on the event loop."""
         import threading

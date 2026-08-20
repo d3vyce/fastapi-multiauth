@@ -4,9 +4,9 @@ import copy
 import inspect
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Any
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import HTTPException, Request
 from fastapi.security import SecurityScopes
 from fastapi.security.base import SecurityBase
 
@@ -72,6 +72,24 @@ class _DocOnlyScheme(SecurityBase):
         return None
 
 
+_SCHEME_CLASSES: dict[type, type] = {}
+
+
+def _carry_scheme(dependency: Any, scheme: SecurityBase) -> None:
+    """Make *dependency* itself the security scheme FastAPI puts in OpenAPI."""
+    cls = type(dependency)
+    promoted = _SCHEME_CLASSES.get(cls)
+    if promoted is None:
+        promoted = _SCHEME_CLASSES[cls] = type(
+            cls.__name__,
+            (cls, SecurityBase),
+            {"__module__": cls.__module__, "__doc__": cls.__doc__},
+        )
+    dependency.__class__ = promoted
+    dependency.model = scheme.model
+    dependency.scheme_name = scheme.scheme_name
+
+
 class AuthSource(ABC):
     """Abstract base class for authentication sources.
 
@@ -90,6 +108,8 @@ class AuthSource(ABC):
                 metadata is used, extraction always goes through :meth:`extract`.
         """
         self.scheme = _DocOnlyScheme(scheme) if scheme is not None else None
+        if self.scheme is not None:
+            _carry_scheme(self, self.scheme)
 
         parameters = [
             inspect.Parameter(
@@ -103,17 +123,6 @@ class AuthSource(ABC):
                 annotation=SecurityScopes,
             ),
         ]
-        if self.scheme is not None:
-            # Declared only so the scheme is registered in OpenAPI; the
-            # extracted value is ignored in favor of extract().
-            parameters.append(
-                inspect.Parameter(
-                    "credentials",
-                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                    annotation=Annotated[Any, Depends(self.scheme)],
-                    default=None,
-                )
-            )
         self.__signature__ = inspect.Signature(parameters, return_annotation=Any)
 
     @abstractmethod
