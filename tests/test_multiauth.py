@@ -3592,6 +3592,30 @@ class TestBasicAuth:
         response = client.get("/me")
         assert response.headers["WWW-Authenticate"] == 'Basic realm="api"'
 
+    def test_realm_quotes_and_backslashes_escaped(self):
+        """RFC 7230 §3.2.6: the realm is a quoted-string, so it must be escaped."""
+        client = _client(HTTPBasicAuth(self._validator, realm=r'ev"il\path'))
+        response = client.get("/me")
+        assert response.headers["WWW-Authenticate"] == r'Basic realm="ev\"il\\path"'
+
+    def test_realm_cannot_smuggle_a_second_challenge(self):
+        """An unescaped quote would end the quoted-string and start new params."""
+        realm = 'a", charset="UTF-8'
+        client = _client(HTTPBasicAuth(self._validator, realm=realm))
+        challenge = client.get("/me").headers["WWW-Authenticate"]
+        assert challenge == r'Basic realm="a\", charset=\"UTF-8"'
+        assert "charset" not in challenge.split('"')[0]
+
+    @pytest.mark.parametrize(
+        "realm",
+        ["x\r\nX-Injected: yes", "x\ny", "a\x00b", "a\x7fb", "a\tb", "caf\u00e9"],
+        ids=["crlf", "lf", "nul", "del", "tab", "non-ascii"],
+    )
+    def test_unsendable_realm_rejected_at_construction(self, realm):
+        """h11 refuses control characters; non-ASCII cannot survive a header."""
+        with pytest.raises(ValueError, match="printable US-ASCII"):
+            HTTPBasicAuth(self._validator, realm=realm)
+
     def test_scheme_case_insensitive(self):
         client = _client(HTTPBasicAuth(self._validator))
         blob = base64.b64encode(b"alice:wonderland").decode()
