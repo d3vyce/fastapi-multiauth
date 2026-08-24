@@ -8,7 +8,7 @@ from fastapi.security import SecurityScopes
 
 from fastapi_multiauth.exceptions import UnauthorizedError
 
-from ..abc import AuthSource, _carry_scheme
+from ..abc import AuthSource, _anonymous_scopes_error, _carry_scheme
 from ..utils import challenge_headers
 
 
@@ -24,6 +24,8 @@ class MultiAuth:
     Raises:
         TypeError: If a source is not an :class:`AuthSource` instance.
     """
+
+    _optional: bool = False
 
     def __init__(self, *sources: AuthSource) -> None:
         for source in sources:
@@ -84,8 +86,16 @@ class MultiAuth:
         """Combined challenge of all sources (RFC 9110 §11.6.1), or ``None``."""
         return self._www_authenticate
 
+    def optional(self) -> "MultiAuth":
+        """Return a copy that yields ``None`` when no source has a credential."""
+        clone = MultiAuth(*self._sources)
+        clone._optional = True
+        return clone
+
     async def dispatch(self, request: Request, scopes: list[str]) -> Any:
         """Authenticate with the first source whose credential is present."""
+        if self._optional and scopes:
+            raise _anonymous_scopes_error(self, scopes)
         if scopes and self._unenforceable:
             raise RuntimeError(
                 f"MultiAuth cannot enforce the security scopes {scopes!r} "
@@ -99,6 +109,8 @@ class MultiAuth:
             credential = await source.extract(request)
             if credential is not None:
                 return await source._authenticate_with_challenge(credential, scopes)
+        if self._optional:
+            return None
         raise UnauthorizedError(headers=challenge_headers(self.www_authenticate()))
 
     async def __call__(self, **kwargs: Any) -> Any:
@@ -112,4 +124,6 @@ class MultiAuth:
             else source
             for source in self._sources
         )
-        return MultiAuth(*new_sources)
+        clone = MultiAuth(*new_sources)
+        clone._optional = self._optional
+        return clone

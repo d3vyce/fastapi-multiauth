@@ -3957,13 +3957,13 @@ def test_multiauth_scopes_fail_closed_on_every_credential():
         async def plain_route(user=Security(mixed)):
             return user
 
-    client = TestClient(_app(routes), raise_server_exceptions=False)
+    client = TestClient(_app(routes))
 
     # Both credentials fail the scoped route, not just the one that cannot check.
-    assert (
-        client.get("/scoped", headers={"Authorization": "Bearer a"}).status_code == 500
-    )
-    assert client.get("/scoped", headers={"X-Legacy": "a"}).status_code == 500
+    with pytest.raises(RuntimeError, match="cannot enforce the security scopes"):
+        client.get("/scoped", headers={"Authorization": "Bearer a"})
+    with pytest.raises(RuntimeError, match="cannot enforce the security scopes"):
+        client.get("/scoped", headers={"X-Legacy": "a"})
 
     # A route declaring no scopes is unaffected: mixing sources stays legal.
     assert client.get("/plain", headers={"Authorization": "Bearer a"}).json() == {
@@ -3995,3 +3995,173 @@ def test_multiauth_scopes_pass_when_every_source_can_check():
     }
     assert client.get("/scoped", headers={"X-Key": "a"}).json() == {"who": "a"}
     assert client.get("/denied", headers={"X-Key": "a"}).status_code == 403
+
+
+class TestOptionalAuth:
+    """optional(): absent credential yields None, invalid one still raises."""
+
+    @staticmethod
+    def _routes(auth):
+        def setup(app: FastAPI):
+            @app.get("/maybe")
+            async def maybe(user=Security(auth.optional())):
+                return {"user": user}
+
+            @app.get("/strict")
+            async def strict(user=Security(auth)):
+                return {"user": user}
+
+        return setup
+
+    def test_absent_credential_yields_none(self):
+        auth = HTTPBearerAuth(simple_validator)
+        client = TestClient(_app(self._routes(auth)))
+
+        assert client.get("/maybe").json() == {"user": None}
+
+    def test_invalid_credential_still_raises(self):
+        auth = HTTPBearerAuth(simple_validator)
+        client = TestClient(_app(self._routes(auth)))
+
+        assert (
+            client.get("/maybe", headers={"Authorization": "Bearer wrong"}).status_code
+            == 401
+        )
+
+    def test_valid_credential_returns_the_identity(self):
+        auth = HTTPBearerAuth(simple_validator)
+        client = TestClient(_app(self._routes(auth)))
+
+        response = client.get(
+            "/maybe", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+        )
+        assert response.json() == {"user": {"user": "alice"}}
+
+    def test_the_original_source_stays_strict(self):
+        auth = HTTPBearerAuth(simple_validator)
+        client = TestClient(_app(self._routes(auth)))
+
+        assert client.get("/strict").status_code == 401
+        assert client.get("/maybe").json() == {"user": None}
+
+    def test_openapi_still_declares_the_scheme(self):
+        auth = HTTPBearerAuth(simple_validator)
+        app = _app(self._routes(auth))
+
+        schema = app.openapi()["paths"]["/maybe"]["get"]
+        assert schema["security"] == [{"HTTPBearer": []}]
+
+    def test_multiauth_none_only_when_no_source_matches(self):
+        auth = MultiAuth(
+            HTTPBearerAuth(simple_validator),
+            APIKeyHeaderAuth("X-API-Key", simple_validator),
+        )
+        client = TestClient(_app(self._routes(auth)))
+
+        assert client.get("/maybe").json() == {"user": None}
+        assert client.get("/maybe", headers={"X-API-Key": VALID_TOKEN}).json() == {
+            "user": {"user": "alice"}
+        }
+        assert client.get("/maybe", headers={"X-API-Key": "wrong"}).status_code == 401
+
+    def test_scoped_optional_route_fails_for_every_caller(self):
+        """An anonymous caller cannot satisfy scopes, so the combination is refused."""
+
+        def scoped(credential: str, scopes: list[str]) -> dict:
+            return {"user": "alice"}
+
+        auth = HTTPBearerAuth(scoped)
+
+        def setup(app: FastAPI):
+            @app.get("/admin")
+            async def admin(user=Security(auth.optional(), scopes=["admin"])):
+                return user
+
+        client = TestClient(_app(setup))
+
+        with pytest.raises(RuntimeError, match="security scopes"):
+            client.get("/admin")
+        with pytest.raises(RuntimeError, match="security scopes"):
+            client.get("/admin", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
+
+    def test_optional_survives_require_in_either_order(self):
+        """require() rebuilds a MultiAuth, which must not silently drop optional()."""
+        auth = MultiAuth(
+            HTTPBearerAuth(simple_validator),
+            APIKeyHeaderAuth("X-API-Key", simple_validator),
+        )
+
+        for source in (auth.optional().require(), auth.require().optional()):
+
+            def setup(app: FastAPI, source=source):
+                @app.get("/maybe")
+                async def maybe(user=Security(source)):
+                    return {"user": user}
+
+            assert TestClient(_app(setup)).get("/maybe").json() == {"user": None}
+
+    def test_scopes_inherited_from_an_ancestor_edge_still_refuse(self):
+        """Scopes reach a nested optional() source via SecurityScopes, not the top edge."""
+
+        def scoped(credential: str, scopes: list[str]) -> dict:
+            return {"user": "alice"}
+
+        auth = HTTPBearerAuth(scoped)
+
+        def repository(user=Security(auth.optional())):
+            return {"repo": user}
+
+        def setup(app: FastAPI):
+            @app.get("/admin")
+            async def admin(repo=Security(repository, scopes=["admin"])):
+                return repo
+
+        client = TestClient(_app(setup))
+        with pytest.raises(RuntimeError, match="security scopes"):
+            client.get("/admin", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
+        with pytest.raises(RuntimeError, match="security scopes"):
+            client.get("/admin")
+
+    def test_require_and_optional_compose_in_either_order(self):
+        """Anonymous is allowed, but a credential that is sent must still qualify."""
+        kinds = {"svc": "service", "usr": "user"}
+
+        def validate(token: str, kind: str | None = None) -> dict:
+            actual = kinds.get(token)
+            if actual is None:
+                raise UnauthorizedError()
+            if kind is not None and actual != kind:
+                raise ForbiddenError()
+            return {"kind": actual}
+
+        bearer = HTTPBearerAuth(validate)
+
+        for source in (
+            bearer.require(kind="service").optional(),
+            bearer.optional().require(kind="service"),
+        ):
+
+            def setup(app: FastAPI, source=source):
+                @app.get("/status")
+                async def status(caller=Security(source)):
+                    return {"caller": caller}
+
+            client = TestClient(_app(setup))
+            bearer_header = {"Authorization": "Bearer svc"}
+
+            assert client.get("/status").json() == {"caller": None}
+            assert client.get("/status", headers=bearer_header).json() == {
+                "caller": {"kind": "service"}
+            }
+            assert (
+                client.get(
+                    "/status", headers={"Authorization": "Bearer usr"}
+                ).status_code
+                == 403
+            )
+            assert (
+                client.get(
+                    "/status", headers={"Authorization": "Bearer nope"}
+                ).status_code
+                == 401
+            )

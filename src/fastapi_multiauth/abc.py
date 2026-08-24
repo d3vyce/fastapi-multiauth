@@ -57,6 +57,16 @@ def _unenforceable_scopes_error(owner: object, scopes: list[str]) -> RuntimeErro
     )
 
 
+def _anonymous_scopes_error(owner: object, scopes: list[str]) -> RuntimeError:
+    """Error for scopes declared on a route that also allows anonymous callers."""
+    return RuntimeError(
+        f"{type(owner).__name__} is optional() but this route declares the "
+        f"security scopes {scopes!r}: an anonymous caller can never satisfy "
+        "them, so the route would be gated or not depending on whether a "
+        "credential was sent. Drop optional() or drop scopes=... from Security()."
+    )
+
+
 class _DocOnlyScheme(SecurityBase):
     """Inert stand-in for a ``fastapi.security`` scheme.
 
@@ -99,6 +109,7 @@ class AuthSource(ABC):
     """
 
     scheme: SecurityBase | None
+    _optional: bool = False
 
     def __init__(self, scheme: Any = None) -> None:
         """Set up the FastAPI dependency signature.
@@ -164,15 +175,29 @@ class AuthSource(ABC):
             add_challenge(exc, self.www_authenticate())
             raise
 
+    def optional(self) -> "Self":
+        """Return a copy that yields ``None`` instead of 401 when no credential is sent."""
+        clone = copy.copy(self)
+        clone._optional = True
+        return clone
+
     async def dispatch(self, request: Request, scopes: list[str]) -> Any:
         """Extract the credential, then authenticate it with the route scopes.
+
+        Returns ``None`` for an absent credential when :meth:`optional` was used.
 
         Raises:
             UnauthorizedError: When no credential is present. This source's
                 ``WWW-Authenticate`` challenge is attached to any 401 raised.
+            RuntimeError: When an :meth:`optional` copy meets a route that
+                declares scopes, which an anonymous caller could never satisfy.
         """
+        if self._optional and scopes:
+            raise _anonymous_scopes_error(self, scopes)
         credential = await self.extract(request)
         if credential is None:
+            if self._optional:
+                return None
             raise UnauthorizedError(headers=challenge_headers(self.www_authenticate()))
         return await self._authenticate_with_challenge(credential, scopes)
 

@@ -34,6 +34,48 @@ async def admin(user=Security(bearer.require(role=Role.ADMIN))):
 
 Use the right status code: `UnauthorizedError` (401) when the credential is absent or invalid, `ForbiddenError` (403) when the identity is valid but lacks permission. 401 responses from bearer sources automatically carry the `WWW-Authenticate: Bearer` challenge required by [RFC 7235](https://datatracker.ietf.org/doc/html/rfc7235); `MultiAuth` advertises the union of its sources' challenges.
 
+
+## Optional authentication
+
+`optional()` returns a copy of a source (or a `MultiAuth`) that yields `None` instead of a 401 when the request carries no credential, for endpoints that serve anonymous callers but render more for signed-in ones:
+
+```python
+bearer = HTTPBearerAuth(validate_token)
+MaybeUser = Annotated[User | None, Security(bearer.optional())]
+
+
+@app.get("/articles/{slug}")
+async def article(slug: str, user: MaybeUser):
+    return render(slug, drafts=user is not None)
+```
+
+Only an **absent** credential yields `None`. One that is present and rejected by the validator still raises 401, so `optional()` can never turn a bad token into an anonymous request. Whether a credential counts as present is `extract()`'s decision, which means a bearer token that does not match a configured prefix reads as absent rather than invalid.
+
+Copies are independent: the source it came from stays strict, so one configured source serves both kinds of route. The route still advertises its security scheme in OpenAPI, matching `fastapi.security`'s own `auto_error=False` behaviour.
+
+!!! warning "`optional()` and scopes are mutually exclusive"
+    An anonymous caller can never satisfy a scope requirement, so a route combining them would be gated or not depending on whether a credential happened to be sent. Declaring both raises a `RuntimeError` for every caller, authenticated or not, rather than only for the anonymous ones.
+
+### Combining with `require()`
+
+`require()` and `optional()` compose in either order, and mean "anonymous is welcome, but a credential that *is* presented must still qualify":
+
+```python
+service_only = bearer.require(kind="service").optional()
+
+
+@app.get("/status")
+async def status(caller: Annotated[Service | None, Security(service_only)]):
+    return {"detail": caller is not None}
+```
+
+| Request | Result |
+| --- | --- |
+| no credential | `None` |
+| a service token | the identity |
+| a user token | 403, rejected by the validator |
+| an unknown token | 401 |
+
 ## Sources
 
 The library ships one request-time source per standard `fastapi.security` scheme. Each extracts a credential from the request and hands it to your validator (the contract above); returning `None` when the credential is absent lets `MultiAuth` fall through to the next source.
