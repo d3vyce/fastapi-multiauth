@@ -19,17 +19,7 @@ from fastapi.security import (
 from .bearer import _BearerSource
 
 
-class _CatalogueBearerSource(_BearerSource):
-    """A bearer source that publishes which scopes exist."""
-
-    _catalogue: dict[str, str]
-
-    def _scope_catalogue(self) -> dict[str, str]:
-        """The scopes advertised to OpenAPI."""
-        return self._catalogue
-
-
-class OAuth2PasswordBearerAuth(_CatalogueBearerSource):
+class OAuth2PasswordBearerAuth(_BearerSource):
     """Bearer tokens issued by a password-grant token endpoint.
 
     Args:
@@ -49,7 +39,7 @@ class OAuth2PasswordBearerAuth(_CatalogueBearerSource):
         scheme_name: str | None = None,
         **kwargs: Any,
     ) -> None:
-        self._catalogue = scopes or {}
+        self._scope_catalogue = scopes
         super().__init__(
             validator,
             OAuth2PasswordBearer(
@@ -62,7 +52,7 @@ class OAuth2PasswordBearerAuth(_CatalogueBearerSource):
         )
 
 
-class OAuth2AuthorizationCodeBearerAuth(_CatalogueBearerSource):
+class OAuth2AuthorizationCodeBearerAuth(_BearerSource):
     """Bearer tokens issued by an authorization-code flow.
 
     Args:
@@ -86,7 +76,7 @@ class OAuth2AuthorizationCodeBearerAuth(_CatalogueBearerSource):
         scheme_name: str | None = None,
         **kwargs: Any,
     ) -> None:
-        self._catalogue = scopes or {}
+        self._scope_catalogue = scopes
         super().__init__(
             validator,
             OAuth2AuthorizationCodeBearer(

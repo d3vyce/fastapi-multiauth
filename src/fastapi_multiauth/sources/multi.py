@@ -1,5 +1,6 @@
 """MultiAuth: combine multiple authentication sources into a single callable."""
 
+import copy
 import inspect
 from typing import Annotated, Any, cast
 
@@ -8,7 +9,12 @@ from fastapi.security import SecurityScopes
 
 from fastapi_multiauth.exceptions import UnauthorizedError
 
-from ..abc import AuthSource, _anonymous_scopes_error, _carry_scheme
+from ..abc import (
+    AuthSource,
+    _anonymous_scopes_error,
+    _carry_scheme,
+    _unenforceable_scopes_error,
+)
 from ..utils import challenge_headers
 
 
@@ -81,6 +87,9 @@ class MultiAuth:
         self._unenforceable = tuple(
             type(source).__name__ for source in sources if not source._enforces_scopes()
         )
+        self._catalogued = tuple(
+            source for source in sources if source._scope_catalogue
+        )
 
     def www_authenticate(self) -> str | None:
         """Combined challenge of all sources (RFC 9110 §11.6.1), or ``None``."""
@@ -88,26 +97,25 @@ class MultiAuth:
 
     def optional(self) -> "MultiAuth":
         """Return a copy that yields ``None`` when no source has a credential."""
-        clone = MultiAuth(*self._sources)
+        clone = copy.copy(self)
         clone._optional = True
         return clone
 
     async def dispatch(self, request: Request, scopes: list[str]) -> Any:
         """Authenticate with the first source whose credential is present."""
-        if self._optional and scopes:
-            raise _anonymous_scopes_error(self, scopes)
         if scopes:
-            for source in self._sources:
+            if self._optional:
+                raise _anonymous_scopes_error(self, scopes)
+            for source in self._catalogued:
                 source._reject_undeclared_scopes(scopes)
-        if scopes and self._unenforceable:
-            raise RuntimeError(
-                f"MultiAuth cannot enforce the security scopes {scopes!r} "
-                f"declared on this route: {', '.join(self._unenforceable)} "
-                "cannot check them, so enforcement would depend on which "
-                "credential the client presents. Add a 'scopes' parameter to "
-                "that source's validator (or override authenticate_scoped()), "
-                "or remove scopes=... from Security()."
-            )
+            if self._unenforceable:
+                raise _unenforceable_scopes_error(
+                    self,
+                    scopes,
+                    f"{', '.join(self._unenforceable)} cannot check them, so "
+                    "enforcement would depend on which credential the client "
+                    "presents",
+                )
         for source in self._sources:
             credential = await source.extract(request)
             if credential is not None:

@@ -4087,6 +4087,29 @@ class TestOptionalAuth:
         with pytest.raises(RuntimeError, match="security scopes"):
             client.get("/admin", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
 
+    def test_scoped_optional_multiauth_route_fails_for_every_caller(self):
+        """MultiAuth refuses the combination before any source is tried."""
+
+        def scoped(credential: str, scopes: list[str]) -> dict:
+            return {"user": "alice"}
+
+        auth = MultiAuth(
+            HTTPBearerAuth(scoped),
+            APIKeyHeaderAuth("X-API-Key", scoped),
+        )
+
+        def setup(app: FastAPI):
+            @app.get("/admin")
+            async def admin(user=Security(auth.optional(), scopes=["admin"])):
+                return user
+
+        client = TestClient(_app(setup))
+
+        with pytest.raises(RuntimeError, match=r"optional\(\) but this route"):
+            client.get("/admin")
+        with pytest.raises(RuntimeError, match=r"optional\(\) but this route"):
+            client.get("/admin", headers={"X-API-Key": VALID_TOKEN})
+
     def test_optional_survives_require_in_either_order(self):
         """require() rebuilds a MultiAuth, which must not silently drop optional()."""
         auth = MultiAuth(
@@ -4184,14 +4207,7 @@ class TestOAuth2Sources:
         )
 
     def test_password_bearer_validates_the_token(self):
-        auth = self._password()
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        client = TestClient(_app(setup))
+        client = _client(self._password())
         assert client.get(
             "/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
         ).json() == {"user": "alice"}
@@ -4202,14 +4218,9 @@ class TestOAuth2Sources:
         assert client.get("/me").status_code == 401
 
     def test_password_bearer_publishes_the_scope_catalogue(self):
-        auth = self._password()
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        schemes = _app(setup).openapi()["components"]["securitySchemes"]
+        schemes = _client(self._password()).app.openapi()["components"][
+            "securitySchemes"
+        ]
         assert schemes["OAuth2PasswordBearer"] == {
             "type": "oauth2",
             "flows": {"password": {"scopes": self.SCOPES, "tokenUrl": "/token"}},
@@ -4224,13 +4235,8 @@ class TestOAuth2Sources:
             scopes=self.SCOPES,
         )
 
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        app = _app(setup)
-        scheme = app.openapi()["components"]["securitySchemes"][
+        client = _client(auth)
+        scheme = client.app.openapi()["components"]["securitySchemes"][
             "OAuth2AuthorizationCodeBearer"
         ]
         assert scheme["type"] == "oauth2"
@@ -4240,7 +4246,7 @@ class TestOAuth2Sources:
             "refreshUrl": "https://idp.example/refresh",
             "scopes": self.SCOPES,
         }
-        assert TestClient(app).get(
+        assert client.get(
             "/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
         ).json() == {"user": "alice"}
 
@@ -4250,18 +4256,14 @@ class TestOAuth2Sources:
             openid_connect_url="https://idp.example/.well-known/openid-configuration",
         )
 
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        app = _app(setup)
-        assert app.openapi()["components"]["securitySchemes"]["OpenIdConnect"] == {
+        client = _client(auth)
+        assert client.app.openapi()["components"]["securitySchemes"][
+            "OpenIdConnect"
+        ] == {
             "type": "openIdConnect",
             "openIdConnectUrl": "https://idp.example/.well-known/openid-configuration",
         }
 
-        client = TestClient(app)
         # The raw header would be "Bearer <token>"; the source hands over the token.
         assert client.get(
             "/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"}

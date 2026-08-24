@@ -4,6 +4,7 @@ Composable authentication sources for FastAPI: bring your own validator, combine
 
 [![CI](https://github.com/d3vyce/fastapi-multiauth/actions/workflows/ci.yml/badge.svg)](https://github.com/d3vyce/fastapi-multiauth/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/d3vyce/fastapi-multiauth/graph/badge.svg)](https://codecov.io/gh/d3vyce/fastapi-multiauth)
+[![CodSpeed Badge](https://img.shields.io/endpoint?url=https://app.codspeed.io//badge.json)](https://app.codspeed.io//d3vyce/fastapi-multiauth?utm_source=badge)
 [![ty](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ty/main/assets/badge/v0.json)](https://github.com/astral-sh/ty)
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
