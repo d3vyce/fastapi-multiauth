@@ -1531,7 +1531,7 @@ class TestSecurityScopes:
             return {"user": "alice"}
 
         bearer = HTTPBearerAuth(scoped_validator)
-        cookie = APIKeyCookieAuth("session", cookie_validator)
+        cookie = APIKeyCookieAuth("session", scoped_validator)
         multi = MultiAuth(bearer, cookie)
 
         def setup(app: FastAPI):
@@ -3931,3 +3931,67 @@ class TestJWKSRefreshCoalescing:
         first, second = await asyncio.gather(validator(token), validator(token))
         assert first["sub"] == second["sub"] == "user-1"
         assert fetches == 1
+
+
+def test_multiauth_scopes_fail_closed_on_every_credential():
+    """A source that cannot check scopes must not depend on which credential arrives."""
+
+    def scoped(credential: str, scopes: list[str]) -> dict:
+        if not set(scopes) <= {"admin"}:
+            raise ForbiddenError()
+        return {"who": credential}
+
+    def unscoped(credential: str) -> dict:
+        return {"who": credential}
+
+    strong = HTTPBearerAuth(scoped)
+    weak = APIKeyHeaderAuth("X-Legacy", unscoped)
+    mixed = MultiAuth(strong, weak)
+
+    def routes(app):
+        @app.get("/scoped")
+        async def scoped_route(user=Security(mixed, scopes=["admin"])):
+            return user
+
+        @app.get("/plain")
+        async def plain_route(user=Security(mixed)):
+            return user
+
+    client = TestClient(_app(routes), raise_server_exceptions=False)
+
+    # Both credentials fail the scoped route, not just the one that cannot check.
+    assert (
+        client.get("/scoped", headers={"Authorization": "Bearer a"}).status_code == 500
+    )
+    assert client.get("/scoped", headers={"X-Legacy": "a"}).status_code == 500
+
+    # A route declaring no scopes is unaffected: mixing sources stays legal.
+    assert client.get("/plain", headers={"Authorization": "Bearer a"}).json() == {
+        "who": "a"
+    }
+    assert client.get("/plain", headers={"X-Legacy": "a"}).json() == {"who": "a"}
+
+
+def test_multiauth_scopes_pass_when_every_source_can_check():
+    def scoped(credential: str, scopes: list[str]) -> dict:
+        if not set(scopes) <= {"admin"}:
+            raise ForbiddenError()
+        return {"who": credential}
+
+    auth = MultiAuth(HTTPBearerAuth(scoped), APIKeyHeaderAuth("X-Key", scoped))
+
+    def routes(app):
+        @app.get("/scoped")
+        async def scoped_route(user=Security(auth, scopes=["admin"])):
+            return user
+
+        @app.get("/denied")
+        async def denied_route(user=Security(auth, scopes=["other"])):
+            return user
+
+    client = TestClient(_app(routes))
+    assert client.get("/scoped", headers={"Authorization": "Bearer a"}).json() == {
+        "who": "a"
+    }
+    assert client.get("/scoped", headers={"X-Key": "a"}).json() == {"who": "a"}
+    assert client.get("/denied", headers={"X-Key": "a"}).status_code == 403

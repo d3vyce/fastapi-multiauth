@@ -261,6 +261,9 @@ bearer = HTTPBearerAuth(validate_token)
 async def create(user=Security(bearer, scopes=["challenges:write"])): ...
 ```
 
+!!! warning "Every source in a `MultiAuth` must be able to check scopes"
+    Enforcement lives in each source's validator, so a `MultiAuth` mixing one validator that declares `scopes` with one that does not would check the route's scopes or not depending on which credential the client presented. A route declaring scopes on such a `MultiAuth` therefore fails for every credential, not just the weak one. Mixing sources stays legal for routes that declare no scopes.
+
 !!! note "Scopes and OpenAPI"
     The OpenAPI specification only allows scope lists on `oauth2`/`openIdConnect` security schemes: for `http` and `apiKey` schemes the requirement array must be empty, so route scopes do not appear in `/docs` for bearer, cookie, or header sources. Enforcement is unaffected: scopes are checked at runtime on every call path (including `MultiAuth`), and a route declaring scopes with a validator that cannot check them fails closed.
 

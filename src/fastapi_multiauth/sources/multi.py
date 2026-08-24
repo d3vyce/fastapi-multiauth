@@ -76,12 +76,25 @@ class MultiAuth:
                 challenges.append(challenge)
         self._www_authenticate = ", ".join(challenges) or None
 
+        self._unenforceable = tuple(
+            type(source).__name__ for source in sources if not source._enforces_scopes()
+        )
+
     def www_authenticate(self) -> str | None:
         """Combined challenge of all sources (RFC 9110 §11.6.1), or ``None``."""
         return self._www_authenticate
 
     async def dispatch(self, request: Request, scopes: list[str]) -> Any:
         """Authenticate with the first source whose credential is present."""
+        if scopes and self._unenforceable:
+            raise RuntimeError(
+                f"MultiAuth cannot enforce the security scopes {scopes!r} "
+                f"declared on this route: {', '.join(self._unenforceable)} "
+                "cannot check them, so enforcement would depend on which "
+                "credential the client presents. Add a 'scopes' parameter to "
+                "that source's validator (or override authenticate_scoped()), "
+                "or remove scopes=... from Security()."
+            )
         for source in self._sources:
             credential = await source.extract(request)
             if credential is not None:

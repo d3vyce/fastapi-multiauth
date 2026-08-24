@@ -150,6 +150,10 @@ class AuthSource(ABC):
             raise _unenforceable_scopes_error(self, scopes)
         return await self.authenticate(credential)
 
+    def _enforces_scopes(self) -> bool:
+        """Whether route-declared scopes reach an actual check in this source."""
+        return type(self).authenticate_scoped is not AuthSource.authenticate_scoped
+
     async def _authenticate_with_challenge(
         self, credential: str, scopes: list[str]
     ) -> Any:
@@ -223,6 +227,10 @@ class ValidatedAuthSource(AuthSource):
     async def authenticate_scoped(self, credential: str, scopes: list[str]) -> Any:
         """Validate a credential, forwarding route-declared scopes to the validator."""
         return await self._call_validator(credential, scopes=scopes)
+
+    def _enforces_scopes(self) -> bool:
+        """The validator is the authority: every source funnels into it."""
+        return self._accepts_scopes
 
     def require(self, **kwargs: Any) -> "Self":
         """Return a copy of this source with additional (or overriding) validator kwargs.
