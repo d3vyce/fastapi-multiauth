@@ -4,7 +4,7 @@ import base64
 import hashlib
 import json
 import time
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
@@ -28,6 +28,9 @@ from fastapi_multiauth import (
     HTTPBearerAuth,
     JWTValidator,
     MultiAuth,
+    OAuth2AuthorizationCodeBearerAuth,
+    OAuth2PasswordBearerAuth,
+    OpenIdConnectAuth,
     hash_token,
     verify_token_hash,
 )
@@ -4165,3 +4168,223 @@ class TestOptionalAuth:
                 ).status_code
                 == 401
             )
+
+
+class TestOAuth2Sources:
+    """The oauth2/OIDC sources: bearer extraction, oauth2 OpenAPI metadata."""
+
+    SCOPES: ClassVar[dict[str, str]] = {
+        "admin": "Administer everything",
+        "billing": "Read invoices",
+    }
+
+    def _password(self, validator=None):
+        return OAuth2PasswordBearerAuth(
+            validator or simple_validator, token_url="/token", scopes=self.SCOPES
+        )
+
+    def test_password_bearer_validates_the_token(self):
+        auth = self._password()
+
+        def setup(app: FastAPI):
+            @app.get("/me")
+            async def me(user=Security(auth)):
+                return user
+
+        client = TestClient(_app(setup))
+        assert client.get(
+            "/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+        ).json() == {"user": "alice"}
+        assert (
+            client.get("/me", headers={"Authorization": "Bearer wrong"}).status_code
+            == 401
+        )
+        assert client.get("/me").status_code == 401
+
+    def test_password_bearer_publishes_the_scope_catalogue(self):
+        auth = self._password()
+
+        def setup(app: FastAPI):
+            @app.get("/me")
+            async def me(user=Security(auth)):
+                return user
+
+        schemes = _app(setup).openapi()["components"]["securitySchemes"]
+        assert schemes["OAuth2PasswordBearer"] == {
+            "type": "oauth2",
+            "flows": {"password": {"scopes": self.SCOPES, "tokenUrl": "/token"}},
+        }
+
+    def test_authorization_code_bearer_publishes_its_flow(self):
+        auth = OAuth2AuthorizationCodeBearerAuth(
+            simple_validator,
+            authorization_url="https://idp.example/authorize",
+            token_url="https://idp.example/token",
+            refresh_url="https://idp.example/refresh",
+            scopes=self.SCOPES,
+        )
+
+        def setup(app: FastAPI):
+            @app.get("/me")
+            async def me(user=Security(auth)):
+                return user
+
+        app = _app(setup)
+        scheme = app.openapi()["components"]["securitySchemes"][
+            "OAuth2AuthorizationCodeBearer"
+        ]
+        assert scheme["type"] == "oauth2"
+        assert scheme["flows"]["authorizationCode"] == {
+            "authorizationUrl": "https://idp.example/authorize",
+            "tokenUrl": "https://idp.example/token",
+            "refreshUrl": "https://idp.example/refresh",
+            "scopes": self.SCOPES,
+        }
+        assert TestClient(app).get(
+            "/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+        ).json() == {"user": "alice"}
+
+    def test_openid_connect_publishes_its_discovery_url_and_extracts_the_token(self):
+        auth = OpenIdConnectAuth(
+            simple_validator,
+            openid_connect_url="https://idp.example/.well-known/openid-configuration",
+        )
+
+        def setup(app: FastAPI):
+            @app.get("/me")
+            async def me(user=Security(auth)):
+                return user
+
+        app = _app(setup)
+        assert app.openapi()["components"]["securitySchemes"]["OpenIdConnect"] == {
+            "type": "openIdConnect",
+            "openIdConnectUrl": "https://idp.example/.well-known/openid-configuration",
+        }
+
+        client = TestClient(app)
+        # The raw header would be "Bearer <token>"; the source hands over the token.
+        assert client.get(
+            "/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+        ).json() == {"user": "alice"}
+        assert (
+            client.get("/me", headers={"Authorization": VALID_TOKEN}).status_code == 401
+        )
+
+    def test_scopes_reach_the_validator_and_appear_on_the_route(self):
+        received: list[list[str]] = []
+
+        def scoped(credential: str, scopes: list[str]) -> dict:
+            received.append(scopes)
+            return {"user": "alice"}
+
+        auth = self._password(scoped)
+
+        def setup(app: FastAPI):
+            @app.get("/admin")
+            async def admin(user=Security(auth, scopes=["admin"])):
+                return user
+
+        app = _app(setup)
+        response = TestClient(app).get(
+            "/admin", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+        )
+        assert response.status_code == 200
+        assert received == [["admin"]]
+        assert app.openapi()["paths"]["/admin"]["get"]["security"] == [
+            {"OAuth2PasswordBearer": ["admin"]}
+        ]
+
+    def test_composes_with_multiauth_and_optional(self):
+        auth = MultiAuth(
+            self._password(), APIKeyHeaderAuth("X-API-Key", simple_validator)
+        )
+
+        def setup(app: FastAPI):
+            @app.get("/maybe")
+            async def maybe(user=Security(auth.optional())):
+                return {"user": user}
+
+        client = TestClient(_app(setup))
+        assert client.get("/maybe").json() == {"user": None}
+        assert client.get("/maybe", headers={"X-API-Key": VALID_TOKEN}).json() == {
+            "user": {"user": "alice"}
+        }
+        assert client.get(
+            "/maybe", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+        ).json() == {"user": {"user": "alice"}}
+
+    def test_route_scope_outside_the_catalogue_is_refused(self):
+        """A published catalogue is a claim: a typo must not reach the validator."""
+        seen: list[list[str]] = []
+
+        def scoped(credential: str, scopes: list[str]) -> dict:
+            seen.append(scopes)
+            return {"user": "alice"}
+
+        auth = self._password(scoped)
+
+        def setup(app: FastAPI):
+            @app.get("/typo")
+            async def typo(user=Security(auth, scopes=["admni"])):
+                return user
+
+            @app.get("/known")
+            async def known(user=Security(auth, scopes=["admin", "billing"])):
+                return user
+
+        client = TestClient(_app(setup))
+        header = {"Authorization": f"Bearer {VALID_TOKEN}"}
+
+        with pytest.raises(RuntimeError, match="does not publish the security scopes"):
+            client.get("/typo", headers=header)
+        assert seen == [], "the validator must never see an undeclared scope"
+
+        assert client.get("/known", headers=header).status_code == 200
+        assert seen == [["admin", "billing"]]
+
+    def test_undeclared_scopes_are_refused_before_any_credential_is_read(self):
+        """The misconfiguration must surface for anonymous callers too."""
+        auth = self._password()
+
+        def setup(app: FastAPI):
+            @app.get("/typo")
+            async def typo(user=Security(auth, scopes=["nope"])):
+                return user
+
+        with pytest.raises(RuntimeError, match="does not publish the security scopes"):
+            TestClient(_app(setup)).get("/typo")
+
+    def test_a_source_without_a_catalogue_accepts_any_scope(self):
+        """No catalogue is no claim: the other sources keep working unchanged."""
+
+        def scoped(credential: str, scopes: list[str]) -> dict:
+            return {"scopes": scopes}
+
+        for auth in (
+            HTTPBearerAuth(scoped),
+            OpenIdConnectAuth(
+                scoped, openid_connect_url="https://idp.example/.well-known"
+            ),
+            OAuth2PasswordBearerAuth(scoped, token_url="/token"),
+        ):
+
+            def setup(app: FastAPI, auth=auth):
+                @app.get("/anything")
+                async def anything(user=Security(auth, scopes=["whatever"])):
+                    return user
+
+            response = TestClient(_app(setup)).get(
+                "/anything", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+            )
+            assert response.json() == {"scopes": ["whatever"]}
+
+    def test_multiauth_refuses_a_scope_no_member_publishes(self):
+        auth = MultiAuth(self._password(), APIKeyHeaderAuth("X-Key", simple_validator))
+
+        def setup(app: FastAPI):
+            @app.get("/typo")
+            async def typo(user=Security(auth, scopes=["admni"])):
+                return user
+
+        with pytest.raises(RuntimeError, match="does not publish the security scopes"):
+            TestClient(_app(setup)).get("/typo", headers={"X-Key": VALID_TOKEN})

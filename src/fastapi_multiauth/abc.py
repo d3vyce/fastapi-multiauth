@@ -67,6 +67,18 @@ def _anonymous_scopes_error(owner: object, scopes: list[str]) -> RuntimeError:
     )
 
 
+def _undeclared_scopes_error(
+    owner: object, unknown: list[str], catalogue: dict[str, str]
+) -> RuntimeError:
+    """Error for route scopes missing from the source's published catalogue."""
+    known = ", ".join(sorted(catalogue)) or "nothing"
+    return RuntimeError(
+        f"{type(owner).__name__} does not publish the security scopes "
+        f"{unknown!r} declared on this route: its catalogue lists {known}. "
+        "Add them to scopes={...} on the source, or correct the route."
+    )
+
+
 class _DocOnlyScheme(SecurityBase):
     """Inert stand-in for a ``fastapi.security`` scheme.
 
@@ -181,6 +193,19 @@ class AuthSource(ABC):
         clone._optional = True
         return clone
 
+    def _scope_catalogue(self) -> dict[str, str]:
+        """The scopes this source publishes to OpenAPI, empty when it has none."""
+        return {}
+
+    def _reject_undeclared_scopes(self, scopes: list[str]) -> None:
+        """Refuse a route declaring scopes this source never published."""
+        catalogue = self._scope_catalogue()
+        if not scopes or not catalogue:
+            return
+        unknown = [scope for scope in scopes if scope not in catalogue]
+        if unknown:
+            raise _undeclared_scopes_error(self, unknown, catalogue)
+
     async def dispatch(self, request: Request, scopes: list[str]) -> Any:
         """Extract the credential, then authenticate it with the route scopes.
 
@@ -194,6 +219,7 @@ class AuthSource(ABC):
         """
         if self._optional and scopes:
             raise _anonymous_scopes_error(self, scopes)
+        self._reject_undeclared_scopes(scopes)
         credential = await self.extract(request)
         if credential is None:
             if self._optional:

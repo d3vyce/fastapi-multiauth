@@ -5,6 +5,11 @@ from .bearer import HTTPBearerAuth
 from .cookie import APIKeyCookieAuth
 from .header import APIKeyHeaderAuth
 from .multi import MultiAuth
+from .oauth2 import (
+    OAuth2AuthorizationCodeBearerAuth,
+    OAuth2PasswordBearerAuth,
+    OpenIdConnectAuth,
+)
 from .query import APIKeyQueryAuth
 
 __all__ = [
@@ -14,4 +19,7 @@ __all__ = [
     "HTTPBasicAuth",
     "HTTPBearerAuth",
     "MultiAuth",
+    "OAuth2AuthorizationCodeBearerAuth",
+    "OAuth2PasswordBearerAuth",
+    "OpenIdConnectAuth",
 ]

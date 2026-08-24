@@ -96,6 +96,8 @@ class MultiAuth:
         """Authenticate with the first source whose credential is present."""
         if self._optional and scopes:
             raise _anonymous_scopes_error(self, scopes)
+        for source in self._sources:
+            source._reject_undeclared_scopes(scopes)
         if scopes and self._unenforceable:
             raise RuntimeError(
                 f"MultiAuth cannot enforce the security scopes {scopes!r} "

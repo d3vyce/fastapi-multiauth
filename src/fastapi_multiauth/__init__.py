@@ -20,6 +20,9 @@ from .sources import (
     HTTPBasicAuth,
     HTTPBearerAuth,
     MultiAuth,
+    OAuth2AuthorizationCodeBearerAuth,
+    OAuth2PasswordBearerAuth,
+    OpenIdConnectAuth,
 )
 from .utils import hash_token, verify_token_hash
 
@@ -35,6 +38,9 @@ __all__ = [
     "HTTPBearerAuth",
     "JWTValidator",
     "MultiAuth",
+    "OAuth2AuthorizationCodeBearerAuth",
+    "OAuth2PasswordBearerAuth",
+    "OpenIdConnectAuth",
     "UnauthorizedError",
     "hash_token",
     "oauth",

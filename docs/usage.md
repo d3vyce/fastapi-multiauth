@@ -269,6 +269,32 @@ basic = HTTPBasicAuth(validate_basic, realm="api")
 
 The `realm` shows up in the `WWW-Authenticate: Basic realm="api"` challenge on 401 responses, which is what makes browsers prompt for credentials.
 
+### OAuth 2.0 and OpenID Connect
+
+Three sources validate a bearer token an OAuth 2.0 or OIDC provider already issued. They declare no flow of their own: the URLs and scope catalogue are OpenAPI metadata, which is what makes `/docs` offer a real **Authorize** dialog with per-scope checkboxes instead of a bare token box.
+
+```python
+from fastapi_multiauth import OAuth2AuthorizationCodeBearerAuth
+
+auth = OAuth2AuthorizationCodeBearerAuth(
+    validate_access_token,
+    authorization_url="https://idp.example/authorize",
+    token_url="https://idp.example/oauth/token",
+    scopes={"admin": "Administer everything", "billing": "Read invoices"},
+)
+
+
+@app.get("/invoices")
+async def invoices(user=Security(auth, scopes=["billing"])):
+    return user
+```
+
+- **`OAuth2AuthorizationCodeBearerAuth`**: the flow to prefer for anything user-facing; pairs with the [login helpers](oauth.md) that mint the tokens.
+- **`OAuth2PasswordBearerAuth`**: `token_url` only, for an API that issues its own tokens from a password endpoint. OAuth 2.1 drops this grant.
+- **`OpenIdConnectAuth`**: one `openid_connect_url`, and `/docs` reads the provider's discovery document for the rest. Unlike `fastapi.security.OpenIdConnect`, which hands the validator the raw `Authorization` header, this source extracts the bearer token.
+
+Publishing a catalogue is a claim, so a route that declares a scope outside it is refused outright: a typo reaches neither the validator nor the client as an ordinary 403. Omit `scopes=` to make no claim and accept whatever routes declare, as every other source does. Checking a credential against its own scopes is still the validator's job, and it must accept a `scopes` parameter for routes that declare any. Pair these sources with [`JWTValidator`](#jwt-validation) when the provider issues JWTs.
+
 ## Combining sources with MultiAuth
 
 `MultiAuth` tries each source in order and authenticates with the first one that finds a credential in the request. All underlying schemes are documented in OpenAPI:
@@ -307,7 +333,7 @@ async def create(user=Security(bearer, scopes=["challenges:write"])): ...
     Enforcement lives in each source's validator, so a `MultiAuth` mixing one validator that declares `scopes` with one that does not would check the route's scopes or not depending on which credential the client presented. A route declaring scopes on such a `MultiAuth` therefore fails for every credential, not just the weak one. Mixing sources stays legal for routes that declare no scopes.
 
 !!! note "Scopes and OpenAPI"
-    The OpenAPI specification only allows scope lists on `oauth2`/`openIdConnect` security schemes: for `http` and `apiKey` schemes the requirement array must be empty, so route scopes do not appear in `/docs` for bearer, cookie, or header sources. Enforcement is unaffected: scopes are checked at runtime on every call path (including `MultiAuth`), and a route declaring scopes with a validator that cannot check them fails closed.
+    Route scopes do appear in the OpenAPI security requirement for every source, including `http` and `apiKey` ones: FastAPI emits OpenAPI 3.1, where a non-`oauth2` requirement array may carry role names. What those sources cannot publish is the *catalogue* of valid scopes, so `/docs` has no checkboxes to offer for them; only the [OAuth 2.0 and OpenID Connect sources](#oauth-20-and-openid-connect) declare one. Enforcement is identical either way: scopes are checked at runtime on every call path (including `MultiAuth`), and a route declaring scopes with a validator that cannot check them fails closed.
 
 ## JWT validation
 
