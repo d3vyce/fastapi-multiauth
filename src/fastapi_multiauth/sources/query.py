@@ -24,6 +24,7 @@ class APIKeyQueryAuth(ValidatedAuthSource):
         validator: Sync or async callable returning the identity; raises
             :class:`~fastapi_multiauth.exceptions.UnauthorizedError` on failure.
         scheme_name: OpenAPI security scheme name (default ``APIKeyQuery_{name}``).
+        description: Optional prose for the OpenAPI security scheme object.
         **kwargs: Extra keyword arguments forwarded to the validator on every call.
     """
 
@@ -33,6 +34,7 @@ class APIKeyQueryAuth(ValidatedAuthSource):
         validator: Callable[..., Any],
         *,
         scheme_name: str | None = None,
+        description: str | None = None,
         **kwargs: Any,
     ) -> None:
         self._name = name
@@ -42,6 +44,7 @@ class APIKeyQueryAuth(ValidatedAuthSource):
                 name=name,
                 auto_error=False,
                 scheme_name=scheme_name or f"APIKeyQuery_{name}",
+                description=description,
             ),
             **kwargs,
         )

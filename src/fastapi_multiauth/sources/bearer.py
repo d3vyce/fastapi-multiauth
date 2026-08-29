@@ -54,6 +54,9 @@ class HTTPBearerAuth(_BearerSource):
             prefix are matched, and the prefix is kept in the validated value.
         scheme_name: OpenAPI security scheme name (default ``HTTPBearer``); give
             each source a distinct name when several appear in the same app.
+        description: Optional prose for the OpenAPI security scheme object.
+        bearer_format: Optional hint at the token format (e.g. ``"JWT"``), for
+            documentation only.
         **kwargs: Extra keyword arguments forwarded to the validator on every call.
     """
 
@@ -63,12 +66,19 @@ class HTTPBearerAuth(_BearerSource):
         *,
         prefix: str | None = None,
         scheme_name: str | None = None,
+        description: str | None = None,
+        bearer_format: str | None = None,
         **kwargs: Any,
     ) -> None:
         self._prefix = prefix
         super().__init__(
             validator,
-            HTTPBearer(auto_error=False, scheme_name=scheme_name),
+            HTTPBearer(
+                auto_error=False,
+                scheme_name=scheme_name,
+                description=description,
+                bearerFormat=bearer_format,
+            ),
             **kwargs,
         )
 

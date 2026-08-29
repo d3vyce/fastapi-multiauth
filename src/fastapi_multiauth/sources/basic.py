@@ -39,6 +39,7 @@ class HTTPBasicAuth(ValidatedAuthSource):
             :class:`~fastapi_multiauth.exceptions.UnauthorizedError` on failure.
         realm: Optional protection-space name for the ``WWW-Authenticate``.
         scheme_name: OpenAPI security scheme name (default ``HTTPBasic``).
+        description: Optional prose for the OpenAPI security scheme object.
         **kwargs: Extra keyword arguments forwarded to the validator on every call.
     """
 
@@ -48,12 +49,17 @@ class HTTPBasicAuth(ValidatedAuthSource):
         *,
         realm: str | None = None,
         scheme_name: str | None = None,
+        description: str | None = None,
         **kwargs: Any,
     ) -> None:
         self._challenge = _basic_challenge(realm)
         super().__init__(
             validator,
-            HTTPBasic(auto_error=False, scheme_name=scheme_name),
+            HTTPBasic(
+                auto_error=False,
+                scheme_name=scheme_name,
+                description=description,
+            ),
             **kwargs,
         )
 

@@ -70,6 +70,7 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         domain: Optional ``Domain`` cookie attribute.
         path: ``Path`` cookie attribute (default ``"/"``).
         scheme_name: OpenAPI security scheme name (default ``APIKeyCookie_{name}``).
+        description: Optional prose for the OpenAPI security scheme object.
         **kwargs: Extra keyword arguments forwarded to the validator on every call.
     """
 
@@ -86,6 +87,7 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         domain: str | None = None,
         path: str = "/",
         scheme_name: str | None = None,
+        description: str | None = None,
         **kwargs: Any,
     ) -> None:
         if ttl <= 0:
@@ -126,6 +128,7 @@ class APIKeyCookieAuth(ValidatedAuthSource):
                 name=name,
                 auto_error=False,
                 scheme_name=scheme_name or f"APIKeyCookie_{name}",
+                description=description,
             ),
             **kwargs,
         )

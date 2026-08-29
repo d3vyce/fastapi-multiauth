@@ -2986,6 +2986,82 @@ class TestOpenAPIDocumentation:
         assert schemes["APIKeyHeader_X-Org-Key"]["name"] == "X-Org-Key"
 
 
+_DESCRIBED_SOURCES = [
+    (lambda d: HTTPBasicAuth(simple_validator, description=d), "HTTPBasic"),
+    (lambda d: HTTPBearerAuth(simple_validator, description=d), "HTTPBearer"),
+    (
+        lambda d: APIKeyHeaderAuth("X-API-Key", simple_validator, description=d),
+        "APIKeyHeader_X-API-Key",
+    ),
+    (
+        lambda d: APIKeyQueryAuth("api_key", simple_validator, description=d),
+        "APIKeyQuery_api_key",
+    ),
+    (
+        lambda d: APIKeyCookieAuth("session", cookie_validator, description=d),
+        "APIKeyCookie_session",
+    ),
+    (
+        lambda d: OAuth2PasswordBearerAuth(
+            simple_validator, token_url="/token", description=d
+        ),
+        "OAuth2PasswordBearer",
+    ),
+    (
+        lambda d: OAuth2AuthorizationCodeBearerAuth(
+            simple_validator,
+            authorization_url="https://idp.example/authorize",
+            token_url="https://idp.example/token",
+            description=d,
+        ),
+        "OAuth2AuthorizationCodeBearer",
+    ),
+    (
+        lambda d: OpenIdConnectAuth(
+            simple_validator,
+            openid_connect_url="https://idp.example/.well-known/openid-configuration",
+            description=d,
+        ),
+        "OpenIdConnect",
+    ),
+]
+
+
+class TestSchemeDescription:
+    """description= (and bearer_format=) reach the OpenAPI security scheme object."""
+
+    @staticmethod
+    def _scheme(auth, name: str) -> dict:
+        return _client(auth).app.openapi()["components"]["securitySchemes"][name]
+
+    @pytest.mark.parametrize(
+        ("build", "scheme_name"),
+        _DESCRIBED_SOURCES,
+        ids=[name for _, name in _DESCRIBED_SOURCES],
+    )
+    def test_description_is_published(self, build, scheme_name):
+        scheme = self._scheme(build("Who may call this"), scheme_name)
+        assert scheme["description"] == "Who may call this"
+
+    @pytest.mark.parametrize(
+        ("build", "scheme_name"),
+        _DESCRIBED_SOURCES,
+        ids=[name for _, name in _DESCRIBED_SOURCES],
+    )
+    def test_omitted_description_leaves_no_key(self, build, scheme_name):
+        """A default None must not surface as \"description\": null."""
+        assert "description" not in self._scheme(build(None), scheme_name)
+
+    def test_bearer_format_is_published(self):
+        auth = HTTPBearerAuth(simple_validator, bearer_format="JWT")
+        assert self._scheme(auth, "HTTPBearer")["bearerFormat"] == "JWT"
+
+    def test_bearer_format_omitted_leaves_no_key(self):
+        assert "bearerFormat" not in self._scheme(
+            HTTPBearerAuth(simple_validator), "HTTPBearer"
+        )
+
+
 class TestSchemeIsNotAPerRequestDependency:
     """Doc-only schemes reach OpenAPI without being resolved on every request."""
 
