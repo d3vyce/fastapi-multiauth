@@ -14,6 +14,7 @@ from fastapi_multiauth import (
     HTTPBearerAuth,
     JWTValidator,
     MultiAuth,
+    OAuth2PasswordBearerAuth,
 )
 
 COOKIE_SECRET = "benchmark-cookie-secret-32-bytes-min!"
@@ -151,3 +152,24 @@ def test_bearer_dispatch(benchmark):
     identity = benchmark(lambda: drive(auth.dispatch(request, [])))
 
     assert identity == {"user": TOKEN}
+
+
+async def validate_scoped(credential: str, scopes: list[str]) -> dict:
+    """Scope-aware twin of validate(): the guards only run on a scoped route."""
+    return {"user": credential, "scopes": scopes}
+
+
+def test_multiauth_dispatch_scoped(benchmark):
+    """The scoped path: every route-scope guard, plus a published catalogue."""
+    auth = MultiAuth(
+        HTTPBearerAuth(validate_scoped, prefix="user_"),
+        APIKeyHeaderAuth("X-API-Key", validate_scoped),
+        OAuth2PasswordBearerAuth(
+            validate_scoped, token_url="/token", scopes={"admin": "Everything"}
+        ),
+    )
+    request = Request(_scope((b"authorization", f"Bearer {TOKEN}".encode())))
+
+    identity = benchmark(lambda: drive(auth.dispatch(request, ["admin"])))
+
+    assert identity == {"user": TOKEN, "scopes": ["admin"]}

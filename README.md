@@ -81,6 +81,7 @@ async def me(user=Security(auth)):
     - **`APIKeyCookieAuth`**: cookie sessions with optional HMAC-SHA256 signing (via [itsdangerous](https://itsdangerous.palletsprojects.com/)), embedded expiry, key rotation, and optional per-session ids so your app can list and revoke sessions individually.
     - **`APIKeyHeaderAuth`**: `X-API-Key`-style schemes, with **`APIKeyQueryAuth`** for legacy clients that can only pass a query parameter.
     - **`HTTPBasicAuth`**: `validator(username, password)` with `WWW-Authenticate` realm support.
+    - **`OAuth2AuthorizationCodeBearerAuth`**, **`OAuth2PasswordBearerAuth`**, **`OpenIdConnectAuth`**: validate tokens an OAuth 2.0 / OIDC provider issued, and publish the scope catalogue so `/docs` offers a real Authorize dialog.
 - **Token hashing helpers**: `hash_token`/`verify_token_hash` package the "store the hash, never the token" pattern with constant-time comparison.
 - **JWT validation** (`fastapi-multiauth[jwt]` extra): `JWTValidator` for `HTTPBearerAuth`: HS256 or provider JWKS (Keycloak/Auth0/Entra/Authentik) with TTL caching and rotation-aware `kid` refresh, `aud`/`iss`/`exp` checks, configurable scope claims, and a `claims_to_identity` hook.
 - **Security scopes**: `Security(auth, scopes=[...])` forwards the declared scopes to validators that accept a `scopes` parameter.

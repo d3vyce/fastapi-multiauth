@@ -1,4 +1,4 @@
-"""Bearer token authentication source."""
+"""Bearer token authentication sources."""
 
 import secrets
 from collections.abc import Callable
@@ -13,7 +13,36 @@ from ..abc import ValidatedAuthSource
 from ..utils import authorization_credential
 
 
-class HTTPBearerAuth(ValidatedAuthSource):
+class _BearerSource(ValidatedAuthSource):
+    """Extraction shared by every source carrying an ``Authorization: Bearer`` token."""
+
+    _prefix: str | None = None
+
+    def www_authenticate(self) -> str:
+        """``Bearer`` challenge per RFC 6750 §3."""
+        return "Bearer"
+
+    async def extract(self, request: Request) -> str | None:
+        """Return the bearer token, or ``None`` when absent, empty, or mismatched.
+
+        The ``Bearer`` scheme is matched case-insensitively; the prefix, when
+        configured, is kept in the returned value.
+        """
+        token = authorization_credential(request, "bearer")
+        if token is None:
+            return None
+        if self._prefix is not None and not token.startswith(self._prefix):
+            return None
+        return token
+
+    async def authenticate_scoped(self, credential: str, scopes: list[str]) -> Any:
+        """Validate the credential, re-checking the prefix and forwarding scopes."""
+        if self._prefix is not None and not credential.startswith(self._prefix):
+            raise UnauthorizedError()
+        return await self._call_validator(credential, scopes=scopes)
+
+
+class HTTPBearerAuth(_BearerSource):
     """Bearer token authentication source (wraps ``HTTPBearer`` for OpenAPI).
 
     The validator is called as ``await validator(credential, **kwargs)``.
@@ -42,29 +71,6 @@ class HTTPBearerAuth(ValidatedAuthSource):
             HTTPBearer(auto_error=False, scheme_name=scheme_name),
             **kwargs,
         )
-
-    def www_authenticate(self) -> str:
-        """``Bearer`` challenge per RFC 6750 §3."""
-        return "Bearer"
-
-    async def extract(self, request: Request) -> str | None:
-        """Return the bearer token, or ``None`` when absent, empty, or mismatched.
-
-        The ``Bearer`` scheme is matched case-insensitively; the prefix, when
-        configured, is kept in the returned value.
-        """
-        token = authorization_credential(request, "bearer")
-        if token is None:
-            return None
-        if self._prefix is not None and not token.startswith(self._prefix):
-            return None
-        return token
-
-    async def authenticate_scoped(self, credential: str, scopes: list[str]) -> Any:
-        """Validate the credential, re-checking the prefix and forwarding scopes."""
-        if self._prefix is not None and not credential.startswith(self._prefix):
-            raise UnauthorizedError()
-        return await self._call_validator(credential, scopes=scopes)
 
     def generate_token(self, nbytes: int = 32) -> str:
         """Generate a secure URL-safe random token, prefixed when configured.

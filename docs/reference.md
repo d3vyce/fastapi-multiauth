@@ -13,6 +13,9 @@ from fastapi_multiauth import (
     ForbiddenError,
     JWTValidator,
     MultiAuth,
+    OAuth2AuthorizationCodeBearerAuth,
+    OAuth2PasswordBearerAuth,
+    OpenIdConnectAuth,
     UnauthorizedError,
     hash_token,
     verify_token_hash,
@@ -52,6 +55,12 @@ from fastapi_multiauth.oauth import (
 ## ::: fastapi_multiauth.APIKeyQueryAuth
 
 ## ::: fastapi_multiauth.HTTPBasicAuth
+
+## ::: fastapi_multiauth.OAuth2AuthorizationCodeBearerAuth
+
+## ::: fastapi_multiauth.OAuth2PasswordBearerAuth
+
+## ::: fastapi_multiauth.OpenIdConnectAuth
 
 ## ::: fastapi_multiauth.MultiAuth
 

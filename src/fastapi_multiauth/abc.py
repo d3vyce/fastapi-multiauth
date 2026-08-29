@@ -46,14 +46,23 @@ def _accepts_kwarg(fn: Callable[..., Any], name: str) -> bool:
     )
 
 
-def _unenforceable_scopes_error(owner: object, scopes: list[str]) -> RuntimeError:
-    """Error for scopes declared on a route that this source cannot check."""
+def _unenforceable_scopes_error(
+    owner: object, scopes: list[str], reason: str | None = None
+) -> RuntimeError:
+    """Error for scopes declared on a route that this source cannot check.
+
+    Args:
+        owner: The source (or combination) refusing the route.
+        scopes: The scopes the route declared.
+        reason: Why they cannot be checked, when it is not simply that this
+            source's own validator does not accept them.
+    """
+    why = reason or "its validator does not declare a 'scopes' parameter"
     return RuntimeError(
         f"{type(owner).__name__} cannot enforce the security scopes "
-        f"{scopes!r} declared on this route: its validator does not "
-        "declare a 'scopes' parameter. Add one to the validator (or "
-        "override authenticate_scoped()), or remove scopes=... from "
-        "Security()."
+        f"{scopes!r} declared on this route: {why}. "
+        "Add one to the validator (or override authenticate_scoped()), "
+        "or remove scopes=... from Security()."
     )
 
 
@@ -64,6 +73,18 @@ def _anonymous_scopes_error(owner: object, scopes: list[str]) -> RuntimeError:
         f"security scopes {scopes!r}: an anonymous caller can never satisfy "
         "them, so the route would be gated or not depending on whether a "
         "credential was sent. Drop optional() or drop scopes=... from Security()."
+    )
+
+
+def _undeclared_scopes_error(
+    owner: object, unknown: list[str], catalogue: dict[str, str]
+) -> RuntimeError:
+    """Error for route scopes missing from the source's published catalogue."""
+    known = ", ".join(sorted(catalogue)) or "nothing"
+    return RuntimeError(
+        f"{type(owner).__name__} does not publish the security scopes "
+        f"{unknown!r} declared on this route: its catalogue lists {known}. "
+        "Add them to scopes={...} on the source, or correct the route."
     )
 
 
@@ -110,6 +131,8 @@ class AuthSource(ABC):
 
     scheme: SecurityBase | None
     _optional: bool = False
+    _scope_catalogue: dict[str, str] | None = None
+    """The scopes this source publishes to OpenAPI, ``None`` when it has none."""
 
     def __init__(self, scheme: Any = None) -> None:
         """Set up the FastAPI dependency signature.
@@ -181,6 +204,15 @@ class AuthSource(ABC):
         clone._optional = True
         return clone
 
+    def _reject_undeclared_scopes(self, scopes: list[str]) -> None:
+        """Refuse a route declaring scopes this source never published."""
+        catalogue = self._scope_catalogue
+        if not catalogue:
+            return
+        unknown = [scope for scope in scopes if scope not in catalogue]
+        if unknown:
+            raise _undeclared_scopes_error(self, unknown, catalogue)
+
     async def dispatch(self, request: Request, scopes: list[str]) -> Any:
         """Extract the credential, then authenticate it with the route scopes.
 
@@ -192,8 +224,10 @@ class AuthSource(ABC):
             RuntimeError: When an :meth:`optional` copy meets a route that
                 declares scopes, which an anonymous caller could never satisfy.
         """
-        if self._optional and scopes:
-            raise _anonymous_scopes_error(self, scopes)
+        if scopes:
+            if self._optional:
+                raise _anonymous_scopes_error(self, scopes)
+            self._reject_undeclared_scopes(scopes)
         credential = await self.extract(request)
         if credential is None:
             if self._optional:
