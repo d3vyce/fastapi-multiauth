@@ -4,7 +4,10 @@ import functools
 import hashlib
 import hmac
 import inspect
+import math
+import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Any
 
 import anyio.to_thread
@@ -68,6 +71,37 @@ def add_challenge(exc: HTTPException, challenge: str | None) -> None:
     if "WWW-Authenticate" not in headers:
         headers["WWW-Authenticate"] = challenge
         exc.headers = headers
+
+
+def credential_age(instant: Any) -> float | None:
+    """Seconds since *instant*, or ``None`` when it is not a point in time.
+
+    Epoch seconds or a ``datetime`` (naive read as UTC). Anything else,
+    a missing or non-finite instant included, fails closed.
+    """
+    if isinstance(instant, datetime):
+        if instant.tzinfo is None:
+            instant = instant.replace(tzinfo=timezone.utc)
+        instant = instant.timestamp()
+    elif isinstance(instant, bool) or not isinstance(instant, (int, float)):
+        return None
+    try:
+        age = time.time() - instant
+    except OverflowError:
+        return None
+    return age if math.isfinite(age) else None
+
+
+def step_up_challenge(challenge: str | None, max_age: float) -> dict[str, str] | None:
+    """The RFC 9470 step-up ``WWW-Authenticate`` header, ``None`` without a challenge."""
+    if not challenge:
+        return None
+    separator = ", " if " " in challenge else " "
+    return challenge_headers(
+        f'{challenge}{separator}error="insufficient_user_authentication", '
+        'error_description="More recent authentication is required", '
+        f'max_age="{max(1, int(max_age))}"'
+    )
 
 
 def authorization_credential(request: Request, scheme: str) -> str | None:

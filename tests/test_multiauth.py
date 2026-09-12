@@ -3,9 +3,11 @@
 import base64
 import hashlib
 import json
+import math
 import secrets
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Any, ClassVar, cast
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
@@ -25,6 +27,7 @@ from fastapi import (
     Security,
 )
 from fastapi.openapi.models import APIKey, APIKeyIn
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer
 from fastapi.security.base import SecurityBase
 from fastapi.testclient import TestClient
@@ -45,6 +48,7 @@ from fastapi_multiauth import (
     OAuth2PasswordBearerAuth,
     OpenIdConnectAuth,
     SchemeRequirement,
+    StaleCredentialError,
     auth_surface,
     hash_token,
     verify_token_hash,
@@ -4610,6 +4614,479 @@ class TestOptionalAuth:
                 ).status_code
                 == 401
             )
+
+
+class TestAuthenticatedAtHook:
+    """The instant a source reports for fresh(), read directly."""
+
+    def test_a_signed_cookie_reports_its_mint_time(self):
+        auth = APIKeyCookieAuth(
+            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
+        )
+        instant = auth.authenticated_at(auth._sign(VALID_COOKIE))
+
+        assert instant is not None
+        assert abs(instant - time.time()) < 5
+
+    @pytest.mark.parametrize(
+        ("auth", "credential"),
+        [
+            pytest.param(
+                APIKeyCookieAuth("session", cookie_validator),
+                VALID_COOKIE,
+                id="unsigned-cookie",
+            ),
+            pytest.param(
+                APIKeyCookieAuth("session", cookie_validator, secret_key=COOKIE_SECRET),
+                "forged",
+                id="forged-signed-cookie",
+            ),
+            pytest.param(_HeaderAuth(secret="s3cr3t"), "s3cr3t", id="default-source"),
+        ],
+    )
+    def test_a_source_that_cannot_date_reports_no_instant(self, auth, credential):
+        assert auth.authenticated_at(credential) is None
+
+
+class TestFreshness:
+    """fresh(): a credential proven too long ago gets an RFC 9470 step-up 401."""
+
+    STEP_UP: ClassVar[str] = (
+        'Bearer error="insufficient_user_authentication", '
+        'error_description="More recent authentication is required", '
+        'max_age="300"'
+    )
+    BEARER: ClassVar[dict[str, str]] = {"Authorization": f"Bearer {VALID_TOKEN}"}
+
+    @staticmethod
+    def _cookie(**kwargs) -> APIKeyCookieAuth:
+        return APIKeyCookieAuth(
+            "session",
+            cookie_validator,
+            secret_key=COOKIE_SECRET,
+            secure=False,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _routes(auth, dep):
+        def setup(app: FastAPI):
+            @app.get("/sensitive")
+            async def sensitive(user=Security(dep)):
+                return {"user": user}
+
+            @app.get("/me")
+            async def me(user=Security(auth)):
+                return {"user": user}
+
+        return setup
+
+    def _client(self, auth, max_age: float = 300, **kwargs) -> TestClient:
+        return TestClient(_app(self._routes(auth, auth.fresh(max_age, **kwargs))))
+
+    @staticmethod
+    def _dated_bearer(proven_at) -> HTTPBearerAuth:
+        """A bearer source whose identity carries when the factor was proven."""
+
+        async def validate(token: str) -> dict:
+            return {**await simple_validator(token), "proven_at": proven_at}
+
+        return HTTPBearerAuth(validate)
+
+    def _probe_client(self, proven_at, **kwargs) -> TestClient:
+        """Guarded client whose window is read off the identity."""
+        return self._client(
+            self._dated_bearer(proven_at),
+            authenticated_at=lambda identity: identity["proven_at"],
+            **kwargs,
+        )
+
+    def _get(self, client: TestClient):
+        """The guarded route, reached with the standard bearer token."""
+        return client.get("/sensitive", headers=self.BEARER)
+
+    @staticmethod
+    def _later(seconds: float = 600):
+        """Move the clock past the 300s window."""
+        return patch("time.time", return_value=time.time() + seconds)
+
+    def test_a_freshly_minted_cookie_passes(self):
+        auth = self._cookie()
+        response = self._client(auth).get(
+            "/sensitive", cookies={"session": auth._sign(VALID_COOKIE)}
+        )
+        assert response.status_code == 200
+        assert response.json() == {"user": {"session": VALID_COOKIE}}
+
+    def test_an_aged_cookie_is_refused_with_a_401_and_no_challenge(self):
+        """The apiKey scheme has none to carry, so the body holds the signal."""
+        auth = self._cookie()
+        client = self._client(auth)
+        signed = auth._sign(VALID_COOKIE)
+
+        with self._later():
+            response = client.get("/sensitive", cookies={"session": signed})
+
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Insufficient user authentication"
+        assert "WWW-Authenticate" not in response.headers
+
+    def test_the_same_session_still_serves_the_unguarded_route(self):
+        """Freshness gates the sensitive route, it does not end the session."""
+        auth = self._cookie()
+        client = self._client(auth)
+        signed = auth._sign(VALID_COOKIE)
+
+        with self._later():
+            assert client.get("/me", cookies={"session": signed}).status_code == 200
+            assert (
+                client.get("/sensitive", cookies={"session": signed}).status_code == 401
+            )
+
+    def test_the_re_auth_loop_restores_freshness(self):
+        """set_cookie mints a new instant, so re-auth fixes the 401 without a login."""
+        auth = self._cookie()
+
+        def setup(app: FastAPI):
+            @app.post("/re-auth")
+            async def re_auth(response: Response):
+                auth.set_cookie(response, VALID_COOKIE)
+                return {"ok": True}
+
+            @app.get("/sensitive")
+            async def sensitive(user=Security(auth.fresh(300))):
+                return {"user": user}
+
+        client = TestClient(_app(setup))
+        client.cookies.set("session", auth._sign(VALID_COOKIE))
+
+        with self._later():
+            assert client.get("/sensitive").status_code == 401
+            assert client.post("/re-auth").status_code == 200
+            assert client.get("/sensitive").status_code == 200
+
+    def test_a_session_id_cookie_dates_the_same_way(self):
+        """The sid payload layout does not hide the timestamp."""
+        auth = APIKeyCookieAuth(
+            "session",
+            sid_validator,
+            secret_key=COOKIE_SECRET,
+            session_id=True,
+            secure=False,
+        )
+        client = self._client(auth)
+        signed = auth._sign(f"sid123.{VALID_COOKIE}")
+
+        assert client.get("/sensitive", cookies={"session": signed}).status_code == 200
+        with self._later():
+            assert (
+                client.get("/sensitive", cookies={"session": signed}).status_code == 401
+            )
+
+    def test_a_forged_cookie_is_invalid_rather_than_stale(self):
+        """A credential that does not validate is refused as invalid: re-auth
+        would not help it."""
+        client = self._client(self._cookie())
+
+        response = client.get("/sensitive", cookies={"session": "forged"})
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Unauthorized"
+
+    def test_a_stale_bearer_gets_the_step_up_challenge(self):
+        response = self._get(self._probe_client(time.time() - 600))
+
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Insufficient user authentication"
+        assert response.headers["WWW-Authenticate"] == self.STEP_UP
+
+    @pytest.mark.parametrize(
+        ("realm", "expected_prefix"),
+        [
+            pytest.param("api", 'Basic realm="api", ', id="plain-realm"),
+            pytest.param(
+                'api", max_age="99999',
+                'Basic realm="api\\", max_age=\\"99999", ',
+                id="realm-cannot-inject-parameters",
+            ),
+        ],
+    )
+    def test_a_realm_stays_inside_its_quoted_string(self, realm, expected_prefix):
+        """RFC 7235: further auth-params follow a comma, and RFC 7230 §3.2.6:
+        the escaped realm cannot terminate the quoted-string."""
+
+        async def validate(username: str, password: str) -> dict:
+            return {"user": username, "proven_at": time.time() - 600}
+
+        basic = HTTPBasicAuth(validate, realm=realm)
+        client = self._client(
+            basic, authenticated_at=lambda identity: identity["proven_at"]
+        )
+        challenge = client.get(
+            "/sensitive", headers=TestBasicAuth._header("alice", "pw")
+        ).headers["WWW-Authenticate"]
+        assert challenge.startswith(expected_prefix)
+        assert challenge.endswith('max_age="300"')
+
+    def test_an_invalid_token_is_not_reported_as_stale(self):
+        client = self._probe_client(time.time() - 600)
+
+        response = client.get("/sensitive", headers={"Authorization": "Bearer wrong"})
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Unauthorized"
+        assert response.headers["WWW-Authenticate"] == "Bearer"
+
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            pytest.param(lambda at: at, id="epoch-float"),
+            pytest.param(int, id="epoch-int"),
+            pytest.param(
+                lambda at: datetime.fromtimestamp(at, timezone.utc),
+                id="aware-datetime",
+            ),
+            pytest.param(
+                lambda at: datetime.fromtimestamp(at, timezone.utc).replace(
+                    tzinfo=None
+                ),
+                id="naive-datetime-read-as-utc",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("age", "status"), [(0, 200), (600, 401)], ids=["fresh", "aged"]
+    )
+    def test_a_probe_may_report_any_instant_shape(self, shape, age, status):
+        instant = shape(time.time() - age)
+        assert self._get(self._probe_client(instant)).status_code == status
+
+    @pytest.mark.parametrize(
+        "instant",
+        [None, "yesterday", True, math.nan, math.inf, 10**400],
+        ids=["none", "string", "bool", "nan", "inf", "overflowing-int"],
+    )
+    def test_an_unusable_instant_fails_closed(self, instant):
+        """No instant means not fresh, never 'assume fresh'."""
+        assert self._get(self._probe_client(instant)).status_code == 401
+
+    def test_an_async_probe_is_awaited(self):
+        bearer = self._dated_bearer(time.time())
+
+        async def proven_at(identity) -> float:
+            return identity["proven_at"]
+
+        client = self._client(bearer, authenticated_at=proven_at)
+
+        assert self._get(client).status_code == 200
+
+    @pytest.mark.parametrize(
+        ("offset", "leeway", "status"),
+        [
+            pytest.param(-310, 0, 401, id="past-window"),
+            pytest.param(-310, 30, 200, id="past-window-within-leeway"),
+            pytest.param(20, 0, 401, id="future"),
+            pytest.param(20, 30, 200, id="future-within-leeway"),
+            pytest.param(365 * 86400, 30, 401, id="far-future"),
+        ],
+    )
+    def test_leeway_tolerates_clock_skew_either_way(self, offset, leeway, status):
+        """A skewed clock cannot keep a credential fresh indefinitely."""
+        client = self._probe_client(time.time() + offset, leeway=leeway)
+        assert self._get(client).status_code == status
+
+    @pytest.mark.parametrize(
+        "auth",
+        [
+            pytest.param(HTTPBearerAuth(simple_validator), id="bearer"),
+            pytest.param(
+                APIKeyCookieAuth("session", cookie_validator), id="unsigned-cookie"
+            ),
+        ],
+    )
+    def test_a_source_that_cannot_date_a_credential_refuses_fresh(self, auth):
+        with pytest.raises(ValueError, match="cannot date a credential"):
+            auth.fresh(300)
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            pytest.param({"max_age": 0}, "max_age must be a positive", id="max_age"),
+            pytest.param(
+                {"max_age": math.nan}, "max_age must be a positive", id="max_age-nan"
+            ),
+            pytest.param(
+                {"max_age": math.inf}, "max_age must be a positive", id="max_age-inf"
+            ),
+            pytest.param(
+                {"max_age": 300, "leeway": -1},
+                "leeway must be a finite, non-negative",
+                id="leeway",
+            ),
+            pytest.param(
+                {"max_age": 300, "leeway": math.nan},
+                "leeway must be a finite, non-negative",
+                id="leeway-nan",
+            ),
+            pytest.param(
+                {"max_age": 300, "leeway": math.inf},
+                "leeway must be a finite, non-negative",
+                id="leeway-inf",
+            ),
+        ],
+    )
+    def test_the_window_is_validated(self, kwargs, message):
+        with pytest.raises(ValueError, match=message):
+            self._cookie().fresh(**kwargs)
+
+    @pytest.mark.parametrize(
+        "make",
+        [
+            pytest.param(lambda cookie: cookie, id="source"),
+            pytest.param(MultiAuth, id="multiauth"),
+        ],
+    )
+    def test_fresh_and_optional_are_refused_in_either_order(self, make):
+        auth = make(self._cookie())
+
+        with pytest.raises(ValueError, match="cannot be both optional"):
+            auth.fresh(300).optional()
+        with pytest.raises(ValueError, match="cannot be both optional"):
+            auth.optional().fresh(300)
+
+    @pytest.mark.parametrize(
+        "compose",
+        [
+            pytest.param(
+                lambda auth: auth.fresh(300).require(role="admin"),
+                id="fresh-then-require",
+            ),
+            pytest.param(
+                lambda auth: auth.require(role="admin").fresh(300),
+                id="require-then-fresh",
+            ),
+        ],
+    )
+    def test_fresh_and_require_compose_in_either_order(self, compose):
+        def validate(value: str, *, role: str) -> dict:
+            return {"session": value, "role": role}
+
+        auth = APIKeyCookieAuth(
+            "session", validate, secret_key=COOKIE_SECRET, secure=False
+        )
+        signed = auth._sign(VALID_COOKIE)
+        client = TestClient(_app(self._routes(auth, compose(auth))))
+
+        response = client.get("/sensitive", cookies={"session": signed})
+        assert response.json() == {"user": {"session": VALID_COOKIE, "role": "admin"}}
+        with self._later():
+            assert (
+                client.get("/sensitive", cookies={"session": signed}).status_code == 401
+            )
+
+    def test_openapi_still_declares_the_scheme(self):
+        auth = self._cookie()
+        app = _app(self._routes(auth, auth.fresh(300)))
+
+        assert app.openapi()["paths"]["/sensitive"]["get"]["security"] == [
+            {"APIKeyCookie_session": []}
+        ]
+
+    def test_stale_credential_error_is_an_unauthorized_error(self):
+        """Existing 401 handling keeps catching it."""
+        assert issubclass(StaleCredentialError, UnauthorizedError)
+        assert StaleCredentialError().status_code == 401
+        assert StaleCredentialError().max_age is None
+
+    def test_the_window_reaches_an_exception_handler(self):
+        """A handler rendering its own body reads max_age instead of the message."""
+        auth = self._cookie()
+        app = _app(self._routes(auth, auth.fresh(300)))
+
+        @app.exception_handler(StaleCredentialError)
+        async def handler(request: Request, exc: StaleCredentialError):
+            return JSONResponse({"reauth_within": exc.max_age}, status_code=401)
+
+        client = TestClient(app)
+        signed = auth._sign(VALID_COOKIE)
+
+        with self._later():
+            response = client.get("/sensitive", cookies={"session": signed})
+
+        assert response.json() == {"reauth_within": 300}
+
+    def test_multiauth_enforces_freshness_on_the_matched_source(self):
+        cookie = self._cookie()
+        other = APIKeyCookieAuth(
+            "admin_session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
+        )
+        client = self._client(MultiAuth(cookie, other))
+        signed = cookie._sign(VALID_COOKIE)
+
+        assert client.get("/sensitive", cookies={"session": signed}).status_code == 200
+        with self._later():
+            assert (
+                client.get("/sensitive", cookies={"session": signed}).status_code == 401
+            )
+
+    def test_multiauth_refuses_fresh_when_a_source_cannot_be_dated(self):
+        """A source that cannot be dated would be the way around the window."""
+        auth = MultiAuth(self._cookie(), HTTPBearerAuth(simple_validator))
+
+        with pytest.raises(ValueError, match="HTTPBearerAuth cannot date"):
+            auth.fresh(300)
+
+    def test_a_window_is_set_once(self):
+        with pytest.raises(ValueError, match="already has a freshness window"):
+            self._cookie().fresh(60).fresh(300)
+
+    def test_multiauth_fresh_cannot_widen_a_source_window(self):
+        auth = MultiAuth(self._cookie().fresh(60), self._dated_bearer(time.time()))
+
+        with pytest.raises(
+            ValueError, match="APIKeyCookieAuth already has a freshness window"
+        ):
+            auth.fresh(300, authenticated_at=lambda identity: identity["proven_at"])
+
+    def test_multiauth_fresh_accepts_a_probe_for_every_source(self):
+        auth = MultiAuth(self._dated_bearer(time.time() - 600), self._cookie())
+        client = self._client(
+            auth, authenticated_at=lambda identity: identity.get("proven_at")
+        )
+
+        response = self._get(client)
+        assert response.status_code == 401
+        assert response.headers["WWW-Authenticate"] == self.STEP_UP
+
+
+class TestFreshnessWithJWT:
+    """The OIDC auth_time claim is the instant for a JWT, not iat."""
+
+    @staticmethod
+    def _client() -> TestClient:
+        return _client(
+            HTTPBearerAuth(JWTValidator(secret=JWT_SECRET)).fresh(
+                300, authenticated_at=lambda claims: claims.get("auth_time")
+            )
+        )
+
+    def _get(self, client: TestClient, token: str):
+        return client.get("/me", headers={"Authorization": f"Bearer {token}"})
+
+    def test_a_recent_auth_time_passes(self):
+        token = _hs_token(_claims(auth_time=int(time.time()) - 10))
+        assert self._get(self._client(), token).status_code == 200
+
+    def test_an_old_auth_time_is_refused(self):
+        token = _hs_token(_claims(auth_time=int(time.time()) - 600))
+        response = self._get(self._client(), token)
+
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Insufficient user authentication"
+        assert response.headers["WWW-Authenticate"] == TestFreshness.STEP_UP
+
+    def test_a_missing_auth_time_fails_closed(self):
+        """iat is not a substitute: it dates the token, not the login."""
+        token = _hs_token(_claims(iat=int(time.time())))
+        assert self._get(self._client(), token).status_code == 401
 
 
 class TestOAuth2Sources:
