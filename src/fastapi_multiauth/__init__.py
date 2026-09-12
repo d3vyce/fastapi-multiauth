@@ -11,7 +11,7 @@ exported here, and require the ``oauth`` extra. Import them explicitly::
 
 from . import oauth
 from .abc import AuthSource
-from .exceptions import ForbiddenError, UnauthorizedError
+from .exceptions import ForbiddenError, StaleCredentialError, UnauthorizedError
 from .jwt import JWTValidator
 from .sources import (
     APIKeyCookieAuth,
@@ -41,6 +41,7 @@ __all__ = [
     "OAuth2AuthorizationCodeBearerAuth",
     "OAuth2PasswordBearerAuth",
     "OpenIdConnectAuth",
+    "StaleCredentialError",
     "UnauthorizedError",
     "hash_token",
     "oauth",

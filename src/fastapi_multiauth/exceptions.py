@@ -25,6 +25,37 @@ class UnauthorizedError(HTTPException):
         )
 
 
+class StaleCredentialError(UnauthorizedError):
+    """HTTP 401 — the credential is valid but was proven too long ago.
+
+    Raised by a route guarded with :meth:`~fastapi_multiauth.AuthSource.fresh`.
+    ``detail`` is the stable string ``"Insufficient user authentication"``, and
+    sources with an HTTP auth scheme carry the
+    `RFC 9470 <https://datatracker.ietf.org/doc/html/rfc9470>`_ step-up
+    challenge. A handler rendering its own body reads :attr:`max_age`.
+    """
+
+    max_age: float | None
+    """The freshness window the credential missed, in seconds."""
+
+    def __init__(
+        self,
+        detail: str = "Insufficient user authentication",
+        headers: dict[str, str] | None = None,
+        *,
+        max_age: float | None = None,
+    ) -> None:
+        """Initialize the exception.
+
+        Args:
+            detail: Human-readable message returned in the response body.
+            headers: Extra response headers (e.g. the step-up challenge).
+            max_age: The freshness window that was missed, in seconds.
+        """
+        self.max_age = max_age
+        super().__init__(detail=detail, headers=headers)
+
+
 class ForbiddenError(HTTPException):
     """HTTP 403 — the identity is authenticated but lacks permission.
 
