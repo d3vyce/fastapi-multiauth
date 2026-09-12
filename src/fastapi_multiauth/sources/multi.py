@@ -2,6 +2,7 @@
 
 import copy
 import inspect
+from collections.abc import Callable, Iterable
 from typing import Annotated, Any, Self, cast
 
 from fastapi import Depends
@@ -14,6 +15,7 @@ from ..abc import (
     AuthSource,
     _anonymous_scopes_error,
     _carry_scheme,
+    _fresh_optional_error,
     _unenforceable_scopes_error,
 )
 from ..utils import challenge_headers
@@ -97,9 +99,44 @@ class MultiAuth:
         return self._www_authenticate
 
     def optional(self) -> Self:
-        """Return a copy that yields ``None`` when no source has a credential."""
+        """Return a copy that yields ``None`` when no source has a credential.
+
+        Raises:
+            ValueError: On a :meth:`fresh` copy: anonymous is never fresh.
+        """
+        if any(source._freshness for source in self._sources):
+            raise _fresh_optional_error(self)
         clone = copy.copy(self)
         clone._optional = True
+        return clone
+
+    def fresh(
+        self,
+        max_age: float,
+        *,
+        authenticated_at: Callable[..., Any] | None = None,
+        leeway: float = 0.0,
+    ) -> "MultiAuth":
+        """Return a copy whose sources all require a recently proven credential.
+
+        Applies :meth:`AuthSource.fresh` to every source, so one that cannot be
+        dated refuses here instead of becoming the way around the window.
+
+        Raises:
+            ValueError: As :meth:`AuthSource.fresh`, naming the source that
+                cannot be dated or already has a window of its own.
+        """
+        if self._optional:
+            raise _fresh_optional_error(self)
+        return self._with_sources(
+            source.fresh(max_age, authenticated_at=authenticated_at, leeway=leeway)
+            for source in self._sources
+        )
+
+    def _with_sources(self, sources: Iterable[AuthSource]) -> "MultiAuth":
+        """A new :class:`MultiAuth` over *sources*, carrying this one's flags."""
+        clone = MultiAuth(*sources)
+        clone._optional = self._optional
         return clone
 
     async def dispatch(self, request: HTTPConnection, scopes: list[str]) -> Any:
@@ -132,12 +169,9 @@ class MultiAuth:
 
     def require(self, **kwargs: Any) -> "MultiAuth":
         """Return a new :class:`MultiAuth` with kwargs forwarded to each source."""
-        new_sources = tuple(
+        return self._with_sources(
             cast(Any, source).require(**kwargs)
             if hasattr(source, "require")
             else source
             for source in self._sources
         )
-        clone = MultiAuth(*new_sources)
-        clone._optional = self._optional
-        return clone
