@@ -13,6 +13,7 @@ from fastapi_multiauth import (
     ForbiddenError,
     JWTValidator,
     MultiAuth,
+    StaleCredentialError,
     OAuth2AuthorizationCodeBearerAuth,
     OAuth2PasswordBearerAuth,
     OpenIdConnectAuth,
@@ -79,6 +80,8 @@ from fastapi_multiauth.oauth import (
 ## ::: fastapi_multiauth.UnauthorizedError
 
 ## ::: fastapi_multiauth.ForbiddenError
+
+## ::: fastapi_multiauth.StaleCredentialError
 
 ## OAuth helpers
 
