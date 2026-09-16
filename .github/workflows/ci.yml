@@ -53,6 +53,27 @@ jobs:
       - name: Run ty
         run: uv run ty check
 
+  test-floor:
+    name: Test (FastAPI floor)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Pin FastAPI to the declared floor
+        run: uv pip install "fastapi==0.123.0"
+
+      - name: Run unit tests without re-syncing away the pin
+        run: uv run --no-sync pytest -q
+
   test:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest

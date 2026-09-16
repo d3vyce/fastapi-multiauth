@@ -16,7 +16,10 @@ from fastapi_multiauth import (
     OAuth2AuthorizationCodeBearerAuth,
     OAuth2PasswordBearerAuth,
     OpenIdConnectAuth,
+    RouteAuth,
+    SchemeRequirement,
     UnauthorizedError,
+    auth_surface,
     hash_token,
     verify_token_hash,
 )
@@ -67,6 +70,14 @@ from fastapi_multiauth.oauth import (
 ## Validators
 
 ## ::: fastapi_multiauth.JWTValidator
+
+## Introspection
+
+## ::: fastapi_multiauth.auth_surface
+
+## ::: fastapi_multiauth.RouteAuth
+
+## ::: fastapi_multiauth.SchemeRequirement
 
 ## Token helpers
 
