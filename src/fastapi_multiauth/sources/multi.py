@@ -2,6 +2,7 @@
 
 import copy
 import inspect
+from collections.abc import Callable
 from typing import Annotated, Any, cast
 
 from fastapi import Depends, Request
@@ -13,6 +14,7 @@ from ..abc import (
     AuthSource,
     _anonymous_scopes_error,
     _carry_scheme,
+    _fresh_optional_error,
     _unenforceable_scopes_error,
 )
 from ..utils import challenge_headers
@@ -96,10 +98,40 @@ class MultiAuth:
         return self._www_authenticate
 
     def optional(self) -> "MultiAuth":
-        """Return a copy that yields ``None`` when no source has a credential."""
+        """Return a copy that yields ``None`` when no source has a credential.
+
+        Raises:
+            ValueError: On a :meth:`fresh` copy: anonymous is never fresh.
+        """
+        if any(source._max_age for source in self._sources):
+            raise _fresh_optional_error(self)
         clone = copy.copy(self)
         clone._optional = True
         return clone
+
+    def fresh(
+        self,
+        max_age: float,
+        *,
+        authenticated_at: Callable[..., Any] | None = None,
+        leeway: float = 0.0,
+    ) -> "MultiAuth":
+        """Return a copy whose sources all require a recently proven credential.
+
+        Applies :meth:`AuthSource.fresh` to every source, so one that cannot be
+        dated refuses here instead of becoming the way around the window.
+
+        Raises:
+            ValueError: As :meth:`AuthSource.fresh`, naming the undatable source.
+        """
+        if self._optional:
+            raise _fresh_optional_error(self)
+        return MultiAuth(
+            *(
+                source.fresh(max_age, authenticated_at=authenticated_at, leeway=leeway)
+                for source in self._sources
+            )
+        )
 
     async def dispatch(self, request: Request, scopes: list[str]) -> Any:
         """Authenticate with the first source whose credential is present."""

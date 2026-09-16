@@ -76,6 +76,96 @@ async def status(caller: Annotated[Service | None, Security(service_only)]):
 | a user token | 403, rejected by the validator |
 | an unknown token | 401 |
 
+## Freshness (step-up authentication)
+
+An endpoint that can take over the account (change a password, enrol a second factor, mint a token, revoke every other session) needs more than a valid session: it needs a factor proven *recently*. That is `fresh(max_age)`:
+
+```python
+session = APIKeyCookieAuth("session", validate_session, secret_key=settings.SECRET_KEY)
+FreshUser = Annotated[User, Security(session.fresh(300))]
+
+
+@app.post("/me/password")
+async def change_password(body: NewPassword, user: FreshUser):
+    await db.set_password(user.id, body.password)
+    return {"ok": True}
+```
+
+A stale credential gets a **401**, not a 403: re-authenticating fixes it. Sources with an HTTP auth scheme carry the [RFC 9470](https://datatracker.ietf.org/doc/html/rfc9470) step-up challenge:
+
+```http
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer error="insufficient_user_authentication",
+  error_description="More recent authentication is required", max_age="300"
+```
+
+Cookie and API-key schemes have no challenge to carry, so the body holds the signal: `detail` is the stable string `"Insufficient user authentication"`. `StaleCredentialError` subclasses `UnauthorizedError`, so existing 401 handling still catches it; handle it to answer in your own shape:
+
+```python
+@app.exception_handler(StaleCredentialError)
+async def stale(request: Request, exc: StaleCredentialError):
+    return JSONResponse(
+        {"error": "reauth_required", "within": exc.max_age}, status_code=401
+    )
+```
+
+### Where the instant comes from
+
+| Source | The instant |
+| --- | --- |
+| `APIKeyCookieAuth` with a `secret_key` | the signed cookie's own timestamp, no storage, no configuration |
+| A JWT with an `auth_time` claim | read off the claims with `authenticated_at=` |
+| Everything else (opaque tokens, database sessions) | whatever your validator knows, via `authenticated_at=` |
+
+`authenticated_at` is a sync or async callable taking the identity and returning epoch seconds or a `datetime` (naive ones read as UTC):
+
+```python
+bearer = HTTPBearerAuth(validate_token)
+fresh_bearer = bearer.fresh(300, authenticated_at=lambda user: user.last_login_at)
+```
+
+It runs per request on the guarded route, and a sync callable pays a worker-thread hop like a sync validator: prefer `async def`, and read the instant off the identity rather than querying for it again.
+
+A source that cannot date a credential and gets no `authenticated_at` raises `ValueError` at setup. An unsigned cookie is one of those: no signature, no trustworthy timestamp.
+
+**No instant means not fresh.** A callable returning `None` refuses the request.
+
+For JWTs use `auth_time`, the OIDC claim for when the end user authenticated. `iat` dates the *token*, so a silent reissue would make an old login look new. Require the claim while you are there:
+
+```python
+bearer = HTTPBearerAuth(
+    JWTValidator(
+        jwks_url=...,
+        audience="my-api",
+        required_claims=("exp", "auth_time"),
+    )
+).fresh(300, authenticated_at=lambda claims: claims.get("auth_time"))
+```
+
+`leeway=` tolerates clock skew in seconds, as `JWTValidator`'s own `leeway` does for `exp`.
+
+### The re-auth loop
+
+The 401 asks for re-authentication, re-authenticating rotates the credential, the retry passes. Every `set_cookie` mints a new timestamp, so a cookie session needs no extra state:
+
+```python
+@app.post("/me/re-auth")
+async def re_auth(body: Password, response: Response, user=Security(session)):
+    if not await check_password(user, body.password):
+        raise UnauthorizedError()
+    session.set_cookie(response, str(user.id))  # a new instant: the caller is fresh
+    return {"ok": True}
+```
+
+Mint the new credential before revoking the old one, as with any rotation. The same rotation leaves the caller fresh right after a password change.
+
+!!! warning "A client that refreshes on a timer is always fresh"
+    Freshness measures the age of the *credential*, so anything that silently reissues it (a keep-alive calling `set_cookie`, a provider minting `auth_time` without prompting) resets the window. Rotate on real authentication events.
+
+`fresh()` and `optional()` together raise `ValueError` at setup: an anonymous caller can never be fresh. `require()` composes in either order. `MultiAuth.fresh()` applies the window to every source, and refuses at setup when one of them cannot be dated.
+
+A custom `AuthSource` joins in by overriding `authenticated_at(credential)`.
+
 ## Sources
 
 The library ships one request-time source per standard `fastapi.security` scheme. Each extracts a credential from the request and hands it to your validator (the contract above); returning `None` when the credential is absent lets `MultiAuth` fall through to the next source.
