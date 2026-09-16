@@ -24,6 +24,7 @@ from .sources import (
     OAuth2PasswordBearerAuth,
     OpenIdConnectAuth,
 )
+from .surface import RouteAuth, SchemeRequirement, auth_surface
 from .utils import hash_token, verify_token_hash
 
 __version__ = "0.5.0"
@@ -41,7 +42,10 @@ __all__ = [
     "OAuth2AuthorizationCodeBearerAuth",
     "OAuth2PasswordBearerAuth",
     "OpenIdConnectAuth",
+    "RouteAuth",
+    "SchemeRequirement",
     "UnauthorizedError",
+    "auth_surface",
     "hash_token",
     "oauth",
     "verify_token_hash",

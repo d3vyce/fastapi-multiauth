@@ -13,7 +13,15 @@ import jwt as pyjwt
 import pytest
 import respx
 from cryptography.hazmat.primitives.asymmetric import rsa
-from fastapi import FastAPI, HTTPException, Request, Response, Security
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Request,
+    Response,
+    Security,
+)
 from fastapi.testclient import TestClient
 from itsdangerous import TimestampSigner
 from jwt.algorithms import RSAAlgorithm
@@ -31,6 +39,8 @@ from fastapi_multiauth import (
     OAuth2AuthorizationCodeBearerAuth,
     OAuth2PasswordBearerAuth,
     OpenIdConnectAuth,
+    SchemeRequirement,
+    auth_surface,
     hash_token,
     verify_token_hash,
 )
@@ -4466,3 +4476,269 @@ class TestOAuth2Sources:
 
         with pytest.raises(RuntimeError, match="does not publish the security scopes"):
             TestClient(_app(setup)).get("/typo", headers={"X-Key": VALID_TOKEN})
+
+
+class TestAuthSurface:
+    """`auth_surface()` answers what guards what, from the routes themselves."""
+
+    @staticmethod
+    def _scoped(credential: str, scopes: list[str]) -> dict:
+        return {"user": "alice", "scopes": scopes}
+
+    def _oauth(self) -> OAuth2PasswordBearerAuth:
+        return OAuth2PasswordBearerAuth(
+            self._scoped,
+            token_url="/token",
+            scopes={"admin": "Admin", "billing": "Billing"},
+        )
+
+    @staticmethod
+    def _find(app: FastAPI, path: str):
+        found = [route for route in auth_surface(app) if route.path == path]
+        assert len(found) == 1, f"{path} not reported exactly once: {found}"
+        return found[0]
+
+    def test_an_unguarded_route_is_reported_as_unguarded(self):
+        def setup(app: FastAPI):
+            @app.get("/open")
+            async def open_route():
+                return {}
+
+        route = self._find(_app(setup), "/open")
+        assert route.unguarded is True
+        assert route.alternatives == ()
+        assert route.scopes == ()
+        assert route.methods == ("GET",)
+
+    def test_a_route_hidden_from_the_schema_is_still_reported(self):
+        """The OpenAPI document omits it, which is why the walk uses app.routes."""
+        auth = self._oauth()
+
+        def setup(app: FastAPI):
+            @app.get("/hidden", include_in_schema=False)
+            async def hidden():
+                return {}
+
+            @app.get("/hidden-guarded", include_in_schema=False)
+            async def hidden_guarded(user=Security(auth)):
+                return {}
+
+        app = _app(setup)
+        assert "/hidden" not in app.openapi()["paths"]
+
+        hidden = self._find(app, "/hidden")
+        assert hidden.include_in_schema is False
+        assert hidden.unguarded is True
+
+        guarded = self._find(app, "/hidden-guarded")
+        assert guarded.include_in_schema is False
+        assert guarded.unguarded is False
+
+    def test_multiauth_sources_are_separate_alternatives_with_their_own_scopes(self):
+        auth = MultiAuth(self._oauth(), APIKeyHeaderAuth("X-Key", self._scoped))
+
+        def setup(app: FastAPI):
+            @app.get("/multi")
+            async def multi(user=Security(auth, scopes=["admin"])):
+                return user
+
+        route = self._find(_app(setup), "/multi")
+        assert route.unguarded is False
+        assert len(route.alternatives) == 2, "the sources are OR-ed, not AND-ed"
+        assert [
+            (requirement.scheme_name, requirement.source, requirement.scopes)
+            for (requirement,) in route.alternatives
+        ] == [
+            ("OAuth2PasswordBearer", "OAuth2PasswordBearerAuth", ("admin",)),
+            ("APIKeyHeader_X-Key", "APIKeyHeaderAuth", ("admin",)),
+        ]
+
+    def test_separate_security_dependencies_are_one_and_ed_alternative(self):
+        """Both credentials are required, which the OpenAPI security list cannot say."""
+        oauth = self._oauth()
+        key = APIKeyHeaderAuth("X-Key", self._scoped)
+
+        def setup(app: FastAPI):
+            @app.get("/both")
+            async def both(a=Security(oauth, scopes=["admin"]), b=Security(key)):
+                return {}
+
+            @app.get("/either")
+            async def either(user=Security(MultiAuth(oauth, key), scopes=["admin"])):
+                return {}
+
+        app = _app(setup)
+        both = self._find(app, "/both")
+        either = self._find(app, "/either")
+
+        document = app.openapi()["paths"]
+        assert [
+            list(requirement) for requirement in document["/both"]["get"]["security"]
+        ] == [
+            list(requirement) for requirement in document["/either"]["get"]["security"]
+        ], "the document reports AND-ed schemes the same way it reports OR-ed ones"
+
+        assert [len(alternative) for alternative in both.alternatives] == [2]
+        assert [len(alternative) for alternative in either.alternatives] == [1, 1]
+
+    def test_mixed_and_ed_and_or_ed_dependencies_keep_their_scopes_apart(self):
+        """The route-level scope list stays true of every single alternative."""
+        oauth = self._oauth()
+        key = APIKeyHeaderAuth("X-Key", self._scoped)
+        mtls = OAuth2PasswordBearerAuth(
+            self._scoped,
+            token_url="/mtls",
+            scopes={"internal": "Internal"},
+            scheme_name="Mtls",
+        )
+
+        def setup(app: FastAPI):
+            @app.get("/mixed")
+            async def mixed(
+                a=Security(MultiAuth(oauth, key), scopes=["billing"]),
+                b=Security(mtls, scopes=["internal"]),
+            ):
+                return {}
+
+        route = self._find(_app(setup), "/mixed")
+        assert route.scopes == ("billing", "internal")
+        assert [
+            [(requirement.scheme_name, requirement.scopes) for requirement in alt]
+            for alt in route.alternatives
+        ] == [
+            [("OAuth2PasswordBearer", ("billing",)), ("Mtls", ("internal",))],
+            [("APIKeyHeader_X-Key", ("billing",)), ("Mtls", ("internal",))],
+        ]
+
+    def test_optional_on_a_multiauth_member_does_not_open_the_route(self):
+        """MultiAuth rejects a credential-less request whatever its members say."""
+        auth = MultiAuth(
+            HTTPBearerAuth(self._scoped).optional(),
+            APIKeyHeaderAuth("X-Key", self._scoped),
+        )
+
+        def setup(app: FastAPI):
+            @app.get("/members")
+            async def members(user=Security(auth)):
+                return {}
+
+        route = self._find(_app(setup), "/members")
+        assert route.unguarded is False
+        assert all(
+            requirement.optional is False
+            for alternative in route.alternatives
+            for requirement in alternative
+        )
+
+    def test_an_optional_source_leaves_the_route_reachable_anonymously(self):
+        auth = HTTPBearerAuth(self._scoped)
+        key = APIKeyHeaderAuth("X-Key", self._scoped)
+
+        def setup(app: FastAPI):
+            @app.get("/maybe")
+            async def maybe(user=Security(auth.optional())):
+                return {}
+
+            @app.get("/maybe-and-key")
+            async def maybe_and_key(a=Security(auth.optional()), b=Security(key)):
+                return {}
+
+        app = _app(setup)
+        maybe = self._find(app, "/maybe")
+        assert maybe.unguarded is True, "an anonymous caller reaches the endpoint"
+        assert maybe.alternatives[0][0].optional is True
+
+        both = self._find(app, "/maybe-and-key")
+        assert both.unguarded is False, "the API key is still required"
+
+    def test_scopes_reach_dependencies_declared_on_the_router(self):
+        auth = self._oauth()
+
+        def setup(app: FastAPI):
+            router = APIRouter(
+                prefix="/api", dependencies=[Security(auth, scopes=["billing"])]
+            )
+
+            @router.get("/invoices")
+            async def invoices():
+                return {}
+
+            app.include_router(router)
+
+        route = self._find(_app(setup), "/api/invoices")
+        assert route.unguarded is False
+        assert route.scopes == ("billing",)
+        assert route.alternatives[0][0].scopes == ("billing",)
+
+    def test_a_security_dependency_nested_behind_depends_is_found(self):
+        auth = HTTPBearerAuth(self._scoped)
+
+        def current_user(user=Security(auth)):
+            return user
+
+        def setup(app: FastAPI):
+            @app.get("/me")
+            async def me(user=Depends(current_user)):
+                return user
+
+        route = self._find(_app(setup), "/me")
+        assert route.unguarded is False
+        assert route.alternatives[0][0].scheme_name == "HTTPBearer"
+
+    def test_a_websocket_route_is_reported_with_no_methods(self):
+        def setup(app: FastAPI):
+            @app.websocket("/ws")
+            async def ws(websocket: Request):
+                return None
+
+        route = self._find(_app(setup), "/ws")
+        assert route.methods == ()
+        assert route.unguarded is True
+        assert route.include_in_schema is False
+
+    def test_a_source_without_an_openapi_scheme_still_guards_the_route(self):
+        """AuthSource is the public extension point; a scheme is optional on it."""
+        auth = _HeaderAuth(VALID_TOKEN)
+
+        def setup(app: FastAPI):
+            @app.get("/custom")
+            async def custom(user=Security(auth)):
+                return user
+
+        app = _app(setup)
+        assert TestClient(app).get("/custom").status_code == 401
+
+        route = self._find(app, "/custom")
+        assert route.unguarded is False, "the route rejects anonymous callers"
+        assert route.alternatives == (
+            (
+                SchemeRequirement(
+                    scheme_name=None,
+                    source="_HeaderAuth",
+                    scopes=(),
+                    optional=False,
+                ),
+            ),
+        )
+
+    def test_the_same_source_layered_twice_is_not_counted_twice(self):
+        """FastAPI builds one dependant per path, so a layered source repeats."""
+        auth = MultiAuth(
+            HTTPBearerAuth(self._scoped), APIKeyHeaderAuth("X-Key", self._scoped)
+        )
+
+        def setup(app: FastAPI):
+            router = APIRouter(dependencies=[Security(auth)])
+
+            @router.get("/layered")
+            async def layered(user=Security(auth)):
+                return {}
+
+            app.include_router(router)
+
+        route = self._find(_app(setup), "/layered")
+        assert len(route.alternatives) == 2, "one alternative per source, not 2**2"
+
+    def test_routes_without_a_dependency_tree_are_skipped(self):
+        paths = [route.path for route in auth_surface(_app())]
+        assert paths == [], f"only endpoint routes belong in the surface: {paths}"
