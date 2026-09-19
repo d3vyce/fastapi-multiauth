@@ -34,6 +34,40 @@ async def admin(user=Security(bearer.require(role=Role.ADMIN))):
 
 Use the right status code: `UnauthorizedError` (401) when the credential is absent or invalid, `ForbiddenError` (403) when the identity is valid but lacks permission. 401 responses from bearer sources automatically carry the `WWW-Authenticate: Bearer` challenge required by [RFC 7235](https://datatracker.ietf.org/doc/html/rfc7235); `MultiAuth` advertises the union of its sources' challenges.
 
+Three keyword names are reserved, because the library sets them itself: `scopes`, `session_id` and `request`. Passing one at instantiation or through `require()` raises a `ValueError` on the spot.
+
+### Reaching the request
+
+A validator that declares a `request` parameter is handed the request being authenticated. `request.state` is then a request-scoped place to leave whatever the validator learned and the route needs later:
+
+```python
+from fastapi import Request
+
+
+async def validate_token(token: str, request: Request | None = None) -> User:
+    user = await db.get_user_by_token(token)
+    if user is None:
+        raise UnauthorizedError()
+    if request is not None:
+        request.state.token_scopes = user.token_scopes
+    return user
+
+
+bearer = HTTPBearerAuth(validate_token)
+
+
+@app.get("/me")
+async def me(request: Request, user=Security(bearer)):
+    return {"user": user, "scopes": request.state.token_scopes}
+```
+
+It is opt-in by signature, exactly like `scopes`: a validator that does not declare `request` is called as it was before.
+
+The parameter is `Request | None` and the `None` is real, not a formality. `authenticate()` and `authenticate_scoped()` are public and reachable from a CLI, a background task or a hand-rolled dependency, none of which has a request to pass. Handle the absent case rather than assuming a route is always upstream.
+
+!!! warning "Not a `ContextVar`"
+    A module-level `ContextVar` looks like the same thing and is not: it is task-scoped, not request-scoped. Anything that drives the ASGI app inside one shared context, `httpx.ASGITransport` among them, carries one request's value into the next. `request.state` has the lifetime you actually want.
+
 
 ## Optional authentication
 

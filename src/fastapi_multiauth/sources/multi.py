@@ -119,7 +119,9 @@ class MultiAuth:
         for source in self._sources:
             credential = await source.extract(request)
             if credential is not None:
-                return await source._authenticate_with_challenge(credential, scopes)
+                return await source._authenticate_with_challenge(
+                    credential, scopes, request=request
+                )
         if self._optional:
             return None
         raise UnauthorizedError(headers=challenge_headers(self.www_authenticate()))

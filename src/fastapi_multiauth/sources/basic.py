@@ -75,7 +75,9 @@ class HTTPBasicAuth(ValidatedAuthSource):
         """
         return authorization_credential(request, "basic")
 
-    async def authenticate_scoped(self, credential: str, scopes: list[str]) -> Any:
+    async def authenticate_scoped(
+        self, credential: str, scopes: list[str], *, request: Request | None = None
+    ) -> Any:
         """Decode the blob, forwarding route-declared scopes to the validator."""
         try:
             decoded = base64.b64decode(credential, validate=True).decode("utf-8")
@@ -84,4 +86,6 @@ class HTTPBasicAuth(ValidatedAuthSource):
         username, sep, password = decoded.partition(":")
         if not sep:
             raise UnauthorizedError()
-        return await self._call_validator(username, password, scopes=scopes)
+        return await self._call_validator(
+            username, password, scopes=scopes, request=request
+        )
