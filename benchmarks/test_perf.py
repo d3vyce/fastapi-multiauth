@@ -154,6 +154,23 @@ def test_bearer_dispatch(benchmark):
     assert identity == {"user": TOKEN}
 
 
+async def validate_with_request(
+    credential: str, request: Request | None = None
+) -> dict:
+    """Request-aware twin of validate(): times the injection branch."""
+    return {"user": credential}
+
+
+def test_bearer_dispatch_with_request(benchmark):
+    """The opt-in path: the validator declares 'request', so it is injected."""
+    auth = HTTPBearerAuth(validate_with_request)
+    request = Request(_scope((b"authorization", f"Bearer {TOKEN}".encode())))
+
+    identity = benchmark(lambda: drive(auth.dispatch(request, [])))
+
+    assert identity == {"user": TOKEN}
+
+
 async def validate_scoped(credential: str, scopes: list[str]) -> dict:
     """Scope-aware twin of validate(): the guards only run on a scoped route."""
     return {"user": credential, "scopes": scopes}
