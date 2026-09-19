@@ -179,13 +179,17 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         except UnauthorizedError:
             return None
 
-    async def authenticate_scoped(self, credential: str, scopes: list[str]) -> Any:
+    async def authenticate_scoped(
+        self, credential: str, scopes: list[str], *, request: Request | None = None
+    ) -> Any:
         """Verify the cookie, forwarding route-declared scopes to the validator."""
         plain = self._verify(credential)
         if not self._session_id:
-            return await self._call_validator(plain, scopes=scopes)
+            return await self._call_validator(plain, scopes=scopes, request=request)
         sid, _, value = plain.partition(".")
-        return await self._call_validator(value, scopes=scopes, session_id=sid)
+        return await self._call_validator(
+            value, scopes=scopes, request=request, session_id=sid
+        )
 
     def set_cookie(self, response: Response, value: str) -> str | None:
         """Attach the cookie to *response*, signing it when ``secret_key`` is set.

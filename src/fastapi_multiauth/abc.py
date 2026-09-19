@@ -3,7 +3,7 @@
 import copy
 import inspect
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException, Request
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 _RESERVED_KWARGS = {
     "scopes": "injected from the route by Security(..., scopes=[...])",
     "session_id": "injected by APIKeyCookieAuth(session_id=True)",
+    "request": "injected when the validator declares a 'request' parameter",
 }
 
 
@@ -33,16 +34,40 @@ def _reject_reserved_kwargs(kwargs: dict[str, Any]) -> None:
             )
 
 
-def _accepts_kwarg(fn: Callable[..., Any], name: str) -> bool:
-    """Return whether *fn* declares a *name* parameter."""
+def _signature_params(
+    fn: Callable[..., Any],
+) -> Mapping[str, inspect.Parameter] | None:
+    """The parameters of *fn*, ``None`` when it has no inspectable signature."""
     try:
-        parameters = inspect.signature(fn).parameters
+        return inspect.signature(fn).parameters
     except (TypeError, ValueError):
+        return None
+
+
+def _accepts_kwarg(fn: Callable[..., Any], name: str) -> bool:
+    """Return whether *fn* declares a *name* parameter, ``False`` when uninspectable."""
+    parameters = _signature_params(fn)
+    if parameters is None:
         return False
     param = parameters.get(name)
     return param is not None and param.kind in (
         inspect.Parameter.POSITIONAL_OR_KEYWORD,
         inspect.Parameter.KEYWORD_ONLY,
+    )
+
+
+def _override_accepts_request(method: Callable[..., Any]) -> bool:
+    """Whether an ``authenticate_scoped`` override can be handed the request."""
+    parameters = _signature_params(method)
+    if parameters is None:  # not introspectable: take the override at its word
+        return True
+    return any(
+        (
+            param.name == "request"
+            and param.kind is not inspect.Parameter.POSITIONAL_ONLY
+        )
+        or param.kind is inspect.Parameter.VAR_KEYWORD
+        for param in parameters.values()
     )
 
 
@@ -141,6 +166,9 @@ class AuthSource(ABC):
             scheme: Optional ``fastapi.security`` scheme; only its OpenAPI
                 metadata is used, extraction always goes through :meth:`extract`.
         """
+        self._scoped_takes_request = _override_accepts_request(
+            type(self).authenticate_scoped
+        )
         self.scheme = _DocOnlyScheme(scheme) if scheme is not None else None
         if self.scheme is not None:
             _carry_scheme(self, self.scheme)
@@ -178,8 +206,17 @@ class AuthSource(ABC):
         """
         return None
 
-    async def authenticate_scoped(self, credential: str, scopes: list[str]) -> Any:
-        """Validate a credential, enforcing the scopes declared on the route."""
+    async def authenticate_scoped(
+        self, credential: str, scopes: list[str], *, request: Request | None = None
+    ) -> Any:
+        """Validate a credential, enforcing the scopes declared on the route.
+
+        Args:
+            credential: The raw credential returned by :meth:`extract`.
+            scopes: The scopes the route declared, empty outside a route.
+            request: The request being authenticated, ``None`` when there is
+                none. Ignored here; override to use it.
+        """
         if scopes:  # fail closed: plain authenticate() cannot check scopes
             raise _unenforceable_scopes_error(self, scopes)
         return await self.authenticate(credential)
@@ -188,12 +225,20 @@ class AuthSource(ABC):
         """Whether route-declared scopes reach an actual check in this source."""
         return type(self).authenticate_scoped is not AuthSource.authenticate_scoped
 
+    async def _call_scoped(
+        self, credential: str, scopes: list[str], *, request: Request | None
+    ) -> Any:
+        """Call :meth:`authenticate_scoped`, honouring overrides predating ``request``."""
+        if self._scoped_takes_request:
+            return await self.authenticate_scoped(credential, scopes, request=request)
+        return await self.authenticate_scoped(credential, scopes)
+
     async def _authenticate_with_challenge(
-        self, credential: str, scopes: list[str]
+        self, credential: str, scopes: list[str], *, request: Request | None = None
     ) -> Any:
         """Authenticate, attaching this source's challenge to any 401 raised."""
         try:
-            return await self.authenticate_scoped(credential, scopes)
+            return await self._call_scoped(credential, scopes, request=request)
         except HTTPException as exc:
             add_challenge(exc, self.www_authenticate())
             raise
@@ -216,8 +261,6 @@ class AuthSource(ABC):
     async def dispatch(self, request: Request, scopes: list[str]) -> Any:
         """Extract the credential, then authenticate it with the route scopes.
 
-        Returns ``None`` for an absent credential when :meth:`optional` was used.
-
         Raises:
             UnauthorizedError: When no credential is present. This source's
                 ``WWW-Authenticate`` challenge is attached to any 401 raised.
@@ -233,7 +276,9 @@ class AuthSource(ABC):
             if self._optional:
                 return None
             raise UnauthorizedError(headers=challenge_headers(self.www_authenticate()))
-        return await self._authenticate_with_challenge(credential, scopes)
+        return await self._authenticate_with_challenge(
+            credential, scopes, request=request
+        )
 
     async def __call__(self, **kwargs: Any) -> Any:
         """FastAPI dependency dispatch."""
@@ -261,31 +306,42 @@ class ValidatedAuthSource(AuthSource):
             scheme: Optional ``fastapi.security`` scheme for OpenAPI.
             **kwargs: Extra keyword arguments forwarded to the validator on
                 every call. Names the library injects itself are reserved:
-                ``scopes`` and ``session_id``.
+                ``scopes``, ``session_id`` and ``request``.
         """
         _reject_reserved_kwargs(kwargs)
         self._validator = ensure_async(validator)
         self._accepts_scopes = _accepts_kwarg(validator, "scopes")
+        self._accepts_request = _accepts_kwarg(validator, "request")
         self._kwargs = kwargs
         super().__init__(scheme)
 
     async def _call_validator(
-        self, *args: Any, scopes: list[str], **injected: Any
+        self,
+        *args: Any,
+        scopes: list[str],
+        request: Request | None = None,
+        **injected: Any,
     ) -> Any:
-        """Invoke the validator with scope and configured kwargs forwarding."""
+        """Invoke the validator with scope, request and configured kwargs forwarding."""
         if self._accepts_scopes:
             injected["scopes"] = scopes
         elif scopes:  # fail closed: the validator cannot check them
             raise _unenforceable_scopes_error(self, scopes)
+        if self._accepts_request:
+            injected["request"] = request
         return await self._validator(*args, **self._kwargs, **injected)
 
-    async def authenticate(self, credential: str) -> Any:
+    async def authenticate(
+        self, credential: str, *, request: Request | None = None
+    ) -> Any:
         """Validate a credential and return the identity (no route scopes)."""
-        return await self.authenticate_scoped(credential, [])
+        return await self._call_scoped(credential, [], request=request)
 
-    async def authenticate_scoped(self, credential: str, scopes: list[str]) -> Any:
-        """Validate a credential, forwarding route-declared scopes to the validator."""
-        return await self._call_validator(credential, scopes=scopes)
+    async def authenticate_scoped(
+        self, credential: str, scopes: list[str], *, request: Request | None = None
+    ) -> Any:
+        """Validate a credential, forwarding route scopes and request to the validator."""
+        return await self._call_validator(credential, scopes=scopes, request=request)
 
     def _enforces_scopes(self) -> bool:
         """The validator is the authority: every source funnels into it."""
@@ -294,7 +350,7 @@ class ValidatedAuthSource(AuthSource):
     def require(self, **kwargs: Any) -> "Self":
         """Return a copy of this source with additional (or overriding) validator kwargs.
 
-        Reserved names (``scopes``, ``session_id``) are rejected here too.
+        Reserved names (``scopes``, ``session_id``, ``request``) are rejected here too.
         """
         _reject_reserved_kwargs(kwargs)
         clone = copy.copy(self)
