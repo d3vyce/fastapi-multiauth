@@ -59,6 +59,10 @@ class HTTPBearerAuth(_BearerSource):
         description: Optional prose for the OpenAPI security scheme object.
         bearer_format: Optional hint at the token format (e.g. ``"JWT"``), for
             documentation only.
+        token_generator: Callable building the token body from the ``nbytes``
+            :meth:`generate_token` is given, owning its alphabet and entropy;
+            ``prefix`` is still prepended. Defaults to ``secrets.token_urlsafe``.
+            Use a CSPRNG (:mod:`secrets`), never :mod:`random`.
         **kwargs: Extra keyword arguments forwarded to the validator on every call.
     """
 
@@ -70,9 +74,11 @@ class HTTPBearerAuth(_BearerSource):
         scheme_name: str | None = None,
         description: str | None = None,
         bearer_format: str | None = None,
+        token_generator: Callable[[int], str] = secrets.token_urlsafe,
         **kwargs: Any,
     ) -> None:
         self._prefix = prefix
+        self._token_generator = token_generator
         super().__init__(
             validator,
             HTTPBearer(
@@ -85,15 +91,27 @@ class HTTPBearerAuth(_BearerSource):
         )
 
     def generate_token(self, nbytes: int = 32) -> str:
-        """Generate a secure URL-safe random token, prefixed when configured.
+        """Generate a token with ``token_generator``, prefixed when configured.
 
         Args:
-            nbytes: Number of random bytes before base64 encoding (default 32).
+            nbytes: Number of random bytes, handed to the ``token_generator``,
+                which decides what to make of it.
 
         Returns:
             A ready-to-use token string (e.g. ``"user_Xk3..."``).
+
+        Raises:
+            ValueError: If the generator returns an empty token, or one that
+                leaves the final token with leading or trailing whitespace.
         """
-        token = secrets.token_urlsafe(nbytes)
+        token = self._token_generator(nbytes)
+        if not token:
+            raise ValueError("token_generator must return a non-empty string")
         if self._prefix is not None:
-            return f"{self._prefix}{token}"
+            token = f"{self._prefix}{token}"
+        if token != token.strip():
+            raise ValueError(
+                "token_generator must not leave leading or trailing whitespace: "
+                "it is stripped when the Authorization header is parsed"
+            )
         return token

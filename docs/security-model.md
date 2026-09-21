@@ -36,7 +36,7 @@ Signed is not encrypted. The signed cookie payload and JWT claims are **readable
 
 ## Opaque token properties
 
-- `generate_token()` → 256 bits of CSPRNG entropy (`secrets.token_urlsafe`).
+- `generate_token(nbytes=32)` → `secrets.token_urlsafe(nbytes)`, so 256 bits of CSPRNG entropy at the default `nbytes`; a lower `nbytes` lowers it accordingly. A custom `token_generator` owns the entropy instead, and the library cannot measure it. Use `secrets`, never `random`.
 - Store only `hash_token(token)` (SHA-256 hex). Unsalted SHA-256 is correct *for these tokens* because they are unguessable; it is **not** acceptable for passwords.
 - Prefixes (`user_`, `org_`) route token types to sources and make leaked tokens detectable by secret scanners.
 

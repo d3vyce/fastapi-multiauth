@@ -77,7 +77,7 @@ async def me(user=Security(auth)):
 - **BYO validator**: every source wraps a sync or async callable you provide; the library never touches your user model or database.
 - **`MultiAuth`**: try several sources in order on a single route (e.g. web session cookie + API bearer token), with all schemes documented in OpenAPI.
 - **Built-in sources**: covering the standard `fastapi.security` schemes:
-    - **`HTTPBearerAuth`**: bearer tokens with optional Stripe-style `user_`/`org_` prefixes to route different token types to different validators, plus `generate_token()` for secure token creation.
+    - **`HTTPBearerAuth`**: bearer tokens with optional Stripe-style `user_`/`org_` prefixes to route different token types to different validators, plus `generate_token()` for secure token creation (bring your own `token_generator` to pick the token format).
     - **`APIKeyCookieAuth`**: cookie sessions with optional HMAC-SHA256 signing (via [itsdangerous](https://itsdangerous.palletsprojects.com/)), embedded expiry, key rotation, and optional per-session ids so your app can list and revoke sessions individually.
     - **`APIKeyHeaderAuth`**: `X-API-Key`-style schemes, with **`APIKeyQueryAuth`** for legacy clients that can only pass a query parameter.
     - **`HTTPBasicAuth`**: `validator(username, password)` with `WWW-Authenticate` realm support.

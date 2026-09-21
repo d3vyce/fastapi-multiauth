@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import json
+import secrets
 import time
 from collections.abc import Callable
 from typing import Any, ClassVar, cast
@@ -292,6 +293,71 @@ class TestBearerTokenAuth:
         response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
         assert response.status_code == 200
         assert stored == [token]
+
+    def test_generate_token_custom_generator_keeps_prefix(self):
+        bearer = HTTPBearerAuth(
+            simple_validator, prefix="user_", token_generator=lambda _n: "fixed-body"
+        )
+        assert bearer.generate_token() == "user_fixed-body"
+
+    def test_generate_token_custom_generator_receives_nbytes(self):
+        seen: list[int] = []
+
+        def generator(nbytes: int) -> str:
+            seen.append(nbytes)
+            return secrets.token_hex(nbytes)
+
+        bearer = HTTPBearerAuth(simple_validator, token_generator=generator)
+        bearer.generate_token()
+        bearer.generate_token(8)
+        assert seen == [32, 8]
+
+    @pytest.mark.parametrize(
+        ("returned", "match"),
+        [
+            ("", "must return a non-empty string"),
+            (" leading", "leading or trailing whitespace"),
+            ("trailing ", "leading or trailing whitespace"),
+        ],
+    )
+    def test_generate_token_custom_generator_bad_return(self, returned, match):
+        bearer = HTTPBearerAuth(simple_validator, token_generator=lambda _n: returned)
+        with pytest.raises(ValueError, match=match):
+            bearer.generate_token()
+
+    def test_generate_token_interior_whitespace_allowed(self):
+        """Only the edges matter: `partition(" ")` keeps everything after the scheme."""
+        stored: list[str] = []
+
+        async def storing_validator(credential: str) -> dict:
+            stored.append(credential)
+            return {"token": credential}
+
+        bearer = HTTPBearerAuth(
+            storing_validator, token_generator=lambda _n: "has space"
+        )
+        token = bearer.generate_token()
+        assert token == "has space"
+
+        client = _client(bearer)
+        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 200
+        assert stored == [token]
+
+    def test_generate_token_whitespace_checked_after_the_prefix(self):
+        """A leading space is harmless once the prefix sits in front of it."""
+        bearer = HTTPBearerAuth(
+            simple_validator, prefix="user_", token_generator=lambda _n: " leading"
+        )
+        assert bearer.generate_token() == "user_ leading"
+
+    def test_generate_token_custom_generator_survives_clone(self):
+        """optional()/require() clones keep the custom generator."""
+        bearer = HTTPBearerAuth(
+            simple_validator, prefix="user_", token_generator=lambda _n: "fixed-body"
+        )
+        assert bearer.optional().generate_token() == "user_fixed-body"
+        assert bearer.require(tenant="acme").generate_token() == "user_fixed-body"
 
 
 class TestCookieAuth:
