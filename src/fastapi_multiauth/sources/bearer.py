@@ -35,11 +35,13 @@ class _BearerSource(ValidatedAuthSource):
             return None
         return token
 
-    async def authenticate_scoped(self, credential: str, scopes: list[str]) -> Any:
+    async def authenticate_scoped(
+        self, credential: str, scopes: list[str], *, request: Request | None = None
+    ) -> Any:
         """Validate the credential, re-checking the prefix and forwarding scopes."""
         if self._prefix is not None and not credential.startswith(self._prefix):
             raise UnauthorizedError()
-        return await self._call_validator(credential, scopes=scopes)
+        return await self._call_validator(credential, scopes=scopes, request=request)
 
 
 class HTTPBearerAuth(_BearerSource):
