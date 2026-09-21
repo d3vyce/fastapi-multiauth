@@ -185,6 +185,20 @@ async def validate_user_token(token: str) -> User:
 
 Look tokens up by their SHA-256 hash (no salt needed: the token itself is high-entropy, unlike a password), or compare explicitly with `verify_token_hash(token, stored_hash)`, a constant-time comparison.
 
+`nbytes` changes the length of the token (`generate_token(64)`). To control its format as well, pass a `token_generator`: it receives that `nbytes` and returns the body, and the source still prepends its prefix. The default is `secrets.token_urlsafe`.
+
+```python
+import secrets
+
+user_bearer = HTTPBearerAuth(
+    validate_user_token,
+    prefix="user_",
+    token_generator=secrets.token_hex,  # "user_9f3b..."
+)
+```
+
+A generator is free to ignore `nbytes` (`lambda _n: ...`), in which case `generate_token(64)` has no effect. The callable owns the entropy: use `secrets`, never `random`. Leading or trailing whitespace on the finished token is rejected, since `Authorization` header parsing strips it and the token would no longer match the hash you stored.
+
 ### Cookie sessions
 
 `APIKeyCookieAuth` reads a cookie and hands its value to your validator. With a `secret_key`, the cookie is signed (HMAC-SHA256 via [itsdangerous](https://itsdangerous.palletsprojects.com/), salted with the cookie name) with an embedded timestamp checked against `ttl`: a stateless, tamper-proof session without any database entry:
