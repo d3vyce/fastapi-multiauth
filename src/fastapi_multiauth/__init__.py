@@ -27,7 +27,7 @@ from .sources import (
 from .surface import RouteAuth, SchemeRequirement, auth_surface
 from .utils import hash_token, verify_token_hash
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     "APIKeyCookieAuth",
