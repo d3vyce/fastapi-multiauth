@@ -184,3 +184,70 @@ admin_session = session.require(role="admin")
 @app.get("/admin/stats")
 async def stats(user: User = Security(admin_session)): ...
 ```
+
+## Auditing the auth surface
+
+`auth_surface(app)` reports what guards every route, read from the routes themselves rather than from `app.openapi()`. Routes registered with `include_in_schema=False` are absent from the schema, and an unguarded hidden route is exactly what an audit is looking for.
+
+```python
+from fastapi_multiauth import auth_surface
+
+for route in auth_surface(app):
+    if route.unguarded:
+        print(f"UNGUARDED {','.join(route.methods) or 'WS':6} {route.path}")
+```
+
+Entries in `route.alternatives` are OR-ed, and the schemes inside one entry are AND-ed. A `MultiAuth` dependency contributes one entry per source; several separate `Security()` dependencies land in the same entry because all of them run. The OpenAPI `security` list cannot tell those two cases apart, so do not merge the scope lists across entries: that would name scopes no single credential has to carry.
+
+A route counts as `unguarded` when no security dependency guards it, or when every AND-ed position offers a way through without a credential. That covers `optional()` sources and plain `fastapi.security` schemes built with `auto_error=False`. A scheme that declares neither reports `optional=None`, and counts as unguarded rather than being assumed sound, so the gate below asks you to look at it instead of passing it in silence.
+
+Fail a CI job on anything reachable without a credential:
+
+```python
+def test_no_unguarded_routes():
+    allowed = {"/health", "/login", "/auth/callback"}
+    unguarded = [
+        r.path for r in auth_surface(app) if r.unguarded and r.path not in allowed
+    ]
+    assert not unguarded, unguarded
+```
+
+Rendering is yours; here it is as a [rich](https://rich.readthedocs.io/) tree:
+
+```python
+from rich.console import Console
+from rich.markup import escape
+from rich.tree import Tree
+
+from fastapi_multiauth import auth_surface
+
+
+def auth_tree(app) -> Tree:
+    root = Tree("/")
+    nodes = {(): root}
+    for route in auth_surface(app):
+        segments = tuple(route.path.strip("/").split("/"))
+        for i, segment in enumerate(segments, 1):
+            branch = segments[:i]
+            if branch not in nodes:
+                nodes[branch] = nodes[branch[:-1]].add(f"[bold]/{escape(segment)}[/]")
+        ways = " | ".join(
+            " + ".join(
+                escape(f"{req.scheme_name or req.source}{list(req.scopes) or ''}")
+                + ("?" if req.optional is not False else "")
+                for req in alternative
+            )
+            for alternative in route.alternatives
+        )
+        detail = f"[dim]{ways}[/]"
+        if route.unguarded:
+            detail = f"[red]unguarded[/] {detail}"
+        if not route.include_in_schema:
+            detail += " [dim](hidden)[/]"
+        for method in route.methods or ("WS",):
+            nodes[segments].add(f"[cyan]{method}[/]  {detail}")
+    return root
+
+
+Console().print(auth_tree(app))
+```
