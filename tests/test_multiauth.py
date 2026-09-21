@@ -2006,7 +2006,7 @@ class TestRequestForwarding:
 class TestAuthSource:
     def test_cannot_instantiate_abstract_class(self):
         with pytest.raises(TypeError):
-            AuthSource()
+            AuthSource()  # ty: ignore[call-non-callable]
 
     def test_builtin_classes_are_auth_sources(self):
         bearer = HTTPBearerAuth(simple_validator)
