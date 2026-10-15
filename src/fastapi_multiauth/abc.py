@@ -4,7 +4,7 @@ import copy
 import inspect
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Any
+from typing import Any, Self
 
 from fastapi import HTTPException, Request
 from fastapi.security import SecurityScopes
@@ -12,10 +12,6 @@ from fastapi.security.base import SecurityBase
 
 from fastapi_multiauth.exceptions import UnauthorizedError
 from fastapi_multiauth.utils import add_challenge, challenge_headers, ensure_async
-
-if TYPE_CHECKING:
-    from typing_extensions import Self
-
 
 _RESERVED_KWARGS = {
     "scopes": "injected from the route by Security(..., scopes=[...])",
@@ -243,7 +239,7 @@ class AuthSource(ABC):
             add_challenge(exc, self.www_authenticate())
             raise
 
-    def optional(self) -> "Self":
+    def optional(self) -> Self:
         """Return a copy that yields ``None`` instead of 401 when no credential is sent."""
         clone = copy.copy(self)
         clone._optional = True
@@ -347,7 +343,7 @@ class ValidatedAuthSource(AuthSource):
         """The validator is the authority: every source funnels into it."""
         return self._accepts_scopes
 
-    def require(self, **kwargs: Any) -> "Self":
+    def require(self, **kwargs: Any) -> Self:
         """Return a copy of this source with additional (or overriding) validator kwargs.
 
         Reserved names (``scopes``, ``session_id``, ``request``) are rejected here too.

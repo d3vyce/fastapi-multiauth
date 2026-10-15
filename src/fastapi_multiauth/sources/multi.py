@@ -2,7 +2,7 @@
 
 import copy
 import inspect
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Self, cast
 
 from fastapi import Depends, Request
 from fastapi.security import SecurityScopes
@@ -95,7 +95,7 @@ class MultiAuth:
         """Combined challenge of all sources (RFC 9110 §11.6.1), or ``None``."""
         return self._www_authenticate
 
-    def optional(self) -> "MultiAuth":
+    def optional(self) -> Self:
         """Return a copy that yields ``None`` when no source has a credential."""
         clone = copy.copy(self)
         clone._optional = True

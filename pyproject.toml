@@ -5,7 +5,7 @@ description = "Composable authentication sources for FastAPI: bring your own val
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [
     { name = "d3vyce", email = "contact@d3vyce.fr" }
 ]
@@ -17,11 +17,11 @@ classifiers = [
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Topic :: Internet :: WWW/HTTP :: Session",
     "Topic :: Security",
     "Topic :: Software Development :: Libraries :: Python Modules",
@@ -73,12 +73,12 @@ docs = [
 ]
 
 [build-system]
-requires = ["uv_build>=0.11.21,<0.13.0"]
+requires = ["uv_build>=0.11.21,<0.14.0"]
 build-backend = "uv_build"
 
 [tool.ruff.lint]
 # "S" = flake8-bandit security rules, scoped to the library source.
-extend-select = ["S"]
+extend-select = ["S", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S", "B008"]
