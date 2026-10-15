@@ -149,6 +149,22 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         except BadSignature:
             raise UnauthorizedError() from None
 
+    def authenticated_at(self, credential: str) -> float | None:
+        """When the signed cookie was minted, ``None`` when it does not verify."""
+        if self._signer is None:
+            return None
+        try:
+            _, signed_at = self._signer.unsign(
+                credential.encode(), max_age=self._ttl, return_timestamp=True
+            )
+        except BadSignature:
+            return None
+        return signed_at.timestamp()
+
+    def _dates_credentials(self) -> bool:
+        """Only a signed cookie carries the timestamp :meth:`fresh` needs."""
+        return self._signer is not None
+
     @property
     def name(self) -> str:
         """Cookie name. Read-only: the signing salt is derived from it."""

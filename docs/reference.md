@@ -18,6 +18,7 @@ from fastapi_multiauth import (
     OpenIdConnectAuth,
     RouteAuth,
     SchemeRequirement,
+    StaleCredentialError,
     UnauthorizedError,
     auth_surface,
     hash_token,
@@ -90,6 +91,8 @@ from fastapi_multiauth.oauth import (
 ## ::: fastapi_multiauth.UnauthorizedError
 
 ## ::: fastapi_multiauth.ForbiddenError
+
+## ::: fastapi_multiauth.StaleCredentialError
 
 ## OAuth helpers
 
