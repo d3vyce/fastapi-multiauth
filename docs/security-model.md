@@ -11,7 +11,7 @@ In scope, the library defends against:
 - **Downgrade and key-confusion**: OAuth/OIDC/JWKS endpoints must be HTTPS (loopback excepted for local development); `HS*` algorithms are rejected when validating against a public JWKS.
 - **Open redirects**: the destination embedded in OAuth `state` is checked against an allowlist by default (relative paths only unless configured).
 - **Timing side channels**: constant-time comparisons for the state token and token hashes; cookie signatures are verified by itsdangerous's constant-time comparison.
-- **Silent misconfiguration**: empty/short cookie or JWT secrets, missing HTTPS, conflicting JWT key modes, and scopes declared on a route without a validator able to check them all fail loudly (at startup or with a 500), never by skipping the check.
+- **Silent misconfiguration**: empty/short cookie or JWT secrets, missing HTTPS, conflicting JWT key modes, a JWKS validator without `audience`, and scopes declared on a route without a validator able to check them all fail loudly (at startup or with a 500), never by skipping the check.
 
 Out of scope, your responsibility:
 
@@ -33,6 +33,12 @@ Signed is not encrypted. The signed cookie payload and JWT claims are **readable
 - The session id is a bearer credential (128 bits of `secrets.token_urlsafe`): do not log it, and treat a leaked id as a leaked session.
 - Keep `ttl` as short as the UX tolerates (default 24 h). Long-lived "remember me" sessions should be server-side sessions, not signed cookies.
 - `secret_key` accepts a key list for rotation: first key signs, all verify. Rotate by prepending and waiting one `ttl` before removing the old key.
+
+## JWT properties
+
+- **Token substitution across clients.** In JWKS mode the provider's signing keys are shared by every client of the realm or tenant, so a valid signature only proves the provider issued the token, not that it was issued *for this API*. `audience` is therefore required with `jwks_url`; `JWTValidator.ANY_AUDIENCE` is the explicit, visible opt-out. On a multi-tenant key set (Entra ID) also set `issuer`, or a token from any tenant passes.
+- In secret (HS256) mode the secret is yours alone, so `audience` stays optional.
+- The token's `alg` header must be on the `algorithms` allowlist and match the JWKS key's own `alg`; JWKS entries whose `alg` is off the allowlist are never loaded, and `HS*` is refused in JWKS mode (key confusion).
 
 ## Opaque token properties
 

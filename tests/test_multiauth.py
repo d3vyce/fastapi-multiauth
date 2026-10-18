@@ -3565,6 +3565,12 @@ def _jwk(private_key, kid: str | None, **overrides) -> dict:
     return {k: v for k, v in entry.items() if v is not None}
 
 
+def _jwks_validator(jwks_url: str, **kwargs) -> JWTValidator:
+    """JWKS-mode validator; tests not about ``aud`` opt out of the check."""
+    kwargs.setdefault("audience", JWTValidator.ANY_AUDIENCE)
+    return JWTValidator(jwks_url=jwks_url, **kwargs)
+
+
 def _claims(**overrides) -> dict:
     claims = {"sub": "user-1", "exp": int(time.time()) + 300}
     claims.update(overrides)
@@ -3620,7 +3626,18 @@ class TestJWTValidatorConfig:
             JWTValidator(jwks_url="http://idp.example.com/jwks")
 
     def test_loopback_http_jwks_url_accepted(self):
-        JWTValidator(jwks_url="http://localhost:8080/jwks")
+        _jwks_validator("http://localhost:8080/jwks")
+
+    @pytest.mark.parametrize("audience", [None, "", []])
+    def test_jwks_without_audience_rejected(self, audience):
+        with pytest.raises(ValueError, match="audience is required.*ANY_AUDIENCE"):
+            JWTValidator(jwks_url="https://idp.example.com/jwks", audience=audience)
+
+    def test_secret_mode_without_audience_accepted(self):
+        JWTValidator(secret=JWT_SECRET)
+
+    def test_any_audience_repr(self):
+        assert repr(JWTValidator.ANY_AUDIENCE) == "JWTValidator.ANY_AUDIENCE"
 
     def test_symmetric_algorithms_with_jwks_rejected(self):
         """Key-confusion guard: a public key must never act as an HMAC secret."""
@@ -3799,7 +3816,24 @@ class TestJWTValidatorJWKS:
         )
 
     def _validator(self, **kwargs) -> JWTValidator:
-        return JWTValidator(jwks_url=self.JWKS_URL, **kwargs)
+        return _jwks_validator(self.JWKS_URL, **kwargs)
+
+    @pytest.mark.parametrize(
+        ("audience", "aud", "expected"),
+        [
+            ("my-api", "my-api", 200),
+            ("my-api", "other-client", 401),
+            ("my-api", None, 401),
+            (JWTValidator.ANY_AUDIENCE, "other-client", 200),
+        ],
+    )
+    @respx.mock
+    def test_audience_check(self, audience, aud, expected):
+        respx.get(self.JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
+        client = _auth_client(self._validator(audience=audience))
+        token = self._rs_token(claims=_claims(aud=aud))
+        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == expected
 
     @respx.mock
     def test_valid_rs256_token(self):
@@ -4290,7 +4324,7 @@ class TestJWTValidatorJWKSRobustness:
     @respx.mock
     def test_garbage_token_rejected_before_jwks_lookup(self):
         respx.get(self.JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
-        client = _auth_client(JWTValidator(jwks_url=self.JWKS_URL))
+        client = _auth_client(_jwks_validator(self.JWKS_URL))
         response = client.get("/me", headers={"Authorization": "Bearer not.a.jwt"})
         assert response.status_code == 401
         assert len(respx.calls) == 0
@@ -4313,7 +4347,7 @@ class TestJWTValidatorJWKSRobustness:
                 ]
             }
         )
-        client = _auth_client(JWTValidator(jwks_url=self.JWKS_URL))
+        client = _auth_client(_jwks_validator(self.JWKS_URL))
         token = pyjwt.encode(
             _claims(), _RSA_KEY_1, algorithm="RS256", headers={"kid": "key1"}
         )
@@ -4324,7 +4358,7 @@ class TestJWTValidatorJWKSRobustness:
     def test_alg_header_not_matching_jwks_key_rejected(self):
         """A cross-family 'alg' header against an RSA JWKS key is a 401, not a 500."""
         respx.get(self.JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
-        client = _auth_client(JWTValidator(jwks_url=self.JWKS_URL))
+        client = _auth_client(_jwks_validator(self.JWKS_URL))
         response = client.get(
             "/me", headers={"Authorization": f"Bearer {_forged_token('ES256')}"}
         )
@@ -4341,7 +4375,7 @@ class TestJWTValidatorJWKSRobustness:
                 ]
             }
         )
-        client = _auth_client(JWTValidator(jwks_url=self.JWKS_URL))
+        client = _auth_client(_jwks_validator(self.JWKS_URL))
         token = pyjwt.encode(_claims(), _RSA_KEY_1, algorithm="RS256")
         response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
         assert response.status_code == 200
@@ -4351,7 +4385,7 @@ class TestJWTValidatorJWKSRobustness:
         """An allowlisted alg other than the key's own is refused (PS256 vs RS256)."""
         respx.get(self.JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
         client = _auth_client(
-            JWTValidator(jwks_url=self.JWKS_URL, algorithms=["RS256", "PS256"])
+            _jwks_validator(self.JWKS_URL, algorithms=["RS256", "PS256"])
         )
         token = pyjwt.encode(
             _claims(), _RSA_KEY_1, algorithm="PS256", headers={"kid": "key1"}
@@ -4364,7 +4398,7 @@ class TestJWTValidatorJWKSRobustness:
     @respx.mock
     async def test_unusable_jwks_document_returns_503(self, document):
         respx.get(self.JWKS_URL).respond(json=document)
-        validator = JWTValidator(jwks_url=self.JWKS_URL)
+        validator = _jwks_validator(self.JWKS_URL)
         token = pyjwt.encode(
             _claims(), _RSA_KEY_1, algorithm="RS256", headers={"kid": "key1"}
         )
@@ -4402,7 +4436,7 @@ class TestJWKSRefreshCoalescing:
             return httpx.Response(200, json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
 
         respx.get(self.JWKS_URL).mock(side_effect=slow_jwks)
-        validator = JWTValidator(jwks_url=self.JWKS_URL)
+        validator = _jwks_validator(self.JWKS_URL)
         token = pyjwt.encode(
             _claims(), _RSA_KEY_1, algorithm="RS256", headers={"kid": "key1"}
         )

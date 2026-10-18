@@ -569,6 +569,8 @@ Signing keys are fetched over HTTPS with a timeout, cached for an hour, and refr
 
 Every token is checked for signature, `exp`/`nbf`/`iat` (with configurable `leeway`), `aud`/`iss` when configured, and `exp` is **required** by default; pass `required_claims=()` if your provider really issues non-expiring tokens.
 
+In JWKS mode `audience` is **required**: a Keycloak realm, Auth0 tenant or Entra ID signs the tokens of every client (and, on Entra, every tenant) with the same keys, so without an `aud` check a token minted for another application would pass. Omitting it raises `ValueError` at startup. If you really mean to accept any audience, say so with `audience=JWTValidator.ANY_AUDIENCE`. Set `issuer` too whenever the key set is shared across issuers (Entra multi-tenant).
+
 Scopes integrate with `Security(..., scopes=[...])`: the claim is configurable (`scope` space-separated string by default; `scp` or `roles` lists via `scopes_claim`), and a valid token missing a required scope gets a **403** ([RFC 6750](https://datatracker.ietf.org/doc/html/rfc6750) `insufficient_scope`), not a 401.
 
 By default the source returns the validated **claims dict**. To return your own identity object instead (exactly like every other source's validator), pass `claims_to_identity`; the endpoint then receives whatever it returns:

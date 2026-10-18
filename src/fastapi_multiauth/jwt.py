@@ -1,9 +1,10 @@
 """JWT validation built on PyJWT, for use as a ``HTTPBearerAuth`` validator."""
 
+import enum
 import logging
 import time
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, ClassVar
 
 import anyio
 from fastapi import HTTPException, status
@@ -16,6 +17,16 @@ from .utils import ensure_async
 logger = logging.getLogger("fastapi_multiauth.jwt")
 
 _MIN_SECRET_BYTES = 32
+
+
+class AnyAudience(enum.Enum):
+    """Type of :attr:`JWTValidator.ANY_AUDIENCE`, the explicit ``aud`` opt-out."""
+
+    ANY = "any"
+
+    def __repr__(self) -> str:
+        return "JWTValidator.ANY_AUDIENCE"
+
 
 # Inferred "alg" for JWKS entries that omit it (e.g. some Entra/ADFS setups).
 _KTY_DEFAULT_ALG = {"RSA": "RS256"}
@@ -54,7 +65,10 @@ class JWTValidator:
         algorithms: Accepted signature algorithms. Defaults to ``["HS256"]``
             in secret mode and ``["RS256", "ES256"]`` in JWKS mode. Symmetric
             algorithms are rejected in JWKS mode (key-confusion risk).
-        audience: Expected ``aud`` claim value(s). Unset → ``aud`` not checked.
+        audience: Expected ``aud`` claim value(s). Required in JWKS mode,
+            where the provider's keys also sign tokens for its other clients
+            and tenants; pass :attr:`ANY_AUDIENCE` to skip the check on
+            purpose. Unset in secret mode → ``aud`` not checked.
         issuer: Expected ``iss`` claim value. Unset → ``iss`` not checked.
         leeway: Clock-skew tolerance in seconds for time-based claims.
         required_claims: Claims that must be present (default ``("exp",)``).
@@ -67,7 +81,14 @@ class JWTValidator:
         jwks_refresh_cooldown: Minimum interval in seconds between JWKS fetch
             attempts (default 30 s).
         timeout: Timeout in seconds for the JWKS request.
+
+    Raises:
+        ValueError: On an invalid configuration, including a JWKS mode
+            validator without ``audience``.
     """
+
+    ANY_AUDIENCE: ClassVar[AnyAudience] = AnyAudience.ANY
+    """Explicit ``audience`` opt-out: accept a token whatever its ``aud``."""
 
     def __init__(
         self,
@@ -75,7 +96,7 @@ class JWTValidator:
         secret: str | None = None,
         jwks_url: str | None = None,
         algorithms: Sequence[str] | None = None,
-        audience: str | Sequence[str] | None = None,
+        audience: str | Sequence[str] | AnyAudience | None = None,
         issuer: str | None = None,
         leeway: float = 0.0,
         required_claims: Sequence[str] = ("exp",),
@@ -104,6 +125,14 @@ class JWTValidator:
                     "a public JWKS key must never double as an HMAC secret "
                     "(key-confusion attack)"
                 )
+            if not audience:
+                raise ValueError(
+                    "audience is required with jwks_url: the provider's keys "
+                    "also sign tokens for its other clients and tenants. Pass "
+                    "audience=JWTValidator.ANY_AUDIENCE to skip the check"
+                )
+        if audience is AnyAudience.ANY:
+            audience = None
         self._secret = secret
         self._jwks_url = jwks_url
         self._audience = audience
