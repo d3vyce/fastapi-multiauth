@@ -8,7 +8,8 @@ from collections.abc import Callable
 from typing import Any
 
 import anyio.to_thread
-from fastapi import HTTPException, Request
+from fastapi import HTTPException
+from fastapi.requests import HTTPConnection
 
 
 def hash_token(token: str) -> str:
@@ -70,7 +71,7 @@ def add_challenge(exc: HTTPException, challenge: str | None) -> None:
         exc.headers = headers
 
 
-def authorization_credential(request: Request, scheme: str) -> str | None:
+def authorization_credential(request: HTTPConnection, scheme: str) -> str | None:
     """Extract the value of an ``Authorization: <scheme> <value>`` header.
 
     The scheme is matched case-insensitively (RFC 7235 §2.1). Returns ``None``

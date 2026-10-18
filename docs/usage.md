@@ -63,7 +63,9 @@ async def me(request: Request, user=Security(bearer)):
 
 It is opt-in by signature, exactly like `scopes`: a validator that does not declare `request` is called as it was before.
 
-The parameter is `Request | None` and the `None` is real, not a formality. `authenticate()` and `authenticate_scoped()` are public and reachable from a CLI, a background task or a hand-rolled dependency, none of which has a request to pass. Handle the absent case rather than assuming a route is always upstream.
+The parameter can be `None`, and the `None` is real, not a formality. `authenticate()` and `authenticate_scoped()` are public and reachable from a CLI, a background task or a hand-rolled dependency, none of which has a request to pass. Handle the absent case rather than assuming a route is always upstream.
+
+On a [WebSocket route](#websocket-routes) the validator is handed the `WebSocket` instead. Both share `HTTPConnection` as a base, which carries `headers`, `cookies`, `query_params` and `state`; annotate the parameter `HTTPConnection | None` when one validator serves both kinds of route.
 
 !!! warning "Not a `ContextVar`"
     A module-level `ContextVar` looks like the same thing and is not: it is task-scoped, not request-scoped. Anything that drives the ASGI app inside one shared context, `httpx.ASGITransport` among them, carries one request's value into the next. `request.state` has the lifetime you actually want.
@@ -73,18 +75,24 @@ The parameter is `Request | None` and the `None` is real, not a formality. `auth
 An `AuthSource` subclass already has the request in `extract()`, which is where it pulls its credential out of the request to begin with. Reaching it at *validation* time means overriding `authenticate_scoped()`, the seam that carries the route's context:
 
 ```python
+from fastapi.requests import HTTPConnection
+
 from fastapi_multiauth import AuthSource
 
 
 class HeaderAuth(AuthSource):
-    async def extract(self, request: Request) -> str | None:
+    async def extract(self, request: HTTPConnection) -> str | None:
         return request.headers.get("X-Token") or None
 
     async def authenticate(self, credential: str) -> User:
         return await lookup(credential)
 
     async def authenticate_scoped(
-        self, credential: str, scopes: list[str], *, request: Request | None = None
+        self,
+        credential: str,
+        scopes: list[str],
+        *,
+        request: HTTPConnection | None = None,
     ) -> User:
         user = await self.authenticate(credential)
         if request is not None:
@@ -383,6 +391,27 @@ auth = MultiAuth(bearer, session)
 async def me(user=Security(auth)):
     return user
 ```
+
+## WebSocket routes
+
+Every source, `MultiAuth` and `optional()` copies included, guards a WebSocket route the same way it guards an HTTP one. The credential is read from the handshake request:
+
+```python
+from fastapi import WebSocket
+
+
+@app.websocket("/ws")
+async def ws(websocket: WebSocket, user=Security(auth)):
+    await websocket.accept()
+    await websocket.send_json({"hello": user.name})
+```
+
+A missing or rejected credential refuses the handshake before `accept()`. On an ASGI server implementing the WebSocket Denial Response extension, the client receives the HTTP status, `401` with the same `WWW-Authenticate` challenge as on an HTTP route or `403` from `ForbiddenError`.
+
+Keep two differences from HTTP routes in mind:
+
+- The credential is checked once, at the handshake. A connection that stays open outlives the token's expiry or the session's revocation unless the route closes it.
+- The browser `WebSocket` API cannot set headers, so a browser client can only present a cookie or a query parameter. Prefer `APIKeyCookieAuth`; if a query parameter is unavoidable, have `APIKeyQueryAuth` accept a short-lived, single-use ticket issued by an authenticated HTTP endpoint rather than the long-lived token itself.
 
 ## Security scopes
 

@@ -4,7 +4,7 @@ import secrets
 from collections.abc import Callable
 from typing import Any
 
-from fastapi import Request
+from fastapi.requests import HTTPConnection
 from fastapi.security import HTTPBearer
 
 from fastapi_multiauth.exceptions import UnauthorizedError
@@ -22,7 +22,7 @@ class _BearerSource(ValidatedAuthSource):
         """``Bearer`` challenge per RFC 6750 §3."""
         return "Bearer"
 
-    async def extract(self, request: Request) -> str | None:
+    async def extract(self, request: HTTPConnection) -> str | None:
         """Return the bearer token, or ``None`` when absent, empty, or mismatched.
 
         The ``Bearer`` scheme is matched case-insensitively; the prefix, when
@@ -36,7 +36,11 @@ class _BearerSource(ValidatedAuthSource):
         return token
 
     async def authenticate_scoped(
-        self, credential: str, scopes: list[str], *, request: Request | None = None
+        self,
+        credential: str,
+        scopes: list[str],
+        *,
+        request: HTTPConnection | None = None,
     ) -> Any:
         """Validate the credential, re-checking the prefix and forwarding scopes."""
         if self._prefix is not None and not credential.startswith(self._prefix):

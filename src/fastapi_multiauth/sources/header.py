@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from typing import Any
 
-from fastapi import Request
+from fastapi.requests import HTTPConnection
 from fastapi.security import APIKeyHeader
 
 from ..abc import ValidatedAuthSource
@@ -44,6 +44,6 @@ class APIKeyHeaderAuth(ValidatedAuthSource):
             **kwargs,
         )
 
-    async def extract(self, request: Request) -> str | None:
+    async def extract(self, request: HTTPConnection) -> str | None:
         """Return the API key from the configured header, or ``None`` when absent or empty."""
         return request.headers.get(self._name) or None

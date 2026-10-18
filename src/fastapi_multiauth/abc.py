@@ -6,7 +6,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from typing import Any, Self
 
-from fastapi import HTTPException, Request
+from fastapi import HTTPException
+from fastapi.requests import HTTPConnection
 from fastapi.security import SecurityScopes
 from fastapi.security.base import SecurityBase
 
@@ -120,7 +121,7 @@ class _DocOnlyScheme(SecurityBase):
         self.model = scheme.model
         self.scheme_name = scheme.scheme_name
 
-    async def __call__(self, request: Request) -> None:
+    async def __call__(self, request: HTTPConnection) -> None:
         return None
 
 
@@ -173,7 +174,7 @@ class AuthSource(ABC):
             inspect.Parameter(
                 "request",
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                annotation=Request,
+                annotation=HTTPConnection,
             ),
             inspect.Parameter(
                 "security_scopes",
@@ -184,7 +185,7 @@ class AuthSource(ABC):
         self.__signature__ = inspect.Signature(parameters, return_annotation=Any)
 
     @abstractmethod
-    async def extract(self, request: Request) -> str | None:
+    async def extract(self, request: HTTPConnection) -> str | None:
         """Extract the raw credential from the request without validating.
 
         Must return ``None`` — never an empty string — when the credential is
@@ -203,7 +204,11 @@ class AuthSource(ABC):
         return None
 
     async def authenticate_scoped(
-        self, credential: str, scopes: list[str], *, request: Request | None = None
+        self,
+        credential: str,
+        scopes: list[str],
+        *,
+        request: HTTPConnection | None = None,
     ) -> Any:
         """Validate a credential, enforcing the scopes declared on the route.
 
@@ -222,7 +227,7 @@ class AuthSource(ABC):
         return type(self).authenticate_scoped is not AuthSource.authenticate_scoped
 
     async def _call_scoped(
-        self, credential: str, scopes: list[str], *, request: Request | None
+        self, credential: str, scopes: list[str], *, request: HTTPConnection | None
     ) -> Any:
         """Call :meth:`authenticate_scoped`, honouring overrides predating ``request``."""
         if self._scoped_takes_request:
@@ -230,7 +235,11 @@ class AuthSource(ABC):
         return await self.authenticate_scoped(credential, scopes)
 
     async def _authenticate_with_challenge(
-        self, credential: str, scopes: list[str], *, request: Request | None = None
+        self,
+        credential: str,
+        scopes: list[str],
+        *,
+        request: HTTPConnection | None = None,
     ) -> Any:
         """Authenticate, attaching this source's challenge to any 401 raised."""
         try:
@@ -254,7 +263,7 @@ class AuthSource(ABC):
         if unknown:
             raise _undeclared_scopes_error(self, unknown, catalogue)
 
-    async def dispatch(self, request: Request, scopes: list[str]) -> Any:
+    async def dispatch(self, request: HTTPConnection, scopes: list[str]) -> Any:
         """Extract the credential, then authenticate it with the route scopes.
 
         Raises:
@@ -315,7 +324,7 @@ class ValidatedAuthSource(AuthSource):
         self,
         *args: Any,
         scopes: list[str],
-        request: Request | None = None,
+        request: HTTPConnection | None = None,
         **injected: Any,
     ) -> Any:
         """Invoke the validator with scope, request and configured kwargs forwarding."""
@@ -328,13 +337,17 @@ class ValidatedAuthSource(AuthSource):
         return await self._validator(*args, **self._kwargs, **injected)
 
     async def authenticate(
-        self, credential: str, *, request: Request | None = None
+        self, credential: str, *, request: HTTPConnection | None = None
     ) -> Any:
         """Validate a credential and return the identity (no route scopes)."""
         return await self._call_scoped(credential, [], request=request)
 
     async def authenticate_scoped(
-        self, credential: str, scopes: list[str], *, request: Request | None = None
+        self,
+        credential: str,
+        scopes: list[str],
+        *,
+        request: HTTPConnection | None = None,
     ) -> Any:
         """Validate a credential, forwarding route scopes and request to the validator."""
         return await self._call_validator(credential, scopes=scopes, request=request)

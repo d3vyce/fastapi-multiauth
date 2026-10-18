@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from typing import Any
 
-from fastapi import Request
+from fastapi.requests import HTTPConnection
 from fastapi.security import APIKeyQuery
 
 from ..abc import ValidatedAuthSource
@@ -49,6 +49,6 @@ class APIKeyQueryAuth(ValidatedAuthSource):
             **kwargs,
         )
 
-    async def extract(self, request: Request) -> str | None:
+    async def extract(self, request: HTTPConnection) -> str | None:
         """Return the API key from the configured query parameter, or ``None`` when absent or empty."""
         return request.query_params.get(self._name) or None
