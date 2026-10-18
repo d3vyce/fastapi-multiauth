@@ -2360,8 +2360,29 @@ class TestResolveProviderUrls:
             await oauth_resolve_provider_urls(DISCOVERY_URL)
 
 
+def _authorization_redirect(url="https://auth.example.com/authorize", **kwargs):
+    kwargs = {
+        "client_id": "my-client",
+        "scopes": "openid",
+        "redirect_uri": "https://app.example.com/callback",
+        "destination": "/dashboard",
+        "state_token": "test-state-token",
+        **kwargs,
+    }
+    return oauth_build_authorization_redirect(url, **kwargs)
+
+
 class TestOAuthHttpsEnforcement:
     """client_secret / codes / tokens must never travel over plaintext HTTP."""
+
+    def test_http_authorization_url_rejected(self):
+        with pytest.raises(ValueError, match="authorization_url must use https"):
+            _authorization_redirect("http://idp.example/authorize")
+
+    @pytest.mark.parametrize("host", ["localhost", "127.0.0.1"])
+    def test_http_loopback_authorization_url_allowed(self, host):
+        response = _authorization_redirect(f"http://{host}:8080/authorize")
+        assert response.headers["location"].startswith(f"http://{host}:8080/authorize?")
 
     @pytest.mark.anyio
     @respx.mock
@@ -2852,15 +2873,7 @@ class TestGeneratePkcePair:
 
 class TestAuthorizationRedirectPkce:
     def _params(self, **kwargs):
-        response = oauth_build_authorization_redirect(
-            "https://auth.example.com/authorize",
-            client_id="my-client",
-            scopes="openid",
-            redirect_uri="https://app.example.com/callback",
-            destination="/dashboard",
-            state_token="test-state-token",
-            **kwargs,
-        )
+        response = _authorization_redirect(**kwargs)
         return parse_qs(urlparse(response.headers["location"]).query)
 
     def test_code_challenge_sent_with_s256_method(self):

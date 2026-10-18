@@ -12,6 +12,7 @@ from urllib.parse import urlencode, urlsplit
 from fastapi import status
 from fastapi.responses import RedirectResponse
 
+from .._http import _require_https
 from ..exceptions import OAuthStateError
 
 __all__ = [
@@ -70,7 +71,11 @@ def oauth_build_authorization_redirect(
     Returns:
         A :class:`~fastapi.responses.RedirectResponse` to the provider's
         authorization page, retaining any query string already present.
+
+    Raises:
+        ValueError: If *authorization_url* is not HTTPS.
     """
+    _require_https(authorization_url, "OAuth authorization_url")
     params = {
         "client_id": client_id,
         "response_type": "code",
