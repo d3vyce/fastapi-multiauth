@@ -138,7 +138,7 @@ class JWTValidator:
         if self._secret is not None:
             key: Any = self._secret
         else:
-            key = (await self._resolve_jwks_key(token)).key
+            key = await self._resolve_jwks_key(token)
         try:
             claims = self._jwt.decode(
                 token,
@@ -249,11 +249,18 @@ class JWTValidator:
                 if alg is None:
                     continue
                 entry = {**entry, "alg": alg}
+            if entry["alg"] not in self._algorithms:
+                continue
             try:
                 key = self._jwt.PyJWK(entry)
-            except (self._jwt.exceptions.PyJWTError, KeyError):
+            except Exception as exc:  # noqa: BLE001
                 # Unsupported or malformed entry: one broken key in the
                 # provider's JWKS must not take down every login.
+                logger.warning(
+                    "skipping unloadable JWKS entry %r: %s",
+                    entry.get("kid"),
+                    type(exc).__name__,
+                )
                 continue
             keys[entry.get("kid") or ""] = key
         if not keys:

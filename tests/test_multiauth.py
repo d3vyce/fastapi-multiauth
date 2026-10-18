@@ -3558,7 +3558,7 @@ _RSA_KEY_1 = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 _RSA_KEY_2 = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 
-def _jwk(private_key, kid: str, **overrides) -> dict:
+def _jwk(private_key, kid: str | None, **overrides) -> dict:
     entry = json.loads(RSAAlgorithm.to_jwk(private_key.public_key()))
     entry.update({"kid": kid, "alg": "RS256", "use": "sig"})
     entry.update(overrides)
@@ -4305,6 +4305,10 @@ class TestJWTValidatorJWKSRobustness:
                     {"kty": "OKP", "kid": "exotic"},  # no alg, none inferable
                     "garbage",  # not even an object
                     42,
+                    {"kty": "RSA", "alg": "RS256", "n": "AA", "e": "AQAB"},
+                    {"kty": "RSA", "alg": "RS256", "n": 12345, "e": "AQAB"},
+                    {"kty": "EC", "alg": "ES256", "crv": "P-256", "x": 1, "y": 2},
+                    {"kty": "oct", "alg": "none", "k": "AA"},
                     _jwk(_RSA_KEY_1, "key1"),
                 ]
             }
@@ -4324,6 +4328,35 @@ class TestJWTValidatorJWKSRobustness:
         response = client.get(
             "/me", headers={"Authorization": f"Bearer {_forged_token('ES256')}"}
         )
+        assert response.status_code == 401
+
+    @respx.mock
+    def test_keys_outside_the_allowlist_are_not_cached(self):
+        """A kid-less token still finds the one key the validator can use."""
+        respx.get(self.JWKS_URL).respond(
+            json={
+                "keys": [
+                    _jwk(_RSA_KEY_1, None),
+                    _jwk(_RSA_KEY_2, None, alg="PS256"),
+                ]
+            }
+        )
+        client = _auth_client(JWTValidator(jwks_url=self.JWKS_URL))
+        token = pyjwt.encode(_claims(), _RSA_KEY_1, algorithm="RS256")
+        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 200
+
+    @respx.mock
+    def test_header_alg_must_match_the_jwks_key_alg(self):
+        """An allowlisted alg other than the key's own is refused (PS256 vs RS256)."""
+        respx.get(self.JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
+        client = _auth_client(
+            JWTValidator(jwks_url=self.JWKS_URL, algorithms=["RS256", "PS256"])
+        )
+        token = pyjwt.encode(
+            _claims(), _RSA_KEY_1, algorithm="PS256", headers={"kid": "key1"}
+        )
+        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
         assert response.status_code == 401
 
     @pytest.mark.anyio
