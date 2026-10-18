@@ -1399,6 +1399,32 @@ class TestCookieSecretValidation:
             APIKeyCookieAuth("session", cookie_validator, secret_key="x" * 32, ttl=ttl)
 
 
+class TestCookieNamePrefix:
+    @pytest.mark.parametrize("name", ["__Host-session", "__Secure-session"])
+    def test_prefixed_name_with_defaults_accepted(self, name):
+        APIKeyCookieAuth(name, cookie_validator, secret_key=COOKIE_SECRET)
+
+    def test_secure_prefix_allows_domain_and_path(self):
+        APIKeyCookieAuth(
+            "__Secure-session", cookie_validator, domain="example.com", path="/app"
+        )
+
+    @pytest.mark.parametrize("name", ["__Host-session", "__secure-session"])
+    def test_prefixed_name_without_secure_rejected(self, name):
+        with pytest.raises(ValueError, match="secure=True"):
+            APIKeyCookieAuth(name, cookie_validator, secure=False)
+
+    @pytest.mark.parametrize("kwargs", [{"domain": "example.com"}, {"path": "/app"}])
+    def test_host_prefix_with_domain_or_path_rejected(self, kwargs):
+        with pytest.raises(ValueError, match="__Host-"):
+            APIKeyCookieAuth("__HOST-session", cookie_validator, **kwargs)
+
+    def test_unprefixed_name_unconstrained(self):
+        APIKeyCookieAuth(
+            "session", cookie_validator, secure=False, domain="example.com", path="/x"
+        )
+
+
 class TestCookieKeyRotation:
     """secret_key rotation: first key signs, every key verifies."""
 

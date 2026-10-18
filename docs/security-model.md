@@ -11,7 +11,7 @@ In scope, the library defends against:
 - **Downgrade and key-confusion**: OAuth/OIDC/JWKS endpoints must be HTTPS (loopback excepted for local development); `HS*` algorithms are rejected when validating against a public JWKS.
 - **Open redirects**: the destination embedded in OAuth `state` is checked against an allowlist by default (relative paths only unless configured).
 - **Timing side channels**: constant-time comparisons for the state token and token hashes; cookie signatures are verified by itsdangerous's constant-time comparison.
-- **Silent misconfiguration**: empty/short cookie or JWT secrets, missing HTTPS, conflicting JWT key modes, a JWKS validator without `audience`, and scopes declared on a route without a validator able to check them all fail loudly (at startup or with a 500), never by skipping the check.
+- **Silent misconfiguration**: empty/short cookie or JWT secrets, missing HTTPS, conflicting JWT key modes, a JWKS validator without `audience`, a `__Host-`/`__Secure-` cookie name the browser would drop, and scopes declared on a route without a validator able to check them all fail loudly (at startup or with a 500), never by skipping the check.
 
 Out of scope, your responsibility:
 
@@ -19,6 +19,7 @@ Out of scope, your responsibility:
 - **Credential storage** (databases, password hashing: use argon2/bcrypt for passwords; SHA-256 is only appropriate for high-entropy opaque tokens).
 - **Transport security** of your own app (deploy behind HTTPS; cookie `secure=True` is the default and should stay on).
 - **Rate limiting / brute-force protection** on login endpoints.
+- **CSRF on cookie-authenticated routes.** A cookie is ambient authority, and `SameSite=lax` (the default) leaves gaps: state-changing `GET`s, same-site attackers on a sibling subdomain, and `samesite="none"`. Unsafe methods behind `APIKeyCookieAuth` need a CSRF token, an `Origin`/`Sec-Fetch-Site` check, or `samesite="strict"`.
 
 ## Nothing is encrypted
 
@@ -32,6 +33,7 @@ Signed is not encrypted. The signed cookie payload and JWT claims are **readable
 - **Rotate the id after a privilege change** (password change, elevation): mint with `set_cookie` before revoking the id `session_id_of(request)` returned, so a failure mid-way leaves the user signed in rather than leaving the old id valid.
 - The session id is a bearer credential (128 bits of `secrets.token_urlsafe`): do not log it, and treat a leaked id as a leaked session.
 - Keep `ttl` as short as the UX tolerates (default 24 h). Long-lived "remember me" sessions should be server-side sessions, not signed cookies.
+- **Cookie shadowing.** Duplicate cookies resolve last-wins, so a party able to set cookies on a sibling subdomain can shadow the session cookie. The signature prevents forgery, so the outcome is a forced logout or fixation with the attacker's own session, never impersonation of another user. Name the cookie with the `__Host-` prefix, which a subdomain cannot set; the defaults satisfy it, and settings that break it (`domain=`, a `path` other than `/`, `secure=False`) are refused at startup.
 - `secret_key` accepts a key list for rotation: first key signs, all verify. Rotate by prepending and waiting one `ttl` before removing the old key.
 
 ## JWT properties

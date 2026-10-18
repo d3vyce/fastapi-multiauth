@@ -336,6 +336,12 @@ async def logout(response: Response):
     return {"ok": True}
 ```
 
+!!! warning "Cookies are ambient: defend unsafe methods against CSRF"
+    The browser attaches the cookie to every request it sends to your site, whoever triggered it. The default `samesite="lax"` blocks most cross-site `POST`s but not everything: a state-changing `GET` still runs on a top-level navigation, a sibling subdomain counts as *same-site* so lax lets its requests through, and `samesite="none"` turns the protection off. Guard every cookie-authenticated `POST`/`PUT`/`PATCH`/`DELETE` route with a CSRF token, an `Origin` or `Sec-Fetch-Site` check, or use `samesite="strict"`. Routes reached with a bearer token are not exposed: the browser never attaches it on its own.
+
+!!! tip "Prefer a `__Host-` cookie name"
+    When a request carries two cookies with the same name, the last one wins. Anything able to set a cookie on a sibling subdomain can therefore shadow your session cookie: the signature stops it from forging a session, but it can log the user out on every request, or slip in the attacker's *own* valid cookie so the victim unknowingly acts in the attacker's account. A `__Host-` prefixed name (`APIKeyCookieAuth("__Host-session", ...)`) cannot be set from a subdomain. The defaults already meet its rules (`secure=True`, `path="/"`, no `domain`), and a `__Host-` or `__Secure-` name with settings that would make the browser drop the cookie raises `ValueError` at startup.
+
 #### Key rotation
 
 Pass a sequence of keys to rotate a secret without logging everyone out. The **first** key signs new cookies; **every** key verifies:
