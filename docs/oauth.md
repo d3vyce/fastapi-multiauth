@@ -47,9 +47,13 @@ async def oauth_callback(request: Request, code: str, state: str | None = None):
     endpoints = await oauth_resolve_provider_urls(settings.OIDC_DISCOVERY_URL)
     expected = request.session.pop("oauth_state", "")  # single-use
     code_verifier = request.session.pop("oauth_code_verifier", None)
-    # Open-redirect guard: by default only relative paths are accepted.
-    destination = oauth_decode_state(state, expected_state_token=expected, fallback="/")
     try:
+        # Raises OAuthStateError unless this session started the flow, so the
+        # code is never exchanged on a forged callback. Open-redirect guard: by
+        # default only relative paths are accepted.
+        destination = oauth_decode_state(
+            state, expected_state_token=expected, fallback="/"
+        )
         token = await oauth_exchange_code(
             token_url=endpoints.token_endpoint,
             code=code,
@@ -76,6 +80,7 @@ By default each call opens a fresh HTTPS connection. `oauth_exchange_code` and `
 
 All flow errors derive from `OAuthError`, so a single `except` covers the callback; catch the specific classes when you need to react differently:
 
+- `OAuthStateError`: the `state` CSRF check failed (no token stored for this session, `state` absent or malformed, or a different token). The callback did not come from a redirect this session started; never exchange the code;
 - `OAuthDiscoveryError`: the discovery document could not be fetched or is invalid (transport failure, malformed JSON, missing endpoints, issuer mismatch, non-HTTPS endpoints);
 - `OAuthExchangeError`: the code exchange failed (provider rejection, timeout, malformed response, wrong `token_type`, missing required scopes);
 - `OAuthUserinfoError`: the userinfo endpoint failed or returned garbage.
@@ -95,6 +100,8 @@ All flow errors derive from `OAuthError`, so a single `except` covers the callba
 - `allowed_hosts=None`: explicitly disables the check; you must validate the returned URL yourself.
 
 Scheme-relative URLs (`//evil.com`), backslash tricks, and non-http(s) schemes (`javascript:`) always fall back.
+
+`fallback` only covers a destination that is missing or refused once the CSRF check has passed. A failed CSRF check raises `OAuthStateError` instead, so call `oauth_decode_state` inside the same `try` as the code exchange.
 
 !!! warning "Discovery URL is config-only"
     Never derive `discovery_url` from request input: it would open SSRF and cache-poisoning vectors. All OAuth endpoints must be HTTPS (loopback hosts are exempt for local development). Discovery results are cached for one hour, so provider-side endpoint changes are picked up without a restart.

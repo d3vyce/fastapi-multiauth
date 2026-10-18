@@ -113,12 +113,14 @@ async def oauth_login(request: Request, next: str = "/"):
 @app.get("/oauth/callback")
 async def oauth_callback(request: Request, code: str, state: str | None = None):
     endpoints = await oauth_resolve_provider_urls(settings.OIDC_DISCOVERY_URL)
-    destination = oauth_decode_state(
-        state,
-        expected_state_token=request.session.pop("oauth_state", ""),
-        fallback="/",  # relative-only guard is the default
-    )
+    expected = request.session.pop("oauth_state", "")
+    code_verifier = request.session.pop("oauth_verifier", None)
     try:
+        destination = oauth_decode_state(
+            state,
+            expected_state_token=expected,
+            fallback="/",  # relative-only guard is the default
+        )
         token = await oauth_exchange_code(
             token_url=endpoints.token_endpoint,
             code=code,
@@ -126,7 +128,7 @@ async def oauth_callback(request: Request, code: str, state: str | None = None):
             client_secret=settings.OIDC_CLIENT_SECRET,
             redirect_uri=settings.OIDC_REDIRECT_URI,
             required_scopes="openid email profile",
-            code_verifier=request.session.pop("oauth_verifier", None),
+            code_verifier=code_verifier,
         )
         userinfo = await oauth_fetch_userinfo(
             userinfo_url=endpoints.userinfo_endpoint,

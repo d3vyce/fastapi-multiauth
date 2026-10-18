@@ -33,6 +33,7 @@ from fastapi_multiauth.oauth import (
     OAuthDiscoveryError,
     OAuthError,
     OAuthExchangeError,
+    OAuthStateError,
     OAuthUserinfoError,
     OIDCEndpoints,
     oauth_build_authorization_redirect,
@@ -101,6 +102,8 @@ The OAuth login-flow helpers live in the `fastapi_multiauth.oauth` namespace and
 ## ::: fastapi_multiauth.oauth.OAuthError
 
 ## ::: fastapi_multiauth.oauth.OAuthDiscoveryError
+
+## ::: fastapi_multiauth.oauth.OAuthStateError
 
 ## ::: fastapi_multiauth.oauth.OAuthExchangeError
 

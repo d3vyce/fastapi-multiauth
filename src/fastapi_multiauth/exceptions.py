@@ -89,6 +89,14 @@ class OAuthDiscoveryError(OAuthError):
     """Raised when the OIDC discovery document cannot be fetched or is invalid."""
 
 
+class OAuthStateError(OAuthError):
+    """Raised when the OAuth ``state`` parameter fails its CSRF check.
+
+    The callback did not originate from a redirect this session started: the
+    route must not exchange the code.
+    """
+
+
 class OAuthExchangeError(OAuthError):
     """Raised when the OAuth authorization code exchange fails."""
 

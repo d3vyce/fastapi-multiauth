@@ -10,6 +10,7 @@ from ..exceptions import (
     OAuthDiscoveryError,
     OAuthError,
     OAuthExchangeError,
+    OAuthStateError,
     OAuthUserinfoError,
 )
 from .client import (
@@ -30,6 +31,7 @@ __all__ = [
     "OAuthDiscoveryError",
     "OAuthError",
     "OAuthExchangeError",
+    "OAuthStateError",
     "OAuthUserinfoError",
     "OIDCEndpoints",
     "oauth_build_authorization_redirect",

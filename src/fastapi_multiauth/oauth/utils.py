@@ -6,10 +6,13 @@ import hmac
 import json
 import secrets
 from collections.abc import Sequence
+from typing import Any
 from urllib.parse import urlencode, urlsplit
 
 from fastapi import status
 from fastapi.responses import RedirectResponse
+
+from ..exceptions import OAuthStateError
 
 __all__ = [
     "oauth_build_authorization_redirect",
@@ -103,12 +106,33 @@ def _destination_allowed(destination: str, allowed_hosts: Sequence[str]) -> bool
     # ("/\t/evil.com" becomes "//evil.com") — reject control chars outright.
     if "\\" in destination or any(ch <= " " for ch in destination):
         return False
-    parsed = urlsplit(destination)
+    try:
+        parsed = urlsplit(destination)
+    except ValueError:
+        return False
     if not parsed.scheme and not parsed.netloc:
         return destination.startswith("/") and not destination.startswith("//")
     if parsed.scheme not in ("http", "https"):
         return False
     return parsed.hostname in allowed_hosts
+
+
+def _verified_payload(
+    state: str | None, expected_state_token: str
+) -> dict[str, Any] | None:
+    """Decode *state* and return its payload when its token matches, else ``None``."""
+    if not state:
+        return None
+    try:
+        padded = state + "=" * (-len(state) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+        token = payload.get("n") if isinstance(payload, dict) else None
+        matches = isinstance(token, str) and hmac.compare_digest(
+            token.encode(), expected_state_token.encode()
+        )
+    except (ValueError, RecursionError):
+        return None
+    return payload if matches else None
 
 
 def oauth_decode_state(
@@ -120,46 +144,35 @@ def oauth_decode_state(
 ) -> str:
     """Decode and CSRF-verify an OAuth ``state`` parameter (constant-time).
 
-    The stored token is single-use: delete it from the session after this call,
-    matched or not, so a captured callback cannot be replayed.
+    The stored token is single-use: pop it from the session before this call,
+    so a captured callback cannot be replayed whether or not it verifies.
 
     Args:
         state: Raw ``state`` query parameter from the callback.
-        expected_state_token: Token stored before the authorization redirect;
-            a mismatch — or an empty token (e.g. a session miss) — returns
-            ``fallback``.
-        fallback: URL returned when ``state`` is absent, malformed, or fails
-            verification.
-        allowed_hosts: Open-redirect guard — the decoded destination must be a
+        expected_state_token: Token stored before the authorization redirect.
+            An empty token (e.g. a session miss) never matches.
+        fallback: URL returned when ``state`` verifies but its destination is
+            missing, malformed, or refused by ``allowed_hosts``.
+        allowed_hosts: Open-redirect guard: the decoded destination must be a
             relative path or an absolute http(s) URL whose host is listed. The
             default (``()``) allows relative paths only; ``None`` disables the check.
 
     Returns:
         The destination URL embedded in ``state``, or ``fallback``.
+
+    Raises:
+        OAuthStateError: If no token was stored, or ``state`` is absent,
+            malformed, or carries a different token. The callback did not come
+            from a redirect this session started: do not exchange the code.
     """
-    # An empty expected token (e.g. session.get(..., "") on a session miss)
-    # must never match — compare_digest("", "") is True.
     if not expected_state_token:
+        raise OAuthStateError("no state token was stored for this session")
+    payload = _verified_payload(state, expected_state_token)
+    if payload is None:
+        raise OAuthStateError("state failed verification")
+    destination = payload.get("d")
+    if not isinstance(destination, str):
         return fallback
-    if not state or state == "null":  # "null" guards against JS JSON.stringify(null)
-        return fallback
-    try:
-        padded = state + "=" * (-len(state) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
-        if not isinstance(payload, dict):
-            return fallback
-        token = payload.get("n", "")
-        if not isinstance(token, str) or not hmac.compare_digest(
-            token.encode(), expected_state_token.encode()
-        ):
-            return fallback
-        destination = payload["d"]
-        if not isinstance(destination, str):
-            return fallback
-        if allowed_hosts is not None and not _destination_allowed(
-            destination, allowed_hosts
-        ):
-            return fallback
+    if allowed_hosts is None or _destination_allowed(destination, allowed_hosts):
         return destination
-    except (UnicodeDecodeError, ValueError, KeyError):
-        return fallback
+    return fallback

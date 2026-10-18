@@ -60,7 +60,9 @@ from fastapi_multiauth.abc import _DocOnlyScheme, _override_accepts_request
 from fastapi_multiauth.exceptions import UnauthorizedError
 from fastapi_multiauth.oauth import (
     OAuthDiscoveryError,
+    OAuthError,
     OAuthExchangeError,
+    OAuthStateError,
     OAuthUserinfoError,
     OIDCEndpoints,
     oauth_build_authorization_redirect,
@@ -2104,25 +2106,20 @@ class TestEncodeDecodeOAuthState:
             == url
         )
 
-    def test_decode_none_returns_fallback(self):
-        assert (
-            oauth_decode_state(None, expected_state_token="any", fallback="/home")
-            == "/home"
-        )
+    @pytest.mark.parametrize("state", [None, "", "null", "!!!notbase64!!!"])
+    def test_decode_missing_or_malformed_state_raises(self, state):
+        with pytest.raises(OAuthStateError):
+            oauth_decode_state(state, expected_state_token="any", fallback="/home")
 
-    def test_decode_null_string_returns_fallback(self):
-        assert (
-            oauth_decode_state("null", expected_state_token="any", fallback="/home")
-            == "/home"
-        )
+    def test_decode_deeply_nested_state_raises(self):
+        state = base64.urlsafe_b64encode(b"[" * 100_000).decode()
+        with pytest.raises(OAuthStateError):
+            oauth_decode_state(state, expected_state_token="any", fallback="/home")
 
-    def test_decode_invalid_base64_returns_fallback(self):
-        assert (
-            oauth_decode_state(
-                "!!!notbase64!!!", expected_state_token="any", fallback="/home"
-            )
-            == "/home"
-        )
+    def test_decode_lone_surrogate_token_raises(self):
+        state = _raw_state({"n": "\ud800", "d": "/x"})
+        with pytest.raises(OAuthStateError):
+            oauth_decode_state(state, expected_state_token="any", fallback="/home")
 
     def test_decode_handles_missing_padding(self):
         url = "/dashboard/x"
@@ -2133,23 +2130,28 @@ class TestEncodeDecodeOAuthState:
             == url
         )
 
-    def test_decode_wrong_state_token_returns_fallback(self):
-        url = "https://example.com/dashboard"
-        encoded = oauth_encode_state(url, "correct-token")
-        assert (
+    def test_decode_wrong_state_token_raises(self):
+        encoded = oauth_encode_state("/dashboard", "correct-token")
+        with pytest.raises(OAuthStateError):
             oauth_decode_state(
                 encoded, expected_state_token="wrong-token", fallback="/"
             )
-            == "/"
-        )
 
-    def test_decode_empty_expected_token_returns_fallback(self):
+    def test_decode_empty_expected_token_raises(self):
         """An empty stored token (session miss) must never match an empty "n"."""
-        encoded = oauth_encode_state("https://evil.example.com/x", "")
-        assert (
+        encoded = oauth_encode_state("/dashboard", "")
+        with pytest.raises(OAuthStateError):
             oauth_decode_state(encoded, expected_state_token="", fallback="/home")
-            == "/home"
-        )
+
+    def test_state_error_is_an_oauth_error(self):
+        assert issubclass(OAuthStateError, OAuthError)
+
+    def test_error_message_does_not_echo_state(self):
+        encoded = oauth_encode_state("/dashboard", "attacker-token")
+        with pytest.raises(OAuthStateError) as exc_info:
+            oauth_decode_state(encoded, expected_state_token="expected", fallback="/")
+        assert encoded not in str(exc_info.value)
+        assert "attacker-token" not in str(exc_info.value)
 
     def test_generate_state_token_is_random(self):
         assert oauth_generate_state_token() != oauth_generate_state_token()
@@ -2967,8 +2969,8 @@ class TestDecodeStateOpenRedirectGuard:
             == "/fallback"
         )
 
-    def test_non_string_state_token_rejected(self):
-        state = _raw_state({"n": 12345, "d": "/x"})
+    def test_missing_destination_returns_fallback(self):
+        state = _raw_state({"n": self.TOKEN})
         assert (
             oauth_decode_state(
                 state, expected_state_token=self.TOKEN, fallback="/fallback"
@@ -2976,14 +2978,16 @@ class TestDecodeStateOpenRedirectGuard:
             == "/fallback"
         )
 
-    def test_non_dict_payload_rejected(self):
-        state = _raw_state(["not", "a", "dict"])
-        assert (
+    def test_unparsable_destination_returns_fallback(self):
+        assert self._decode("http://[::1", ("app.example.com",)) == "/fallback"
+
+    @pytest.mark.parametrize("payload", [{"n": 12345, "d": "/x"}, ["not", "a", "dict"]])
+    def test_bad_payload_raises(self, payload):
+        state = _raw_state(payload)
+        with pytest.raises(OAuthStateError):
             oauth_decode_state(
                 state, expected_state_token=self.TOKEN, fallback="/fallback"
             )
-            == "/fallback"
-        )
 
 
 class TestRequireExtra:
