@@ -4,7 +4,7 @@ import base64
 from collections.abc import Callable
 from typing import Any
 
-from fastapi import Request
+from fastapi.requests import HTTPConnection
 from fastapi.security import HTTPBasic
 
 from fastapi_multiauth.exceptions import UnauthorizedError
@@ -67,7 +67,7 @@ class HTTPBasicAuth(ValidatedAuthSource):
         """``Basic`` challenge, with the realm when configured (RFC 7617 §2)."""
         return self._challenge
 
-    async def extract(self, request: Request) -> str | None:
+    async def extract(self, request: HTTPConnection) -> str | None:
         """Return the base64 credentials blob, or ``None`` when absent or empty.
 
         The ``Basic`` scheme is matched case-insensitively; decoding and the
@@ -76,7 +76,11 @@ class HTTPBasicAuth(ValidatedAuthSource):
         return authorization_credential(request, "basic")
 
     async def authenticate_scoped(
-        self, credential: str, scopes: list[str], *, request: Request | None = None
+        self,
+        credential: str,
+        scopes: list[str],
+        *,
+        request: HTTPConnection | None = None,
     ) -> Any:
         """Decode the blob, forwarding route-declared scopes to the validator."""
         try:

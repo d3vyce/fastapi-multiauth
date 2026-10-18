@@ -23,6 +23,8 @@ from fastapi import (
     Request,
     Response,
     Security,
+    WebSocket,
+    routing,
 )
 from fastapi.openapi.models import APIKey, APIKeyIn
 from fastapi.security import HTTPBearer
@@ -30,6 +32,7 @@ from fastapi.security.base import SecurityBase
 from fastapi.testclient import TestClient
 from itsdangerous import TimestampSigner
 from jwt.algorithms import RSAAlgorithm
+from starlette.testclient import WebSocketDenialResponse
 
 from fastapi_multiauth import (
     APIKeyCookieAuth,
@@ -4811,6 +4814,134 @@ class TestOAuth2Sources:
             TestClient(_app(setup)).get("/typo", headers={"X-Key": VALID_TOKEN})
 
 
+class TestWebSocket:
+    """Sources guard WebSocket routes: the handshake is the request."""
+
+    @staticmethod
+    def _client(auth) -> TestClient:
+        def setup(app: FastAPI):
+            @app.websocket("/ws")
+            async def ws(websocket: WebSocket, user=Security(auth)):
+                await websocket.accept()
+                await websocket.send_json({"user": user})
+                await websocket.close()
+
+        return TestClient(_app(setup))
+
+    @staticmethod
+    def _denial(client: TestClient, **kwargs) -> WebSocketDenialResponse:
+        with (
+            pytest.raises(WebSocketDenialResponse) as exc_info,
+            client.websocket_connect("/ws", **kwargs),
+        ):
+            pass
+        return exc_info.value
+
+    def test_a_valid_credential_opens_the_socket(self):
+        client = self._client(HTTPBearerAuth(simple_validator))
+
+        with client.websocket_connect(
+            "/ws", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+        ) as websocket:
+            assert websocket.receive_json() == {"user": {"user": "alice"}}
+
+    def test_an_absent_credential_denies_the_handshake_with_the_challenge(self):
+        denial = self._denial(self._client(HTTPBearerAuth(simple_validator)))
+
+        assert denial.status_code == 401
+        assert denial.headers["WWW-Authenticate"] == "Bearer"
+
+    def test_an_invalid_credential_denies_the_handshake(self):
+        denial = self._denial(
+            self._client(HTTPBearerAuth(simple_validator)),
+            headers={"Authorization": "Bearer wrong"},
+        )
+
+        assert denial.status_code == 401
+        assert denial.headers["WWW-Authenticate"] == "Bearer"
+
+    def test_a_forbidden_identity_denies_the_handshake_with_403(self):
+        async def validator(credential: str) -> dict:
+            raise ForbiddenError()
+
+        denial = self._denial(
+            self._client(HTTPBearerAuth(validator)),
+            headers={"Authorization": f"Bearer {VALID_TOKEN}"},
+        )
+
+        assert denial.status_code == 403
+
+    def test_multiauth_falls_through_to_a_later_source(self):
+        auth = MultiAuth(
+            HTTPBearerAuth(simple_validator),
+            APIKeyQueryAuth("api_key", simple_validator),
+        )
+
+        with self._client(auth).websocket_connect(
+            f"/ws?api_key={VALID_TOKEN}"
+        ) as websocket:
+            assert websocket.receive_json() == {"user": {"user": "alice"}}
+
+    def test_multiauth_denies_with_the_combined_challenge(self):
+        auth = MultiAuth(
+            HTTPBearerAuth(simple_validator), HTTPBasicAuth(simple_validator)
+        )
+
+        denial = self._denial(self._client(auth))
+
+        assert denial.status_code == 401
+        assert denial.headers["WWW-Authenticate"] == "Bearer, Basic"
+
+    def test_optional_yields_none_without_a_credential(self):
+        client = self._client(HTTPBearerAuth(simple_validator).optional())
+
+        with client.websocket_connect("/ws") as websocket:
+            assert websocket.receive_json() == {"user": None}
+
+    def test_a_cookie_authenticates_the_handshake(self):
+        client = self._client(APIKeyCookieAuth("session", cookie_validator))
+
+        with client.websocket_connect(
+            "/ws", headers={"Cookie": f"session={VALID_COOKIE}"}
+        ) as websocket:
+            assert websocket.receive_json() == {"user": {"session": VALID_COOKIE}}
+
+    def test_route_scopes_reach_the_validator(self):
+        async def validator(credential: str, scopes: list[str]) -> dict:
+            return {"scopes": scopes}
+
+        bearer = HTTPBearerAuth(validator)
+
+        def setup(app: FastAPI):
+            @app.websocket("/ws")
+            async def ws(websocket: WebSocket, user=Security(bearer, scopes=["chat"])):
+                await websocket.accept()
+                await websocket.send_json(user)
+                await websocket.close()
+
+        client = TestClient(_app(setup))
+        with client.websocket_connect(
+            "/ws", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+        ) as websocket:
+            assert websocket.receive_json() == {"scopes": ["chat"]}
+
+    def test_a_validator_declaring_request_is_handed_the_websocket(self):
+        seen: list[object] = []
+
+        async def validator(credential: str, request=None) -> dict:
+            seen.append(request)
+            return {"user": "alice"}
+
+        client = self._client(HTTPBearerAuth(validator))
+        with client.websocket_connect(
+            "/ws", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+        ) as websocket:
+            websocket.receive_json()
+
+        assert len(seen) == 1
+        assert isinstance(seen[0], WebSocket)
+
+
 class TestAuthSurface:
     """`auth_surface()` answers what guards what, from the routes themselves."""
 
@@ -5028,6 +5159,44 @@ class TestAuthSurface:
         assert route.methods == ()
         assert route.unguarded is True
         assert route.include_in_schema is False
+
+    def test_a_websocket_route_in_nested_routers_keeps_its_prefixes_and_guards(self):
+        inner_guard = HTTPBearerAuth(simple_validator, scheme_name="Inner")
+        router_guard = HTTPBearerAuth(simple_validator, scheme_name="Router")
+        inner = APIRouter()
+
+        @inner.websocket("/ws")
+        async def ws(websocket: WebSocket, user=Security(inner_guard)):
+            return None
+
+        mid = APIRouter()
+        mid.include_router(
+            inner, prefix="/inner", dependencies=[Security(router_guard)]
+        )
+        app = FastAPI()
+        app.include_router(mid, prefix="/api")
+
+        route = self._find(app, "/api/inner/ws")
+        assert route.methods == ()
+        assert route.include_in_schema is False
+        assert route.unguarded is False
+        assert [[req.scheme_name for req in alt] for alt in route.alternatives] == [
+            ["Router", "Inner"]
+        ]
+
+    def test_routes_are_read_flat_before_route_contexts_existed(self):
+        """FastAPI before 0.137.2 has no iter_route_contexts(): app.routes is flat."""
+
+        def setup(app: FastAPI):
+            @app.get("/me")
+            async def me(user=Security(HTTPBearerAuth(simple_validator))):
+                return user
+
+        app = _app(setup)
+        with patch.object(routing, "iter_route_contexts", None, create=True):
+            route = self._find(app, "/me")
+        assert route.methods == ("GET",)
+        assert route.alternatives[0][0].scheme_name == "HTTPBearer"
 
     def test_a_source_without_an_openapi_scheme_still_guards_the_route(self):
         """AuthSource is the public extension point; a scheme is optional on it."""

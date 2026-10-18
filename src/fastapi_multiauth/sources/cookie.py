@@ -5,7 +5,8 @@ import secrets
 from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
-from fastapi import Request, Response
+from fastapi import Response
+from fastapi.requests import HTTPConnection
 from fastapi.security import APIKeyCookie
 from itsdangerous import BadSignature, TimestampSigner
 
@@ -159,11 +160,11 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         """Cookie lifetime in seconds: use it to derive your session's expiry."""
         return self._ttl
 
-    async def extract(self, request: Request) -> str | None:
+    async def extract(self, request: HTTPConnection) -> str | None:
         """Return the raw cookie value, or ``None`` when absent or empty."""
         return request.cookies.get(self._name) or None
 
-    def session_id_of(self, request: Request) -> str | None:
+    def session_id_of(self, request: HTTPConnection) -> str | None:
         """Return *request*'s session id without running the validator.
 
         ``None`` when ``session_id`` is off, or the cookie is absent, expired
@@ -180,7 +181,11 @@ class APIKeyCookieAuth(ValidatedAuthSource):
             return None
 
     async def authenticate_scoped(
-        self, credential: str, scopes: list[str], *, request: Request | None = None
+        self,
+        credential: str,
+        scopes: list[str],
+        *,
+        request: HTTPConnection | None = None,
     ) -> Any:
         """Verify the cookie, forwarding route-declared scopes to the validator."""
         plain = self._verify(credential)
@@ -214,7 +219,7 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         return sid
 
     def delete_cookie(
-        self, response: Response, request: Request | None = None
+        self, response: Response, request: HTTPConnection | None = None
     ) -> str | None:
         """Clear the session cookie (logout) from this client only.
 

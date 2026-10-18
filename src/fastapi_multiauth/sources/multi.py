@@ -4,7 +4,8 @@ import copy
 import inspect
 from typing import Annotated, Any, Self, cast
 
-from fastapi import Depends, Request
+from fastapi import Depends
+from fastapi.requests import HTTPConnection
 from fastapi.security import SecurityScopes
 
 from fastapi_multiauth.exceptions import UnauthorizedError
@@ -51,7 +52,7 @@ class MultiAuth:
             inspect.Parameter(
                 "request",
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                annotation=Request,
+                annotation=HTTPConnection,
             ),
             inspect.Parameter(
                 "security_scopes",
@@ -101,7 +102,7 @@ class MultiAuth:
         clone._optional = True
         return clone
 
-    async def dispatch(self, request: Request, scopes: list[str]) -> Any:
+    async def dispatch(self, request: HTTPConnection, scopes: list[str]) -> Any:
         """Authenticate with the first source whose credential is present."""
         if scopes:
             if self._optional:

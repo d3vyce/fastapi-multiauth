@@ -163,10 +163,22 @@ def _auth_units(dependant: Dependant) -> list[tuple[SchemeRequirement, ...]]:
     return list(dict.fromkeys(requirements))
 
 
+def _effective_route(context: Any) -> Any:
+    """Return *context*, or the merged route 0.137.2 to 0.143.0 leave off it."""
+    if getattr(context, "dependant", None) is not None:
+        return context
+    effective = getattr(
+        getattr(context, "_route_context", None), "starlette_route", None
+    )
+    return context if effective is None else effective
+
+
 def _routes_of(app: FastAPI) -> Iterable[Any]:
-    """Yield the app's routes, expanding the lazily included routers of 0.141+."""
+    """Yield the app's routes, expanding the lazily included routers of 0.137.2+."""
     expand = getattr(routing, "iter_route_contexts", None)
-    return expand(app.routes) if expand else app.routes
+    if expand is None:
+        return app.routes
+    return (_effective_route(context) for context in expand(app.routes))
 
 
 def auth_surface(app: FastAPI) -> list[RouteAuth]:

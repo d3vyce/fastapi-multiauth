@@ -85,6 +85,7 @@ async def me(user=Security(auth)):
 - **Token hashing helpers**: `hash_token`/`verify_token_hash` package the "store the hash, never the token" pattern with constant-time comparison.
 - **JWT validation** (`fastapi-multiauth[jwt]` extra): `JWTValidator` for `HTTPBearerAuth`: HS256 or provider JWKS (Keycloak/Auth0/Entra/Authentik) with TTL caching and rotation-aware `kid` refresh, `aud`/`iss`/`exp` checks, configurable scope claims, and a `claims_to_identity` hook.
 - **Security scopes**: `Security(auth, scopes=[...])` forwards the declared scopes to validators that accept a `scopes` parameter.
+- **WebSocket routes**: every source and `MultiAuth` guard `@app.websocket` routes too, refusing the handshake with the same 401/403.
 - **Correct HTTP semantics**: 401 with `WWW-Authenticate` challenges ([RFC 7235](https://datatracker.ietf.org/doc/html/rfc7235)) and 403 via `ForbiddenError`.
 - **OAuth 2.0 / OIDC helpers** (`fastapi-multiauth[oauth]` extra): async discovery with TTL caching, HTTPS enforcement, CSRF-protected `state` encoding, PKCE (S256), and code exchange delegated to [httpx-oauth](https://github.com/frankie567/httpx-oauth).
 
