@@ -2,8 +2,10 @@
 
 import copy
 import inspect
+import math
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from typing import Any, Self
 
 from fastapi import HTTPException
@@ -11,8 +13,14 @@ from fastapi.requests import HTTPConnection
 from fastapi.security import SecurityScopes
 from fastapi.security.base import SecurityBase
 
-from fastapi_multiauth.exceptions import UnauthorizedError
-from fastapi_multiauth.utils import add_challenge, challenge_headers, ensure_async
+from fastapi_multiauth.exceptions import StaleCredentialError, UnauthorizedError
+from fastapi_multiauth.utils import (
+    add_challenge,
+    challenge_headers,
+    credential_age,
+    ensure_async,
+    step_up_challenge,
+)
 
 _RESERVED_KWARGS = {
     "scopes": "injected from the route by Security(..., scopes=[...])",
@@ -98,6 +106,14 @@ def _anonymous_scopes_error(owner: object, scopes: list[str]) -> RuntimeError:
     )
 
 
+def _fresh_optional_error(owner: object) -> ValueError:
+    """Error for a dependency asking for both anonymous callers and freshness."""
+    return ValueError(
+        f"{type(owner).__name__} cannot be both optional() and fresh(): an "
+        "anonymous caller can never be fresh"
+    )
+
+
 def _undeclared_scopes_error(
     owner: object, unknown: list[str], catalogue: dict[str, str]
 ) -> RuntimeError:
@@ -143,18 +159,30 @@ def _carry_scheme(dependency: Any, scheme: SecurityBase) -> None:
     dependency.scheme_name = scheme.scheme_name
 
 
+@dataclass(frozen=True, slots=True)
+class _Freshness:
+    """The window set by :meth:`AuthSource.fresh`."""
+
+    max_age: float
+    leeway: float
+    read: Callable[[Any], Awaitable[Any]] | None
+    """Caller-supplied reader of the instant, ``None`` to use the source's own."""
+
+
 class AuthSource(ABC):
     """Abstract base class for authentication sources.
 
     Subclasses implement :meth:`extract` and :meth:`authenticate`; both
     ``Security(source)`` and ``MultiAuth`` route through that pair via
-    :meth:`dispatch`.
+    :meth:`dispatch`. Optional hooks: :meth:`www_authenticate` for the 401
+    challenge, :meth:`authenticated_at` for :meth:`fresh`.
     """
 
     scheme: SecurityBase | None
     _optional: bool = False
     _scope_catalogue: dict[str, str] | None = None
     """The scopes this source publishes to OpenAPI, ``None`` when it has none."""
+    _freshness: _Freshness | None = None
 
     def __init__(self, scheme: Any = None) -> None:
         """Set up the FastAPI dependency signature.
@@ -241,18 +269,109 @@ class AuthSource(ABC):
         *,
         request: HTTPConnection | None = None,
     ) -> Any:
-        """Authenticate, attaching this source's challenge to any 401 raised."""
+        """Authenticate, attaching this source's challenge to any 401 raised.
+
+        Freshness is checked after the credential: an invalid one is refused as
+        invalid, not as stale.
+        """
         try:
-            return await self._call_scoped(credential, scopes, request=request)
+            identity = await self._call_scoped(credential, scopes, request=request)
         except HTTPException as exc:
             add_challenge(exc, self.www_authenticate())
             raise
+        await self._enforce_freshness(credential, identity)
+        return identity
 
     def optional(self) -> Self:
-        """Return a copy that yields ``None`` instead of 401 when no credential is sent."""
+        """Return a copy that yields ``None`` instead of 401 when no credential is sent.
+
+        Raises:
+            ValueError: On a :meth:`fresh` copy: anonymous is never fresh.
+        """
+        if self._freshness is not None:
+            raise _fresh_optional_error(self)
         clone = copy.copy(self)
         clone._optional = True
         return clone
+
+    def authenticated_at(self, credential: str) -> Any:
+        """When the factor behind *credential* was proven, for :meth:`fresh`.
+
+        Epoch seconds, a ``datetime``, or ``None`` when this source cannot date
+        the credential. Sources that can override this (a signed cookie carries
+        its mint time); the others pass ``authenticated_at=`` to :meth:`fresh`.
+        """
+        return None
+
+    def _dates_credentials(self) -> bool:
+        """Whether this source can date a credential without a caller's help."""
+        return type(self).authenticated_at is not AuthSource.authenticated_at
+
+    def fresh(
+        self,
+        max_age: float,
+        *,
+        authenticated_at: Callable[..., Any] | None = None,
+        leeway: float = 0.0,
+    ) -> Self:
+        """Return a copy that refuses a credential proven more than *max_age* ago.
+
+        Args:
+            max_age: Freshness window in seconds.
+            authenticated_at: Sync or async callable taking the identity and
+                returning the instant the caller proved a factor, as epoch
+                seconds or a ``datetime`` (naive read as UTC). Required when the
+                source cannot date its own credentials, and overrides
+                :meth:`authenticated_at`. ``None`` refuses the request.
+            leeway: Clock-skew tolerance in seconds, either way: an instant
+                further than *leeway* in the future is refused too.
+
+        Raises:
+            ValueError: Non-positive or non-finite *max_age*, negative or
+                non-finite *leeway*, an :meth:`optional` copy, a copy that
+                already has a window, or no way to date the credential.
+        """
+        if not math.isfinite(max_age) or max_age <= 0:
+            raise ValueError("max_age must be a positive, finite number of seconds")
+        if not math.isfinite(leeway) or leeway < 0:
+            raise ValueError("leeway must be a finite, non-negative number of seconds")
+        if self._optional:
+            raise _fresh_optional_error(self)
+        if self._freshness is not None:
+            raise ValueError(
+                f"{type(self).__name__} already has a freshness window: call "
+                "fresh() once, on the source or on the MultiAuth"
+            )
+        if authenticated_at is None and not self._dates_credentials():
+            raise ValueError(
+                f"{type(self).__name__} cannot date a credential: "
+                "fresh() needs authenticated_at=..."
+            )
+        clone = copy.copy(self)
+        clone._freshness = _Freshness(
+            max_age=max_age,
+            leeway=leeway,
+            read=ensure_async(authenticated_at) if authenticated_at else None,
+        )
+        return clone
+
+    async def _enforce_freshness(self, credential: str, identity: Any) -> None:
+        """Refuse an identity whose credential was proven outside the window."""
+        freshness = self._freshness
+        if freshness is None:
+            return
+        if freshness.read is not None:
+            instant = await freshness.read(identity)
+        else:
+            instant = self.authenticated_at(credential)
+        age = credential_age(instant)
+        if age is None or not (
+            -freshness.leeway <= age <= freshness.max_age + freshness.leeway
+        ):
+            raise StaleCredentialError(
+                headers=step_up_challenge(self.www_authenticate(), freshness.max_age),
+                max_age=freshness.max_age,
+            )
 
     def _reject_undeclared_scopes(self, scopes: list[str]) -> None:
         """Refuse a route declaring scopes this source never published."""
