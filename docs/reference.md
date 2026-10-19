@@ -21,7 +21,9 @@ from fastapi_multiauth import (
     StaleCredentialError,
     UnauthorizedError,
     auth_surface,
+    checksum_token_generator,
     hash_token,
+    verify_token_checksum,
     verify_token_hash,
 )
 ```
@@ -89,6 +91,10 @@ from fastapi_multiauth.oauth import (
 ## ::: fastapi_multiauth.hash_token
 
 ## ::: fastapi_multiauth.verify_token_hash
+
+## ::: fastapi_multiauth.checksum_token_generator
+
+## ::: fastapi_multiauth.verify_token_checksum
 
 ## Exceptions
 

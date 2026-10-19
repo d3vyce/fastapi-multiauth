@@ -47,6 +47,7 @@ Signed is not encrypted. The signed cookie payload and JWT claims are **readable
 - `generate_token(nbytes=32)` → `secrets.token_urlsafe(nbytes)`, so 256 bits of CSPRNG entropy at the default `nbytes`; a lower `nbytes` lowers it accordingly. A custom `token_generator` owns the entropy instead, and the library cannot measure it. Use `secrets`, never `random`.
 - Store only `hash_token(token)` (SHA-256 hex). Unsalted SHA-256 is correct *for these tokens* because they are unguessable; it is **not** acceptable for passwords.
 - Prefixes (`user_`, `org_`) route token types to sources and make leaked tokens detectable by secret scanners.
+- `checksum_token_generator` appends a base62 CRC32 to the body, which `verify_token_checksum` checks. It is **not** a security mechanism (anyone can compute one): it only lets a validator refuse typos and junk before the lookup, and makes leaked tokens easier for scanners to recognize. Its body carries at least `nbytes` of entropy, like the default generator.
 
 ## OAuth / OIDC flow requirements
 
