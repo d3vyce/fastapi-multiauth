@@ -1,5 +1,7 @@
 """Exceptions raised by authentication sources and OAuth helpers."""
 
+from typing import ClassVar
+
 from fastapi import HTTPException, status
 
 
@@ -25,18 +27,26 @@ class UnauthorizedError(HTTPException):
         )
 
 
-class StaleCredentialError(UnauthorizedError):
-    """HTTP 401 — the credential is valid but was proven too long ago.
+class InsufficientAuthenticationError(UnauthorizedError):
+    """HTTP 401: the credential is valid but its authentication falls short.
 
-    Raised by a route guarded with :meth:`~fastapi_multiauth.AuthSource.fresh`.
-    ``detail`` is the stable string ``"Insufficient user authentication"``, and
-    sources with an HTTP auth scheme carry the
-    `RFC 9470 <https://datatracker.ietf.org/doc/html/rfc9470>`_ step-up
-    challenge. A handler rendering its own body reads :attr:`max_age`.
+    Raised by a route guarded with :meth:`~fastapi_multiauth.AuthSource.stepped_up`
+    when the credential was not proven at a requested level, and the base of
+    :class:`StaleCredentialError`. ``detail`` is the stable string
+    ``"Insufficient user authentication"``, and sources with an HTTP auth
+    scheme carry the `RFC 9470 <https://datatracker.ietf.org/doc/html/rfc9470>`_
+    step-up challenge listing every requirement of the route. A handler
+    rendering its own body reads :attr:`max_age` and :attr:`acr_values`.
     """
 
+    error_description: ClassVar[str] = "A different authentication level is required"
+    """The challenge's ``error_description`` for this refusal."""
+
     max_age: float | None
-    """The freshness window the credential missed, in seconds."""
+    """The route's freshness window in seconds, ``None`` without :meth:`fresh`."""
+
+    acr_values: tuple[str, ...] | None
+    """The levels the route accepts, ``None`` without :meth:`stepped_up`."""
 
     def __init__(
         self,
@@ -44,16 +54,29 @@ class StaleCredentialError(UnauthorizedError):
         headers: dict[str, str] | None = None,
         *,
         max_age: float | None = None,
+        acr_values: tuple[str, ...] | None = None,
     ) -> None:
         """Initialize the exception.
 
         Args:
             detail: Human-readable message returned in the response body.
             headers: Extra response headers (e.g. the step-up challenge).
-            max_age: The freshness window that was missed, in seconds.
+            max_age: The route's freshness window, in seconds.
+            acr_values: The authentication context classes the route accepts.
         """
         self.max_age = max_age
+        self.acr_values = acr_values
         super().__init__(detail=detail, headers=headers)
+
+
+class StaleCredentialError(InsufficientAuthenticationError):
+    """HTTP 401 — the credential is valid but was proven too long ago.
+
+    Raised by a route guarded with :meth:`~fastapi_multiauth.AuthSource.fresh`.
+    Everything else is as :class:`InsufficientAuthenticationError`.
+    """
+
+    error_description: ClassVar[str] = "More recent authentication is required"
 
 
 class ForbiddenError(HTTPException):

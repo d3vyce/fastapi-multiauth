@@ -2,7 +2,7 @@
 
 import copy
 import inspect
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from typing import Annotated, Any, Self, cast
 
 from fastapi import Depends
@@ -15,7 +15,8 @@ from ..abc import (
     AuthSource,
     _anonymous_scopes_error,
     _carry_scheme,
-    _fresh_optional_error,
+    _step_up_optional_error,
+    _step_up_optional_guard,
     _unenforceable_scopes_error,
 )
 from ..utils import challenge_headers
@@ -102,10 +103,13 @@ class MultiAuth:
         """Return a copy that yields ``None`` when no source has a credential.
 
         Raises:
-            ValueError: On a :meth:`fresh` copy: anonymous is never fresh.
+            ValueError: On a :meth:`fresh` or :meth:`stepped_up` copy:
+                anonymous has proven no factor.
         """
-        if any(source._freshness for source in self._sources):
-            raise _fresh_optional_error(self)
+        for source in self._sources:
+            guard = _step_up_optional_guard(source)
+            if guard is not None:
+                raise _step_up_optional_error(self, guard)
         clone = copy.copy(self)
         clone._optional = True
         return clone
@@ -127,10 +131,32 @@ class MultiAuth:
                 cannot be dated or already has a window of its own.
         """
         if self._optional:
-            raise _fresh_optional_error(self)
+            raise _step_up_optional_error(self, "fresh()")
         return self._with_sources(
             source.fresh(max_age, authenticated_at=authenticated_at, leeway=leeway)
             for source in self._sources
+        )
+
+    def stepped_up(
+        self,
+        acr_values: Sequence[str],
+        *,
+        acr: Callable[..., Any],
+    ) -> "MultiAuth":
+        """Return a copy whose sources all require one of *acr_values*.
+
+        Applies :meth:`AuthSource.stepped_up` to every source, so no source
+        becomes the way around the requirement.
+
+        Raises:
+            TypeError: As :meth:`AuthSource.stepped_up`.
+            ValueError: As :meth:`AuthSource.stepped_up`, naming the source
+                that already has levels of its own.
+        """
+        if self._optional:
+            raise _step_up_optional_error(self, "stepped_up()")
+        return self._with_sources(
+            source.stepped_up(acr_values, acr=acr) for source in self._sources
         )
 
     def _with_sources(self, sources: Iterable[AuthSource]) -> "MultiAuth":

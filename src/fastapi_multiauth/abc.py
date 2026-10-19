@@ -4,7 +4,7 @@ import copy
 import inspect
 import math
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Self
 
@@ -13,7 +13,11 @@ from fastapi.requests import HTTPConnection
 from fastapi.security import SecurityScopes
 from fastapi.security.base import SecurityBase
 
-from fastapi_multiauth.exceptions import StaleCredentialError, UnauthorizedError
+from fastapi_multiauth.exceptions import (
+    InsufficientAuthenticationError,
+    StaleCredentialError,
+    UnauthorizedError,
+)
 from fastapi_multiauth.utils import (
     add_challenge,
     challenge_headers,
@@ -106,12 +110,44 @@ def _anonymous_scopes_error(owner: object, scopes: list[str]) -> RuntimeError:
     )
 
 
-def _fresh_optional_error(owner: object) -> ValueError:
-    """Error for a dependency asking for both anonymous callers and freshness."""
+def _step_up_optional_error(owner: object, guard: str) -> ValueError:
+    """Error for a dependency asking for both anonymous callers and a step-up."""
     return ValueError(
-        f"{type(owner).__name__} cannot be both optional() and fresh(): an "
-        "anonymous caller can never be fresh"
+        f"{type(owner).__name__} cannot be both optional() and {guard}: an "
+        "anonymous caller has proven no factor at all"
     )
+
+
+def _step_up_optional_guard(owner: Any) -> str | None:
+    """The step-up guard that keeps *owner* from being optional, if any."""
+    if owner._freshness is not None:
+        return "fresh()"
+    if owner._assurance is not None:
+        return "stepped_up()"
+    return None
+
+
+def _validate_acr_values(acr_values: Sequence[str]) -> tuple[str, ...]:
+    """Check *acr_values* can travel in the step-up challenge's quoted string."""
+    if isinstance(acr_values, str):
+        raise TypeError("acr_values must be a sequence of strings, not a string")
+    values = tuple(acr_values)
+    if not values:
+        raise ValueError("acr_values must list at least one value")
+    for value in values:
+        if not (
+            isinstance(value, str)
+            and value
+            and value.isascii()
+            and value.isprintable()
+            and not any(char in value for char in ' "\\')
+        ):
+            raise ValueError(
+                f"each acr_values entry must be non-empty printable US-ASCII "
+                f"without spaces, quotes or backslashes (got {value!r}): the "
+                "values are space-separated inside a quoted-string (RFC 9470)"
+            )
+    return values
 
 
 def _undeclared_scopes_error(
@@ -169,6 +205,15 @@ class _Freshness:
     """Caller-supplied reader of the instant, ``None`` to use the source's own."""
 
 
+@dataclass(frozen=True, slots=True)
+class _Assurance:
+    """The levels set by :meth:`AuthSource.stepped_up`."""
+
+    acr_values: tuple[str, ...]
+    read: Callable[[Any], Awaitable[Any]]
+    """Caller-supplied reader of the identity's ``acr``."""
+
+
 class AuthSource(ABC):
     """Abstract base class for authentication sources.
 
@@ -183,6 +228,7 @@ class AuthSource(ABC):
     _scope_catalogue: dict[str, str] | None = None
     """The scopes this source publishes to OpenAPI, ``None`` when it has none."""
     _freshness: _Freshness | None = None
+    _assurance: _Assurance | None = None
 
     def __init__(self, scheme: Any = None) -> None:
         """Set up the FastAPI dependency signature.
@@ -279,17 +325,19 @@ class AuthSource(ABC):
         except HTTPException as exc:
             add_challenge(exc, self.www_authenticate())
             raise
-        await self._enforce_freshness(credential, identity)
+        await self._enforce_step_up(credential, identity)
         return identity
 
     def optional(self) -> Self:
         """Return a copy that yields ``None`` instead of 401 when no credential is sent.
 
         Raises:
-            ValueError: On a :meth:`fresh` copy: anonymous is never fresh.
+            ValueError: On a :meth:`fresh` or :meth:`stepped_up` copy:
+                anonymous has proven no factor.
         """
-        if self._freshness is not None:
-            raise _fresh_optional_error(self)
+        guard = _step_up_optional_guard(self)
+        if guard is not None:
+            raise _step_up_optional_error(self, guard)
         clone = copy.copy(self)
         clone._optional = True
         return clone
@@ -336,7 +384,7 @@ class AuthSource(ABC):
         if not math.isfinite(leeway) or leeway < 0:
             raise ValueError("leeway must be a finite, non-negative number of seconds")
         if self._optional:
-            raise _fresh_optional_error(self)
+            raise _step_up_optional_error(self, "fresh()")
         if self._freshness is not None:
             raise ValueError(
                 f"{type(self).__name__} already has a freshness window: call "
@@ -355,23 +403,86 @@ class AuthSource(ABC):
         )
         return clone
 
-    async def _enforce_freshness(self, credential: str, identity: Any) -> None:
-        """Refuse an identity whose credential was proven outside the window."""
-        freshness = self._freshness
-        if freshness is None:
-            return
+    def stepped_up(
+        self,
+        acr_values: Sequence[str],
+        *,
+        acr: Callable[..., Any],
+    ) -> Self:
+        """Return a copy that refuses a credential not proven at one of *acr_values*.
+
+        The `RFC 9470 <https://datatracker.ietf.org/doc/html/rfc9470>`_
+        counterpart of :meth:`fresh`: "authenticate more strongly" rather than
+        "authenticate again". Both compose, in either order, into one
+        challenge carrying ``acr_values`` and ``max_age``.
+
+        Args:
+            acr_values: The authentication context class references the route
+                accepts; any one of them passes.
+            acr: Sync or async callable taking the identity and returning the
+                ``acr`` the caller authenticated with, e.g.
+                ``lambda claims: claims.get("acr")``. Anything outside
+                *acr_values*, ``None`` included, refuses the request.
+
+        Raises:
+            TypeError: If *acr_values* is a bare string.
+            ValueError: An empty *acr_values*, an entry that cannot travel in
+                the challenge (whitespace, quotes, backslashes, non-ASCII), an
+                :meth:`optional` copy, or a copy that already has levels.
+        """
+        values = _validate_acr_values(acr_values)
+        if self._optional:
+            raise _step_up_optional_error(self, "stepped_up()")
+        if self._assurance is not None:
+            raise ValueError(
+                f"{type(self).__name__} already has acr_values: call "
+                "stepped_up() once, on the source or on the MultiAuth"
+            )
+        clone = copy.copy(self)
+        clone._assurance = _Assurance(acr_values=values, read=ensure_async(acr))
+        return clone
+
+    async def _enforce_step_up(self, credential: str, identity: Any) -> None:
+        """Refuse an identity outside the :meth:`fresh` window or :meth:`stepped_up` levels."""
+        freshness, assurance = self._freshness, self._assurance
+        if freshness is not None and not await self._is_fresh(
+            freshness, credential, identity
+        ):
+            raise self._step_up_error(StaleCredentialError)
+        if assurance is not None:
+            achieved = await assurance.read(identity)
+            if achieved not in assurance.acr_values:
+                raise self._step_up_error(InsufficientAuthenticationError)
+
+    async def _is_fresh(
+        self, freshness: _Freshness, credential: str, identity: Any
+    ) -> bool:
+        """Whether the credential was proven inside the window."""
         if freshness.read is not None:
             instant = await freshness.read(identity)
         else:
             instant = self.authenticated_at(credential)
         age = credential_age(instant)
-        if age is None or not (
+        return age is not None and (
             -freshness.leeway <= age <= freshness.max_age + freshness.leeway
-        ):
-            raise StaleCredentialError(
-                headers=step_up_challenge(self.www_authenticate(), freshness.max_age),
-                max_age=freshness.max_age,
-            )
+        )
+
+    def _step_up_error(
+        self, error_cls: type[InsufficientAuthenticationError]
+    ) -> InsufficientAuthenticationError:
+        """The refusal, its challenge listing every step-up requirement."""
+        max_age = self._freshness.max_age if self._freshness else None
+        acr_values = self._assurance.acr_values if self._assurance else None
+        return error_cls(
+            headers=step_up_challenge(
+                self.www_authenticate(),
+                error_cls.error_description,
+                max_age=max_age,
+                acr_values=acr_values,
+            ),
+            max_age=max_age,
+            acr_values=acr_values,
+        )
 
     def _reject_undeclared_scopes(self, scopes: list[str]) -> None:
         """Refuse a route declaring scopes this source never published."""

@@ -9,6 +9,7 @@ import string
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any, ClassVar, cast
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
@@ -42,10 +43,12 @@ from fastapi_multiauth import (
     APIKeyCookieAuth,
     APIKeyHeaderAuth,
     APIKeyQueryAuth,
+    AuthenticationMethodReference,
     AuthSource,
     ForbiddenError,
     HTTPBasicAuth,
     HTTPBearerAuth,
+    InsufficientAuthenticationError,
     JWTValidator,
     MultiAuth,
     OAuth2AuthorizationCodeBearerAuth,
@@ -82,6 +85,7 @@ from fastapi_multiauth.oauth import (
     oauth_validate_id_token,
 )
 from fastapi_multiauth.oauth.id_token import _key_set as _id_key_set
+from fastapi_multiauth.utils import step_up_challenge
 
 
 def _app(*routes_setup_fns):
@@ -6306,3 +6310,305 @@ class TestChecksumTokens:
 
         assert (ok.status_code, bad.status_code) == (200, 401)
         assert len(lookups) == 1
+
+
+def _bearer_scope(token: str) -> dict:
+    return {
+        "type": "http",
+        "method": "GET",
+        "path": "/",
+        "headers": [(b"authorization", f"Bearer {token}".encode())],
+    }
+
+
+class TestAuthenticationMethodReference:
+    IANA_REGISTRY: ClassVar[set[str]] = {
+        "face", "fpt", "geo", "hwk", "iris", "kba", "mca", "mfa", "otp", "pin",
+        "pop", "pwd", "rba", "retina", "sc", "sms", "swk", "tel", "user", "vbm",
+        "wia",
+    }  # fmt: skip
+
+    def test_values_match_the_registry(self):
+        assert {member.value for member in AuthenticationMethodReference} == (
+            self.IANA_REGISTRY
+        )
+
+    def test_members_compare_equal_to_claim_strings(self):
+        claims = {"amr": ["pwd", "otp"]}
+        assert AuthenticationMethodReference.PASSWORD in claims["amr"]
+        assert AuthenticationMethodReference.ONE_TIME_PASSWORD == "otp"
+        assert AuthenticationMethodReference("hwk").name == "HARDWARE_KEY"
+
+
+class TestStepUpChallenge:
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"),
+        [
+            ({"max_age": 300}, 'max_age="300"'),
+            ({"acr_values": ("gold",)}, 'acr_values="gold"'),
+            ({"acr_values": ("gold", "urn:silver")}, 'acr_values="gold urn:silver"'),
+            (
+                {"acr_values": ("gold", "silver"), "max_age": 60},
+                'acr_values="gold silver", max_age="60"',
+            ),
+        ],
+        ids=["max-age", "one-acr", "two-acr", "both"],
+    )
+    def test_formatting(self, kwargs, expected):
+        headers = step_up_challenge("Bearer", "Why", **kwargs)
+        assert headers == {
+            "WWW-Authenticate": (
+                'Bearer error="insufficient_user_authentication", '
+                f'error_description="Why", {expected}'
+            )
+        }
+
+    def test_a_challenge_with_params_gets_a_comma(self):
+        headers = step_up_challenge('Basic realm="api"', "Why", acr_values=("gold",))
+        assert headers is not None
+        assert headers["WWW-Authenticate"].startswith(
+            'Basic realm="api", error="insufficient_user_authentication"'
+        )
+
+    def test_no_challenge_no_header(self):
+        assert step_up_challenge(None, "Why", acr_values=("gold",)) is None
+
+
+class TestSteppedUp:
+    """stepped_up(): "authenticate more strongly", RFC 9470 acr_values."""
+
+    BEARER: ClassVar[dict[str, str]] = {"Authorization": f"Bearer {VALID_TOKEN}"}
+    ACR_CHALLENGE: ClassVar[str] = (
+        'Bearer error="insufficient_user_authentication", '
+        'error_description="A different authentication level is required", '
+        'acr_values="gold silver"'
+    )
+
+    @staticmethod
+    def _bearer(acr: Any = "gold", proven_at: float | None = None) -> HTTPBearerAuth:
+        async def validate(token: str) -> dict:
+            return {
+                **await simple_validator(token),
+                "acr": acr,
+                "proven_at": time.time() if proven_at is None else proven_at,
+            }
+
+        return HTTPBearerAuth(validate)
+
+    @staticmethod
+    def _gold(source):
+        return source.stepped_up(["gold", "silver"], acr=lambda user: user["acr"])
+
+    @staticmethod
+    def _fresh(source):
+        return source.fresh(300, authenticated_at=lambda user: user["proven_at"])
+
+    def _get(self, dep):
+        return _client(dep).get("/me", headers=self.BEARER)
+
+    @pytest.mark.parametrize("acr", ["gold", "silver"])
+    def test_an_accepted_level_passes(self, acr):
+        assert self._get(self._gold(self._bearer(acr))).status_code == 200
+
+    @pytest.mark.parametrize("acr", ["bronze", None, 7, ["gold"]])
+    def test_any_other_level_gets_the_challenge(self, acr):
+        response = self._get(self._gold(self._bearer(acr)))
+        assert response.status_code == 401
+        assert response.json() == {"detail": "Insufficient user authentication"}
+        assert response.headers["www-authenticate"] == self.ACR_CHALLENGE
+
+    def test_an_async_reader(self):
+        async def acr(user):
+            return user["acr"]
+
+        dep = self._bearer("gold").stepped_up(["gold"], acr=acr)
+        assert self._get(dep).status_code == 200
+
+    def test_an_enum_level_matches_its_string(self):
+        class Level(StrEnum):
+            GOLD = "gold"
+
+        dep = self._bearer(Level.GOLD).stepped_up(["gold"], acr=lambda u: u["acr"])
+        assert self._get(dep).status_code == 200
+
+    @pytest.mark.anyio
+    async def test_the_error_carries_the_requirement(self):
+        dep = self._gold(self._bearer("bronze"))
+        with pytest.raises(InsufficientAuthenticationError) as exc_info:
+            await dep.dispatch(Request(_bearer_scope(VALID_TOKEN)), [])
+        assert not isinstance(exc_info.value, StaleCredentialError)
+        assert exc_info.value.acr_values == ("gold", "silver")
+        assert exc_info.value.max_age is None
+
+    def test_an_invalid_credential_is_refused_as_invalid(self):
+        dep = self._gold(self._bearer("bronze"))
+        response = _client(dep).get("/me", headers={"Authorization": "Bearer nope"})
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == "Bearer"
+
+    def test_a_cookie_source_answers_in_the_body(self):
+        async def validate(value: str) -> dict:
+            return {**await cookie_validator(value), "acr": "bronze"}
+
+        auth = APIKeyCookieAuth(
+            "session", validate, secret_key=COOKIE_SECRET, secure=False
+        )
+        dep = auth.stepped_up(["gold"], acr=lambda user: user["acr"])
+        response = _client(dep).get(
+            "/me", cookies={"session": auth._sign(VALID_COOKIE)}
+        )
+        assert response.status_code == 401
+        assert response.json() == {"detail": "Insufficient user authentication"}
+        assert "www-authenticate" not in response.headers
+
+    @pytest.mark.parametrize("order", ["fresh-first", "stepped-up-first"])
+    def test_composes_with_fresh_into_one_challenge(self, order):
+        source = self._bearer("bronze")
+        dep = (
+            self._gold(self._fresh(source))
+            if order == "fresh-first"
+            else self._fresh(self._gold(source))
+        )
+        response = self._get(dep)
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == (
+            f'{self.ACR_CHALLENGE}, max_age="300"'
+        )
+
+    def test_a_stale_credential_on_a_stepped_up_route(self):
+        dep = self._fresh(self._gold(self._bearer("gold", proven_at=0)))
+        response = self._get(dep)
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == (
+            'Bearer error="insufficient_user_authentication", '
+            'error_description="More recent authentication is required", '
+            'acr_values="gold silver", max_age="300"'
+        )
+
+    @pytest.mark.anyio
+    async def test_stale_error_carries_both_requirements(self):
+        dep = self._fresh(self._gold(self._bearer("gold", proven_at=0)))
+        with pytest.raises(StaleCredentialError) as exc_info:
+            await dep.dispatch(Request(_bearer_scope(VALID_TOKEN)), [])
+        assert isinstance(exc_info.value, InsufficientAuthenticationError)
+        assert (exc_info.value.max_age, exc_info.value.acr_values) == (
+            300,
+            ("gold", "silver"),
+        )
+
+    def test_one_handler_catches_both_refusals(self):
+        bronze = self._gold(self._bearer("bronze"))
+        stale = self._fresh(self._bearer("gold", proven_at=0))
+
+        def setup(app: FastAPI):
+            @app.exception_handler(InsufficientAuthenticationError)
+            async def handler(request: Request, exc: InsufficientAuthenticationError):
+                return JSONResponse(
+                    {"max_age": exc.max_age, "acr_values": exc.acr_values},
+                    status_code=401,
+                )
+
+            @app.get("/bronze")
+            async def a(user=Security(bronze)):
+                return user
+
+            @app.get("/stale")
+            async def b(user=Security(stale)):
+                return user
+
+        client = TestClient(_app(setup))
+        assert client.get("/bronze", headers=self.BEARER).json() == {
+            "max_age": None,
+            "acr_values": ["gold", "silver"],
+        }
+        assert client.get("/stale", headers=self.BEARER).json() == {
+            "max_age": 300,
+            "acr_values": None,
+        }
+
+    def test_the_original_source_stays_unguarded(self):
+        source = self._bearer("bronze")
+        self._gold(source)
+        assert self._get(source).status_code == 200
+
+    def test_require_keeps_the_levels(self):
+        async def validate(token: str, *, role: str) -> dict:
+            return {"role": role, "acr": "bronze"}
+
+        dep = self._gold(HTTPBearerAuth(validate)).require(role="admin")
+        assert self._get(dep).status_code == 401
+
+    def test_refuses_optional_both_ways(self):
+        source = self._bearer()
+        with pytest.raises(ValueError, match=r"optional\(\) and stepped_up\(\)"):
+            self._gold(source).optional()
+        with pytest.raises(ValueError, match=r"optional\(\) and stepped_up\(\)"):
+            self._gold(source.optional())
+
+    def test_levels_are_set_once(self):
+        with pytest.raises(ValueError, match="already has acr_values"):
+            self._gold(self._gold(self._bearer()))
+
+    @pytest.mark.parametrize(
+        ("acr_values", "error"),
+        [
+            ("gold", TypeError),
+            ([], ValueError),
+            ([""], ValueError),
+            (["gold silver"], ValueError),
+            (['gold"'], ValueError),
+            (["gold\\"], ValueError),
+            (["gold\t"], ValueError),
+            (["oré"], ValueError),
+            ([7], ValueError),
+        ],
+        ids=[
+            "bare-string",
+            "empty",
+            "empty-value",
+            "space",
+            "quote",
+            "backslash",
+            "tab",
+            "non-ascii",
+            "not-a-string",
+        ],
+    )
+    def test_acr_values_must_fit_the_challenge(self, acr_values, error):
+        with pytest.raises(error):
+            self._bearer().stepped_up(acr_values, acr=lambda user: user["acr"])
+
+    def test_multiauth_applies_the_levels_to_every_source(self):
+        async def cookie_validate(value: str) -> dict:
+            return {**await cookie_validator(value), "acr": "bronze"}
+
+        cookie = APIKeyCookieAuth(
+            "session", cookie_validate, secret_key=COOKIE_SECRET, secure=False
+        )
+        auth = self._gold(MultiAuth(self._bearer("gold"), cookie))
+        client = _client(auth)
+        assert client.get("/me", headers=self.BEARER).status_code == 200
+        response = client.get("/me", cookies={"session": cookie._sign(VALID_COOKIE)})
+        assert response.status_code == 401
+
+    def test_multiauth_refuses_optional_both_ways(self):
+        auth = MultiAuth(self._bearer())
+        with pytest.raises(ValueError, match=r"stepped_up\(\)"):
+            self._gold(auth).optional()
+        with pytest.raises(ValueError, match=r"stepped_up\(\)"):
+            self._gold(auth.optional())
+
+    def test_multiauth_names_a_source_already_stepped_up(self):
+        with pytest.raises(ValueError, match="HTTPBearerAuth already has acr_values"):
+            self._gold(MultiAuth(self._gold(self._bearer())))
+
+    def test_reads_acr_off_jwt_claims(self):
+        validator = JWTValidator(secret=JWT_SECRET)
+        dep = HTTPBearerAuth(validator).stepped_up(
+            ["urn:mfa"], acr=lambda claims: claims.get("acr")
+        )
+        client = _client(dep)
+        for acr, expected in (("urn:mfa", 200), ("urn:pwd", 401), (None, 401)):
+            token = _hs_token(_claims(acr=acr))
+            response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
+            assert response.status_code == expected, acr

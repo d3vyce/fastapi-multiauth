@@ -165,16 +165,26 @@ def credential_age(instant: Any) -> float | None:
     return age if math.isfinite(age) else None
 
 
-def step_up_challenge(challenge: str | None, max_age: float) -> dict[str, str] | None:
+def step_up_challenge(
+    challenge: str | None,
+    description: str,
+    *,
+    max_age: float | None = None,
+    acr_values: tuple[str, ...] | None = None,
+) -> dict[str, str] | None:
     """The RFC 9470 step-up ``WWW-Authenticate`` header, ``None`` without a challenge."""
     if not challenge:
         return None
+    params = [
+        'error="insufficient_user_authentication"',
+        f'error_description="{description}"',
+    ]
+    if acr_values:
+        params.append(f'acr_values="{" ".join(acr_values)}"')
+    if max_age is not None:
+        params.append(f'max_age="{max(1, int(max_age))}"')
     separator = ", " if " " in challenge else " "
-    return challenge_headers(
-        f'{challenge}{separator}error="insufficient_user_authentication", '
-        'error_description="More recent authentication is required", '
-        f'max_age="{max(1, int(max_age))}"'
-    )
+    return challenge_headers(f"{challenge}{separator}{', '.join(params)}")
 
 
 def authorization_credential(request: HTTPConnection, scheme: str) -> str | None:
