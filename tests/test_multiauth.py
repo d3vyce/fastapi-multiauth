@@ -54,7 +54,9 @@ from fastapi_multiauth import (
     SchemeRequirement,
     StaleCredentialError,
     auth_surface,
+    checksum_token_generator,
     hash_token,
+    verify_token_checksum,
     verify_token_hash,
 )
 from fastapi_multiauth._http import DEFAULT_TIMEOUT
@@ -6228,3 +6230,79 @@ class TestNonce:
     def test_redirect_omits_the_nonce_by_default(self):
         response = _authorization_redirect()
         assert "nonce" not in parse_qs(urlparse(response.headers["location"]).query)
+
+
+class TestChecksumTokens:
+    """checksum_token_generator() / verify_token_checksum(): a cheap pre-filter."""
+
+    ALPHANUMERIC: ClassVar[str] = string.ascii_letters + string.digits
+
+    @pytest.mark.parametrize("nbytes", [1, 16, 32, 64])
+    def test_round_trip_and_entropy(self, nbytes):
+        token = checksum_token_generator(nbytes)
+        assert verify_token_checksum(token)
+        body = token[:-6]
+        assert len(body) == math.ceil(nbytes * 8 / math.log2(62))
+        assert len(body) * math.log2(62) >= nbytes * 8
+
+    def test_default_is_256_bits(self):
+        assert len(checksum_token_generator()) == 43 + 6
+
+    def test_tokens_are_alphanumeric_and_distinct(self):
+        tokens = {checksum_token_generator() for _ in range(50)}
+        assert len(tokens) == 50
+        assert all(set(token) <= set(self.ALPHANUMERIC) for token in tokens)
+
+    def test_every_single_char_corruption_is_rejected(self):
+        token = checksum_token_generator()
+        for i, char in enumerate(token):
+            for replacement in "0aZ":
+                if replacement != char:
+                    corrupted = token[:i] + replacement + token[i + 1 :]
+                    assert not verify_token_checksum(corrupted), (i, replacement)
+
+    def test_truncation_and_extension_are_rejected(self):
+        token = checksum_token_generator()
+        assert not verify_token_checksum(token[:-1])
+        assert not verify_token_checksum(token + "0")
+
+    def test_prefix_is_stripped_before_the_check(self):
+        token = f"user_{checksum_token_generator()}"
+        assert verify_token_checksum(token, prefix="user_")
+        assert not verify_token_checksum(token)
+        assert not verify_token_checksum(token, prefix="org_")
+
+    @pytest.mark.parametrize(
+        "token",
+        ["", "abc", "abcdef", "a" * 49, "a b" * 20, "é" * 49, f"{'a' * 42}-123456"],
+        ids=["empty", "short", "checksum-only", "junk", "space", "non-ascii", "dash"],
+    )
+    def test_junk_is_rejected(self, token):
+        assert not verify_token_checksum(token)
+
+    def test_nbytes_must_be_positive(self):
+        with pytest.raises(ValueError, match="positive"):
+            checksum_token_generator(0)
+
+    def test_plugs_into_http_bearer_auth(self):
+        lookups: list[str] = []
+
+        async def validate(token: str) -> dict:
+            if not verify_token_checksum(token, prefix="user_"):
+                raise UnauthorizedError()
+            lookups.append(hash_token(token))
+            return {"user": "alice"}
+
+        bearer = HTTPBearerAuth(
+            validate, prefix="user_", token_generator=checksum_token_generator
+        )
+        token = bearer.generate_token()
+        assert token.startswith("user_")
+        client = _client(bearer)
+
+        ok = client.get("/me", headers={"Authorization": f"Bearer {token}"})
+        typo = token[:-1] + ("0" if token[-1] != "0" else "1")
+        bad = client.get("/me", headers={"Authorization": f"Bearer {typo}"})
+
+        assert (ok.status_code, bad.status_code) == (200, 401)
+        assert len(lookups) == 1

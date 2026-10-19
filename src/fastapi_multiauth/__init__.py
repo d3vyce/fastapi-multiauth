@@ -25,7 +25,12 @@ from .sources import (
     OpenIdConnectAuth,
 )
 from .surface import RouteAuth, SchemeRequirement, auth_surface
-from .utils import hash_token, verify_token_hash
+from .utils import (
+    checksum_token_generator,
+    hash_token,
+    verify_token_checksum,
+    verify_token_hash,
+)
 
 __version__ = "0.7.0"
 
@@ -47,7 +52,9 @@ __all__ = [
     "StaleCredentialError",
     "UnauthorizedError",
     "auth_surface",
+    "checksum_token_generator",
     "hash_token",
     "oauth",
+    "verify_token_checksum",
     "verify_token_hash",
 ]

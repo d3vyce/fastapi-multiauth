@@ -307,6 +307,34 @@ user_bearer = HTTPBearerAuth(
 
 A generator is free to ignore `nbytes` (`lambda _n: ...`), in which case `generate_token(64)` has no effect. The callable owns the entropy: use `secrets`, never `random`. Leading or trailing whitespace on the finished token is rejected, since `Authorization` header parsing strips it and the token would no longer match the hash you stored.
 
+#### Checksummed tokens
+
+`checksum_token_generator` builds GitHub-style tokens: an alphanumeric body carrying at least `nbytes` of entropy (43 characters at the default 32 bytes), followed by a six-character base62 CRC32 of that body. `verify_token_checksum` checks it, so the validator can refuse a typo or a junk string before it costs a hash and a database lookup:
+
+```python
+from fastapi_multiauth import checksum_token_generator, verify_token_checksum
+
+user_bearer = HTTPBearerAuth(
+    validate_user_token,
+    prefix="user_",
+    token_generator=checksum_token_generator,  # "user_9qxmU5y1...C0xqJ4RUWME"
+)
+
+
+async def validate_user_token(token: str) -> User:
+    if not verify_token_checksum(token, prefix="user_"):
+        raise UnauthorizedError()
+    row = await db.get_api_token(token_hash=hash_token(token))
+    if row is None:
+        raise UnauthorizedError()
+    return row.user
+```
+
+The checksum covers the body only, since the generator never sees the prefix: pass the source's `prefix` to `verify_token_checksum` so it is stripped first. A fixed format plus a checksum is also what lets a secret scanner tell your leaked tokens from random strings with few false positives.
+
+!!! warning "Not a security mechanism"
+    Anyone can compute a CRC32, so a valid checksum proves nothing about the token. It is a cheap pre-filter and a scanner signal; the hash lookup is still what authenticates.
+
 ### Cookie sessions
 
 `APIKeyCookieAuth` reads a cookie and hands its value to your validator. With a `secret_key`, the cookie is signed (HMAC-SHA256 via [itsdangerous](https://itsdangerous.palletsprojects.com/), salted with the cookie name) with an embedded timestamp checked against `ttl`: a stateless, tamper-proof session without any database entry:

@@ -82,7 +82,7 @@ async def me(user=Security(auth)):
     - **`APIKeyHeaderAuth`**: `X-API-Key`-style schemes, with **`APIKeyQueryAuth`** for legacy clients that can only pass a query parameter.
     - **`HTTPBasicAuth`**: `validator(username, password)` with `WWW-Authenticate` realm support.
     - **`OAuth2AuthorizationCodeBearerAuth`**, **`OAuth2PasswordBearerAuth`**, **`OpenIdConnectAuth`**: validate tokens an OAuth 2.0 / OIDC provider issued, and publish the scope catalogue so `/docs` offers a real Authorize dialog.
-- **Token hashing helpers**: `hash_token`/`verify_token_hash` package the "store the hash, never the token" pattern with constant-time comparison.
+- **Token hashing helpers**: `hash_token`/`verify_token_hash` package the "store the hash, never the token" pattern with constant-time comparison, and `checksum_token_generator`/`verify_token_checksum` add a GitHub-style CRC32 suffix that refuses typos before the lookup.
 - **JWT validation** (`fastapi-multiauth[jwt]` extra): `JWTValidator` for `HTTPBearerAuth`: HS256 or provider JWKS (Keycloak/Auth0/Entra/Authentik) with TTL caching and rotation-aware `kid` refresh, `aud`/`iss`/`exp` checks, configurable scope claims, and a `claims_to_identity` hook.
 - **Security scopes**: `Security(auth, scopes=[...])` forwards the declared scopes to validators that accept a `scopes` parameter.
 - **WebSocket routes**: every source and `MultiAuth` guard `@app.websocket` routes too, refusing the handshake with the same 401/403.
