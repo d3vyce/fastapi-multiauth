@@ -2,11 +2,12 @@
 
 import copy
 import inspect
+import logging
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Self
+from typing import Any, ClassVar, Self
 
 from fastapi import HTTPException
 from fastapi.requests import HTTPConnection
@@ -23,8 +24,13 @@ from fastapi_multiauth.utils import (
     challenge_headers,
     credential_age,
     ensure_async,
+    log_decision,
+    refusal,
+    refusal_reason,
     step_up_challenge,
 )
+
+logger = logging.getLogger(__name__)
 
 _RESERVED_KWARGS = {
     "scopes": "injected from the route by Security(..., scopes=[...])",
@@ -229,6 +235,14 @@ class AuthSource(ABC):
     """The scopes this source publishes to OpenAPI, ``None`` when it has none."""
     _freshness: _Freshness | None = None
     _assurance: _Assurance | None = None
+    _logger: ClassVar[logging.Logger] = logger
+    """Where this source logs its decisions: its module's logger."""
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Log a library source under its own module's logger."""
+        super().__init_subclass__(**kwargs)
+        if cls.__module__.startswith(f"{__package__}."):
+            cls._logger = logging.getLogger(cls.__module__)
 
     def __init__(self, scheme: Any = None) -> None:
         """Set up the FastAPI dependency signature.
@@ -318,15 +332,29 @@ class AuthSource(ABC):
         """Authenticate, attaching this source's challenge to any 401 raised.
 
         Freshness is checked after the credential: an invalid one is refused as
-        invalid, not as stale.
+        invalid, not as stale. Every outcome is logged.
         """
         try:
             identity = await self._call_scoped(credential, scopes, request=request)
+            await self._enforce_step_up(credential, identity)
         except HTTPException as exc:
             add_challenge(exc, self.www_authenticate())
+            self._log(logging.WARNING, refusal_reason(exc), exc.status_code)
             raise
-        await self._enforce_step_up(credential, identity)
+        if self._logger.isEnabledFor(logging.DEBUG):
+            self._log(logging.DEBUG, "authenticated")
         return identity
+
+    def _log(self, level: int, reason: str, status: int | None = None) -> None:
+        """Log one decision of this source."""
+        log_decision(
+            self._logger,
+            level,
+            reason,
+            source=type(self).__name__,
+            scheme=self.scheme.scheme_name if self.scheme is not None else None,
+            status=status,
+        )
 
     def optional(self) -> Self:
         """Return a copy that yields ``None`` instead of 401 when no credential is sent.
@@ -448,11 +476,14 @@ class AuthSource(ABC):
         if freshness is not None and not await self._is_fresh(
             freshness, credential, identity
         ):
-            raise self._step_up_error(StaleCredentialError)
+            raise refusal(self._step_up_error(StaleCredentialError), "stale")
         if assurance is not None:
             achieved = await assurance.read(identity)
             if achieved not in assurance.acr_values:
-                raise self._step_up_error(InsufficientAuthenticationError)
+                raise refusal(
+                    self._step_up_error(InsufficientAuthenticationError),
+                    "insufficient_acr",
+                )
 
     async def _is_fresh(
         self, freshness: _Freshness, credential: str, identity: Any
@@ -509,7 +540,9 @@ class AuthSource(ABC):
         credential = await self.extract(request)
         if credential is None:
             if self._optional:
+                self._log(logging.DEBUG, "anonymous")
                 return None
+            self._log(logging.INFO, "missing_credential", 401)
             raise UnauthorizedError(headers=challenge_headers(self.www_authenticate()))
         return await self._authenticate_with_challenge(
             credential, scopes, request=request

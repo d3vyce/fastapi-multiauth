@@ -631,6 +631,59 @@ async def create(user=Security(bearer, scopes=["challenges:write"])): ...
 !!! note "Scopes and OpenAPI"
     Route scopes do appear in the OpenAPI security requirement for every source, including `http` and `apiKey` ones: FastAPI emits OpenAPI 3.1, where a non-`oauth2` requirement array may carry role names. What those sources cannot publish is the *catalogue* of valid scopes, so `/docs` has no checkboxes to offer for them; only the [OAuth 2.0 and OpenID Connect sources](#oauth-20-and-openid-connect) declare one. Enforcement is identical either way: scopes are checked at runtime on every call path (including `MultiAuth`), and a route declaring scopes with a validator that cannot check them fails closed.
 
+## Logging
+
+Every authentication decision is logged through the standard `logging` module, so an operator can see brute force or a misconfigured provider without wrapping each validator. The package logger carries a `NullHandler`: nothing is printed until your app configures logging.
+
+```python
+import logging
+
+logging.getLogger("fastapi_multiauth").setLevel(logging.INFO)
+```
+
+Each module logs under its own name:
+
+| Logger | Decisions of |
+| --- | --- |
+| `fastapi_multiauth.sources.bearer` | `HTTPBearerAuth` |
+| `fastapi_multiauth.sources.oauth2` | `OAuth2AuthorizationCodeBearerAuth`, `OAuth2PasswordBearerAuth`, `OpenIdConnectAuth` |
+| `fastapi_multiauth.sources.cookie` | `APIKeyCookieAuth` |
+| `fastapi_multiauth.sources.header` | `APIKeyHeaderAuth` |
+| `fastapi_multiauth.sources.query` | `APIKeyQueryAuth` |
+| `fastapi_multiauth.sources.basic` | `HTTPBasicAuth` |
+| `fastapi_multiauth.sources.multi` | `MultiAuth`, when no source found a credential |
+| `fastapi_multiauth.abc` | your own `AuthSource` subclasses |
+| `fastapi_multiauth.jwt` | JWKS refresh failures and skipped JWKS entries |
+
+A `MultiAuth` adds no record of its own once a source has matched: the decision is that source's, logged once under its logger.
+
+A refusal is a `WARNING`, a success a `DEBUG`. A missing credential is an `INFO`: every first visit and every anonymous probe produces one, and it would otherwise drown the signal. Each record carries the decision in `extra`, ready for a structured formatter:
+
+| Attribute | Value |
+| --- | --- |
+| `auth_source` | class name of the deciding source, e.g. `"APIKeyCookieAuth"` |
+| `auth_scheme` | its OpenAPI security scheme name, `None` for a custom source or `MultiAuth` |
+| `auth_reason` | the reason code below |
+| `auth_status` | the HTTP status of the refusal, `None` on success |
+
+| Reason | Level | Meaning |
+| --- | --- | --- |
+| `authenticated` | `DEBUG` | the credential was accepted |
+| `anonymous` | `DEBUG` | an `optional()` route served a caller with no credential |
+| `missing_credential` | `INFO` | no credential on a route requiring one |
+| `invalid_signature` | `WARNING` | a signed cookie or a JWT failed its signature check |
+| `expired` | `WARNING` | a signed cookie past its `ttl`, or a JWT past its `exp` |
+| `malformed` | `WARNING` | a Basic blob that does not decode, or in JWKS mode a JWT whose header does not parse |
+| `stale` | `WARNING` | outside the `fresh()` window |
+| `insufficient_acr` | `WARNING` | outside the `stepped_up()` levels |
+| `not_yet_valid`, `invalid_audience`, `invalid_issuer`, `missing_claim`, `invalid_algorithm`, `invalid_token` | `WARNING` | a JWT refused by `JWTValidator`, by PyJWT's reason (`invalid_token` for anything else, garbage included) |
+| `unknown_key` | `WARNING` | a JWT signed with a key absent from the JWKS, even after a refresh |
+| `insufficient_scope` | `WARNING` | a valid JWT missing a route scope (403) |
+| `jwks_unavailable` | `WARNING` | the JWKS cannot be fetched and nothing is cached (503) |
+| `rejected`, `forbidden`, `error` | `WARNING` | your validator raised a 401, a 403, or another `HTTPException` |
+
+Records never carry the credential, a hash of it, the identity, or the `detail` of the exception: an attacker controls the first and your app authors the last, so neither belongs in a log. Correlate with your request logs (client address, request id) when you need to know *who*.
+
 ## JWT validation
 
 `JWTValidator` plugs into `HTTPBearerAuth` to validate JWTs issued by an identity provider. It requires the `jwt` extra:

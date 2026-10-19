@@ -12,9 +12,9 @@ from fastapi import HTTPException, status
 from ._http import DEFAULT_TIMEOUT, _get_json, _require_https
 from ._imports import require_extra
 from .exceptions import ForbiddenError, UnauthorizedError
-from .utils import ensure_async
+from .utils import ensure_async, refusal
 
-logger = logging.getLogger("fastapi_multiauth.jwt")
+logger = logging.getLogger(__name__)
 
 _MIN_SECRET_BYTES = 32
 
@@ -294,6 +294,16 @@ class JWTValidator:
             "verify_iss": issuer is not None,
         }
         self._scopes_claim = scopes_claim
+        errors = self._jwt.exceptions
+        self._decode_reasons = (
+            (errors.ExpiredSignatureError, "expired"),
+            (errors.ImmatureSignatureError, "not_yet_valid"),
+            (errors.InvalidAudienceError, "invalid_audience"),
+            (errors.InvalidIssuerError, "invalid_issuer"),
+            (errors.MissingRequiredClaimError, "missing_claim"),
+            (errors.InvalidSignatureError, "invalid_signature"),
+            (errors.InvalidAlgorithmError, "invalid_algorithm"),
+        )
         self._claims_to_identity = (
             ensure_async(claims_to_identity) if claims_to_identity else None
         )
@@ -333,15 +343,24 @@ class JWTValidator:
                 leeway=self._leeway,
                 options=self._decode_options,
             )
-        except (self._jwt.exceptions.PyJWTError, TypeError, ValueError):
-            raise UnauthorizedError() from None
+        except (self._jwt.exceptions.PyJWTError, TypeError, ValueError) as exc:
+            raise refusal(UnauthorizedError(), self._decode_reason(exc)) from None
         if scopes:
             missing = set(scopes) - self._granted_scopes(claims)
             if missing:
-                raise ForbiddenError("Insufficient scope")
+                raise refusal(
+                    ForbiddenError("Insufficient scope"), "insufficient_scope"
+                )
         if self._claims_to_identity is not None:
             return await self._claims_to_identity(claims)
         return claims
+
+    def _decode_reason(self, exc: Exception) -> str:
+        """The reason code of a failed decode, by PyJWT exception class."""
+        for error_cls, reason in self._decode_reasons:
+            if isinstance(exc, error_cls):
+                return reason
+        return "invalid_token"
 
     def _granted_scopes(self, claims: dict[str, Any]) -> set[str]:
         """Read the configured scopes claim: space-separated string or list."""
@@ -357,10 +376,15 @@ class JWTValidator:
         """Resolve the verification key for *token* from the cached JWKS."""
         try:
             return await key_set.key_for_token(token)
-        except (_MalformedToken, _UnknownKey):
-            raise UnauthorizedError() from None
+        except _MalformedToken:
+            raise refusal(UnauthorizedError(), "malformed") from None
+        except _UnknownKey:
+            raise refusal(UnauthorizedError(), "unknown_key") from None
         except _JWKSUnavailable as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Authentication temporarily unavailable",
+            raise refusal(
+                HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Authentication temporarily unavailable",
+                ),
+                "jwks_unavailable",
             ) from exc

@@ -2,6 +2,7 @@
 
 import copy
 import inspect
+import logging
 from collections.abc import Callable, Iterable, Sequence
 from typing import Annotated, Any, Self, cast
 
@@ -19,7 +20,9 @@ from ..abc import (
     _step_up_optional_guard,
     _unenforceable_scopes_error,
 )
-from ..utils import challenge_headers
+from ..utils import challenge_headers, log_decision
+
+logger = logging.getLogger(__name__)
 
 
 class MultiAuth:
@@ -187,7 +190,18 @@ class MultiAuth:
                     credential, scopes, request=request
                 )
         if self._optional:
+            log_decision(
+                logger, logging.DEBUG, "anonymous", source="MultiAuth", scheme=None
+            )
             return None
+        log_decision(
+            logger,
+            logging.INFO,
+            "missing_credential",
+            source="MultiAuth",
+            scheme=None,
+            status=401,
+        )
         raise UnauthorizedError(headers=challenge_headers(self.www_authenticate()))
 
     async def __call__(self, **kwargs: Any) -> Any:
