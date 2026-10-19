@@ -6,7 +6,7 @@ What this library protects, what it does not, and the properties you can rely on
 
 In scope, the library defends against:
 
-- **Credential forgery and tampering**: signed cookies (HMAC-SHA256 via itsdangerous), JWT signature/claims verification, CSRF-verified OAuth `state`, PKCE.
+- **Credential forgery and tampering**: signed cookies (HMAC-SHA256 via itsdangerous), JWT signature/claims verification, CSRF-verified OAuth `state`, PKCE, OIDC ID token validation with `nonce` and `at_hash`.
 - **Cross-source confusion**: a cookie signed for one `APIKeyCookieAuth` is never accepted by another (per-name salt); a token skipped by one source in `MultiAuth` is evaluated by the others through the exact same code path it would take when used directly, so the two modes cannot diverge.
 - **Downgrade and key-confusion**: OAuth/OIDC/JWKS endpoints must be HTTPS (loopback excepted for local development); `HS*` algorithms are rejected when validating against a public JWKS.
 - **Open redirects**: the destination embedded in OAuth `state` is checked against an allowlist by default (relative paths only unless configured).
@@ -54,6 +54,7 @@ Signed is not encrypted. The signed cookie payload and JWT claims are **readable
 - The discovery document's `issuer` is always checked, and a document with no `issuer` is refused. On the standard `/.well-known/openid-configuration` path the expected issuer is derived from the URL exactly (query strings and fragments ignored, so provider-specific parameters such as Azure AD B2C's `?p=` do not weaken the check). A provider serving discovery from a non-standard path leaves nothing exact to derive, so the issuer is instead held to the origin the document was fetched from: still enough to refuse a document claiming to speak for another host.
 - `state` carries a CSRF token (constant-time verified, single-use, pop it from the session before decoding) and the post-login destination (allowlist-checked by default). A failed check raises `OAuthStateError` rather than returning the fallback, so the documented callback never exchanges a code it did not ask for: without it, an attacker could log the victim into the attacker's account (login CSRF) on any provider that does not enforce PKCE.
 - PKCE (S256) is supported and recommended for every client, including confidential ones (OAuth 2.1 / RFC 9700).
+- **ID tokens are unverified until validated.** `oauth_exchange_code` returns the raw `id_token`; `oauth_validate_id_token` checks it per OIDC Core §3.1.3.7 (JWKS signature with the `alg` bound to the key and `HS*` refused, exact `iss`, `aud` and `azp`, `exp`/`iat`, `sub`). The `nonce` binds the token to this authorization request, so one captured from another login cannot be replayed; `at_hash` binds it to the access token issued alongside. Both are compared in constant time, and an empty expected `nonce` never matches.
 - All network calls run under explicit timeouts (10 s default).
 
 ## HTTP semantics

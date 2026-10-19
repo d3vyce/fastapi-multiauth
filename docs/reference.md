@@ -33,6 +33,7 @@ from fastapi_multiauth.oauth import (
     OAuthDiscoveryError,
     OAuthError,
     OAuthExchangeError,
+    OAuthIDTokenError,
     OAuthStateError,
     OAuthUserinfoError,
     OIDCEndpoints,
@@ -41,9 +42,11 @@ from fastapi_multiauth.oauth import (
     oauth_encode_state,
     oauth_exchange_code,
     oauth_fetch_userinfo,
+    oauth_generate_nonce,
     oauth_generate_pkce_pair,
     oauth_generate_state_token,
     oauth_resolve_provider_urls,
+    oauth_validate_id_token,
 )
 ```
 
@@ -109,6 +112,8 @@ The OAuth login-flow helpers live in the `fastapi_multiauth.oauth` namespace and
 
 ## ::: fastapi_multiauth.oauth.OAuthUserinfoError
 
+## ::: fastapi_multiauth.oauth.OAuthIDTokenError
+
 ## ::: fastapi_multiauth.oauth.OIDCEndpoints
 
 ## ::: fastapi_multiauth.oauth.oauth_resolve_provider_urls
@@ -117,7 +122,11 @@ The OAuth login-flow helpers live in the `fastapi_multiauth.oauth` namespace and
 
 ## ::: fastapi_multiauth.oauth.oauth_fetch_userinfo
 
+## ::: fastapi_multiauth.oauth.oauth_validate_id_token
+
 ## ::: fastapi_multiauth.oauth.oauth_generate_state_token
+
+## ::: fastapi_multiauth.oauth.oauth_generate_nonce
 
 ## ::: fastapi_multiauth.oauth.oauth_generate_pkce_pair
 

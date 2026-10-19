@@ -19,14 +19,31 @@ __all__ = [
     "oauth_build_authorization_redirect",
     "oauth_decode_state",
     "oauth_encode_state",
+    "oauth_generate_nonce",
     "oauth_generate_pkce_pair",
     "oauth_generate_state_token",
 ]
 
 
+def _b64url(data: bytes) -> str:
+    """Unpadded base64url, as PKCE and OIDC hashes are carried."""
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
 def oauth_generate_state_token() -> str:
     """Generate a cryptographically random CSRF token for the OAuth ``state`` parameter."""
     return secrets.token_urlsafe(32)
+
+
+def oauth_generate_nonce() -> str:
+    """Generate a cryptographically random OpenID Connect ``nonce``.
+
+    Store it server-side next to the state token, send it with
+    :func:`oauth_build_authorization_redirect`, and hand it back to
+    :func:`~fastapi_multiauth.oauth.oauth_validate_id_token` on the callback,
+    which refuses an ID token minted for another authorization request.
+    """
+    return oauth_generate_state_token()
 
 
 def oauth_generate_pkce_pair() -> tuple[str, str]:
@@ -41,8 +58,7 @@ def oauth_generate_pkce_pair() -> tuple[str, str]:
     """
     code_verifier = secrets.token_urlsafe(64)
     digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
-    code_challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-    return code_verifier, code_challenge
+    return code_verifier, _b64url(digest)
 
 
 def oauth_build_authorization_redirect(
@@ -54,6 +70,7 @@ def oauth_build_authorization_redirect(
     destination: str,
     state_token: str,
     code_challenge: str | None = None,
+    nonce: str | None = None,
 ) -> RedirectResponse:
     """Return an OAuth 2.0 authorization ``RedirectResponse`` (303 See Other).
 
@@ -67,6 +84,9 @@ def oauth_build_authorization_redirect(
             it with :func:`oauth_decode_state` on the callback.
         code_challenge: PKCE challenge from :func:`oauth_generate_pkce_pair`;
             when set, ``code_challenge_method=S256`` is sent along.
+        nonce: OpenID Connect nonce from :func:`oauth_generate_nonce`; the
+            provider copies it into the ID token, checked by
+            :func:`~fastapi_multiauth.oauth.oauth_validate_id_token`.
 
     Returns:
         A :class:`~fastapi.responses.RedirectResponse` to the provider's
@@ -86,6 +106,8 @@ def oauth_build_authorization_redirect(
     if code_challenge is not None:
         params["code_challenge"] = code_challenge
         params["code_challenge_method"] = "S256"
+    if nonce is not None:
+        params["nonce"] = nonce
     sep = "&" if urlsplit(authorization_url).query else "?"
     return RedirectResponse(
         f"{authorization_url}{sep}{urlencode(params)}",

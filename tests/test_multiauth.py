@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import secrets
+import string
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -16,7 +17,7 @@ import httpx
 import jwt as pyjwt
 import pytest
 import respx
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 from fastapi import (
     APIRouter,
     Depends,
@@ -34,7 +35,7 @@ from fastapi.security import HTTPBearer
 from fastapi.security.base import SecurityBase
 from fastapi.testclient import TestClient
 from itsdangerous import TimestampSigner
-from jwt.algorithms import RSAAlgorithm
+from jwt.algorithms import OKPAlgorithm, RSAAlgorithm
 from starlette.testclient import WebSocketDenialResponse
 
 from fastapi_multiauth import (
@@ -56,12 +57,14 @@ from fastapi_multiauth import (
     hash_token,
     verify_token_hash,
 )
+from fastapi_multiauth._http import DEFAULT_TIMEOUT
 from fastapi_multiauth.abc import _DocOnlyScheme, _override_accepts_request
 from fastapi_multiauth.exceptions import UnauthorizedError
 from fastapi_multiauth.oauth import (
     OAuthDiscoveryError,
     OAuthError,
     OAuthExchangeError,
+    OAuthIDTokenError,
     OAuthStateError,
     OAuthUserinfoError,
     OIDCEndpoints,
@@ -70,10 +73,13 @@ from fastapi_multiauth.oauth import (
     oauth_encode_state,
     oauth_exchange_code,
     oauth_fetch_userinfo,
+    oauth_generate_nonce,
     oauth_generate_pkce_pair,
     oauth_generate_state_token,
     oauth_resolve_provider_urls,
+    oauth_validate_id_token,
 )
+from fastapi_multiauth.oauth.id_token import _key_set as _id_key_set
 
 
 def _app(*routes_setup_fns):
@@ -4471,6 +4477,25 @@ class TestJWKSRefreshCoalescing:
         assert first["sub"] == second["sub"] == "user-1"
         assert fetches == 1
 
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_a_waiter_without_cooldown_reuses_the_fresh_keys(self):
+        """With no cooldown, the waiter still skips the fetch it waited behind."""
+        import asyncio
+
+        async def slow_jwks(request):
+            await asyncio.sleep(0.05)
+            return httpx.Response(200, json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
+
+        route = respx.get(self.JWKS_URL).mock(side_effect=slow_jwks)
+        validator = _jwks_validator(self.JWKS_URL, jwks_refresh_cooldown=0)
+        token = pyjwt.encode(
+            _claims(), _RSA_KEY_1, algorithm="RS256", headers={"kid": "key1"}
+        )
+
+        await asyncio.gather(validator(token), validator(token))
+        assert route.call_count == 1
+
 
 def test_multiauth_scopes_fail_closed_on_every_credential():
     """A source that cannot check scopes must not depend on which credential arrives."""
@@ -5919,3 +5944,287 @@ class TestAuthSurface:
     def test_routes_without_a_dependency_tree_are_skipped(self):
         paths = [route.path for route in auth_surface(_app())]
         assert paths == [], f"only endpoint routes belong in the surface: {paths}"
+
+
+ISSUER = "https://idp.example.com"
+CLIENT_ID = "my-client"
+ID_JWKS_URL = "https://idp.example.com/jwks"
+
+
+def _at_hash(access_token: str, digest=hashlib.sha256) -> str:
+    half = digest(access_token.encode()).digest()
+    half = half[: len(half) // 2]
+    return base64.urlsafe_b64encode(half).rstrip(b"=").decode()
+
+
+def _id_claims(**overrides) -> dict:
+    return _claims(
+        **{"iss": ISSUER, "aud": CLIENT_ID, "iat": int(time.time()), **overrides}
+    )
+
+
+def _id_token(claims=None, *, key=_RSA_KEY_1, kid="key1", algorithm="RS256"):
+    return pyjwt.encode(
+        claims or _id_claims(), key, algorithm=algorithm, headers={"kid": kid}
+    )
+
+
+class TestValidateIDToken:
+    """oauth_validate_id_token(): OIDC Core §3.1.3.7 on the callback."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_key_cache(self):
+        _id_key_set.cache_clear()
+        yield
+        _id_key_set.cache_clear()
+
+    @staticmethod
+    def _jwks(*entries):
+        return respx.get(ID_JWKS_URL).respond(
+            json={"keys": list(entries) or [_jwk(_RSA_KEY_1, "key1")]}
+        )
+
+    @staticmethod
+    async def _validate(token, **kwargs):
+        kwargs.setdefault("issuer", ISSUER)
+        kwargs.setdefault("jwks_uri", ID_JWKS_URL)
+        kwargs.setdefault("client_id", CLIENT_ID)
+        return await oauth_validate_id_token(token, **kwargs)
+
+    async def _refused(self, token, match, **kwargs):
+        with pytest.raises(OAuthIDTokenError, match=match):
+            await self._validate(token, **kwargs)
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_valid_token_returns_its_claims(self):
+        self._jwks()
+        claims = await self._validate(_id_token())
+        assert claims["sub"] == "user-1"
+        assert claims["aud"] == CLIENT_ID
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_keys_are_cached_across_callbacks(self):
+        route = self._jwks()
+        for _ in range(3):
+            await self._validate(_id_token())
+        assert route.call_count == 1
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_bad_signature(self):
+        self._jwks()
+        await self._refused(_id_token(key=_RSA_KEY_2), "failed validation")
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_unknown_kid_is_refused_after_one_refresh(self):
+        route = self._jwks()
+        await self._refused(_id_token(kid="rotated"), "unknown key")
+        assert route.call_count == 1
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_unknown_kid_found_after_rotation(self):
+        route = respx.get(ID_JWKS_URL)
+        route.side_effect = [
+            httpx.Response(200, json={"keys": [_jwk(_RSA_KEY_1, "key1")]}),
+            httpx.Response(200, json={"keys": [_jwk(_RSA_KEY_2, "key2")]}),
+        ]
+        await self._validate(_id_token())
+        _id_key_set(
+            ID_JWKS_URL, ("RS256", "ES256"), DEFAULT_TIMEOUT
+        )._refresh_cooldown = 0
+        claims = await self._validate(_id_token(key=_RSA_KEY_2, kid="key2"))
+        assert claims["sub"] == "user-1"
+
+    @pytest.mark.anyio
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("claims", "match"),
+        [
+            (_id_claims(aud="other-client"), "failed validation"),
+            (_id_claims(aud=["other-client", "third"]), "failed validation"),
+            (_id_claims(iss="https://evil.example.com"), "failed validation"),
+            (_id_claims(exp=int(time.time()) - 60), "failed validation"),
+            (_id_claims(iat=int(time.time()) + 3600), "failed validation"),
+            (_id_claims(sub=None), "failed validation"),
+            (_id_claims(iat=None), "failed validation"),
+            (_id_claims(azp="other-client"), "another client"),
+        ],
+        ids=[
+            "wrong-aud",
+            "wrong-aud-list",
+            "wrong-iss",
+            "expired",
+            "issued-in-future",
+            "no-sub",
+            "no-iat",
+            "wrong-azp",
+        ],
+    )
+    async def test_claims_checks(self, claims, match):
+        self._jwks()
+        await self._refused(_id_token(claims), match)
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_client_among_several_audiences_with_matching_azp(self):
+        self._jwks()
+        token = _id_token(_id_claims(aud=[CLIENT_ID, "api"], azp=CLIENT_ID))
+        assert (await self._validate(token))["azp"] == CLIENT_ID
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_leeway_tolerates_skew(self):
+        self._jwks()
+        token = _id_token(_id_claims(exp=int(time.time()) - 5))
+        assert (await self._validate(token, leeway=30))["sub"] == "user-1"
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_matching_nonce(self):
+        self._jwks()
+        token = _id_token(_id_claims(nonce="n-123"))
+        assert (await self._validate(token, nonce="n-123"))["nonce"] == "n-123"
+
+    @pytest.mark.anyio
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("claims", "expected"),
+        [
+            (_id_claims(nonce="other"), "n-123"),
+            (_id_claims(), "n-123"),
+            (_id_claims(nonce=123), "n-123"),
+            (_id_claims(nonce=""), ""),
+        ],
+        ids=["mismatch", "missing", "not-a-string", "nothing-stored"],
+    )
+    async def test_nonce_refused(self, claims, expected):
+        self._jwks()
+        await self._refused(_id_token(claims), "nonce", nonce=expected)
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_nonce_is_not_checked_unless_asked(self):
+        self._jwks()
+        token = _id_token(_id_claims(nonce="anything"))
+        assert (await self._validate(token))["sub"] == "user-1"
+
+    @pytest.mark.anyio
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("alg", "digest"),
+        [
+            ("RS256", hashlib.sha256),
+            ("RS384", hashlib.sha384),
+            ("RS512", hashlib.sha512),
+        ],
+    )
+    async def test_at_hash_uses_the_header_alg(self, alg, digest):
+        self._jwks(_jwk(_RSA_KEY_1, "key1", alg=alg))
+        token = _id_token(_id_claims(at_hash=_at_hash("at-1", digest)), algorithm=alg)
+        claims = await self._validate(token, access_token="at-1", algorithms=[alg])
+        assert claims["sub"] == "user-1"
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_at_hash_for_an_alg_without_a_hash(self):
+        """EdDSA defines no hash for at_hash: refused, not guessed."""
+        key = ed25519.Ed25519PrivateKey.generate()
+        entry = json.loads(OKPAlgorithm.to_jwk(key.public_key()))
+        self._jwks({**entry, "kid": "ed1", "alg": "EdDSA", "use": "sig"})
+        token = _id_token(
+            _id_claims(at_hash=_at_hash("at-1")), key=key, kid="ed1", algorithm="EdDSA"
+        )
+        assert (await self._validate(token, algorithms=["EdDSA"]))["sub"] == "user-1"
+        await self._refused(
+            token,
+            "cannot be checked for alg 'EdDSA'",
+            access_token="at-1",
+            algorithms=["EdDSA"],
+        )
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_at_hash_mismatch(self):
+        self._jwks()
+        token = _id_token(_id_claims(at_hash=_at_hash("at-1")))
+        await self._refused(token, "at_hash does not match", access_token="at-2")
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_at_hash_with_the_wrong_hash_function(self):
+        """A SHA-512 at_hash under an RS256 header does not pass."""
+        self._jwks()
+        token = _id_token(_id_claims(at_hash=_at_hash("at-1", hashlib.sha512)))
+        await self._refused(token, "at_hash does not match", access_token="at-1")
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_at_hash_missing_when_access_token_given(self):
+        self._jwks()
+        await self._refused(_id_token(), "no at_hash", access_token="at-1")
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_non_ascii_access_token_does_not_match(self):
+        self._jwks()
+        token = _id_token(_id_claims(at_hash=_at_hash("at-1")))
+        await self._refused(token, "at_hash does not match", access_token="at-é")
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_malformed_token(self):
+        await self._refused("not-a-jwt", "malformed")
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_hs256_token_against_the_jwks(self):
+        self._jwks()
+        token = pyjwt.encode(
+            _id_claims(), JWT_SECRET, algorithm="HS256", headers={"kid": "key1"}
+        )
+        await self._refused(token, "failed validation")
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_unreachable_jwks(self):
+        respx.get(ID_JWKS_URL).respond(500)
+        await self._refused(_id_token(), "cannot be fetched")
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            ({"jwks_uri": "http://idp.example.com/jwks"}, "https"),
+            ({"algorithms": ["HS256"]}, "symmetric"),
+            ({"algorithms": []}, "at least one"),
+            ({"issuer": ""}, "issuer"),
+            ({"client_id": ""}, "client_id"),
+        ],
+    )
+    async def test_misconfiguration_raises_value_error(self, kwargs, match):
+        with pytest.raises(ValueError, match=match):
+            await self._validate(_id_token(), **kwargs)
+
+    def test_error_is_an_oauth_error(self):
+        assert issubclass(OAuthIDTokenError, OAuthError)
+
+
+class TestNonce:
+    def test_generate_nonce_is_random_and_url_safe(self):
+        first, second = oauth_generate_nonce(), oauth_generate_nonce()
+        assert first != second
+        assert len(first) >= 43
+        assert set(first) <= set(string.ascii_letters + string.digits + "-_")
+
+    def test_redirect_carries_the_nonce(self):
+        response = _authorization_redirect(nonce="n-123")
+        params = parse_qs(urlparse(response.headers["location"]).query)
+        assert params["nonce"] == ["n-123"]
+
+    def test_redirect_omits_the_nonce_by_default(self):
+        response = _authorization_redirect()
+        assert "nonce" not in parse_qs(urlparse(response.headers["location"]).query)

@@ -103,3 +103,12 @@ class OAuthExchangeError(OAuthError):
 
 class OAuthUserinfoError(OAuthError):
     """Raised when the userinfo endpoint cannot be reached or returns garbage."""
+
+
+class OAuthIDTokenError(OAuthError):
+    """Raised when an OpenID Connect ID token fails validation.
+
+    Its signature, issuer, audience, lifetime, ``nonce`` or ``at_hash`` did not
+    check out, or the provider's signing keys could not be fetched: do not
+    trust any of its claims.
+    """
