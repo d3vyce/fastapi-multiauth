@@ -336,6 +336,12 @@ async def logout(response: Response):
     return {"ok": True}
 ```
 
+!!! warning "Cookies are ambient: defend unsafe methods against CSRF"
+    The browser attaches the cookie to every request it sends to your site, whoever triggered it. The default `samesite="lax"` blocks most cross-site `POST`s but not everything: a state-changing `GET` still runs on a top-level navigation, a sibling subdomain counts as *same-site* so lax lets its requests through, and `samesite="none"` turns the protection off. Guard every cookie-authenticated `POST`/`PUT`/`PATCH`/`DELETE` route with a CSRF token, an `Origin` or `Sec-Fetch-Site` check, or use `samesite="strict"`. Routes reached with a bearer token are not exposed: the browser never attaches it on its own.
+
+!!! tip "Prefer a `__Host-` cookie name"
+    When a request carries two cookies with the same name, the last one wins. Anything able to set a cookie on a sibling subdomain can therefore shadow your session cookie: the signature stops it from forging a session, but it can log the user out on every request, or slip in the attacker's *own* valid cookie so the victim unknowingly acts in the attacker's account. A `__Host-` prefixed name (`APIKeyCookieAuth("__Host-session", ...)`) cannot be set from a subdomain. The defaults already meet its rules (`secure=True`, `path="/"`, no `domain`), and a `__Host-` or `__Secure-` name with settings that would make the browser drop the cookie raises `ValueError` at startup.
+
 #### Key rotation
 
 Pass a sequence of keys to rotate a secret without logging everyone out. The **first** key signs new cookies; **every** key verifies:
@@ -568,6 +574,8 @@ async def me(claims=Security(bearer)):
 Signing keys are fetched over HTTPS with a timeout, cached for an hour, and refreshed once when a token carries an unknown `kid`: provider key rotation needs no restart. A provider that breaks does not take your API down with it: whether the endpoint is unreachable, errors, or answers with a document carrying no usable key, the cached keys keep serving and the refresh is retried under a cooldown. Only a cold start with nothing cached fails, and it fails as a 503 rather than a 401, so clients retry instead of discarding valid tokens. Symmetric mode is `JWTValidator(secret=...)` (HS256, secret ≥ 32 bytes); `HS*` algorithms are rejected in JWKS mode to close the classic key-confusion attack.
 
 Every token is checked for signature, `exp`/`nbf`/`iat` (with configurable `leeway`), `aud`/`iss` when configured, and `exp` is **required** by default; pass `required_claims=()` if your provider really issues non-expiring tokens.
+
+In JWKS mode `audience` is **required**: a Keycloak realm, Auth0 tenant or Entra ID signs the tokens of every client (and, on Entra, every tenant) with the same keys, so without an `aud` check a token minted for another application would pass. Omitting it raises `ValueError` at startup. If you really mean to accept any audience, say so with `audience=JWTValidator.ANY_AUDIENCE`. Set `issuer` too whenever the key set is shared across issuers (Entra multi-tenant).
 
 Scopes integrate with `Security(..., scopes=[...])`: the claim is configurable (`scope` space-separated string by default; `scp` or `roles` lists via `scopes_claim`), and a valid token missing a required scope gets a **403** ([RFC 6750](https://datatracker.ietf.org/doc/html/rfc6750) `insufficient_scope`), not a 401.
 

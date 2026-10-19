@@ -37,6 +37,23 @@ def _normalize_secret_keys(secret_key: str | Sequence[str] | None) -> list[str]:
     return keys
 
 
+def _check_name_prefix(
+    name: str, *, secure: bool, domain: str | None, path: str
+) -> None:
+    """Refuse settings that make browsers drop a ``__Secure-``/``__Host-`` cookie."""
+    lowered = name.lower()
+    if lowered.startswith(("__secure-", "__host-")) and not secure:
+        raise ValueError(
+            f"cookie {name!r} requires secure=True: browsers drop a prefixed "
+            "cookie without the Secure attribute"
+        )
+    if lowered.startswith("__host-") and (domain is not None or path != "/"):
+        raise ValueError(
+            f'cookie {name!r} requires path="/" and no domain: browsers drop a '
+            "__Host- cookie otherwise"
+        )
+
+
 def _precomputed_signer(keys: list[str], salt: str) -> TimestampSigner:
     """A ``TimestampSigner`` deriving its keys once here instead of per ``unsign``."""
     probe = TimestampSigner(keys, salt=salt, digest_method=hashlib.sha256)
@@ -68,11 +85,17 @@ class APIKeyCookieAuth(ValidatedAuthSource):
             server-side when the cookie is signed.
         secure: Set the ``Secure`` flag (default ``True``); disable only in local dev.
         samesite: ``SameSite`` cookie attribute (default ``"lax"``).
-        domain: Optional ``Domain`` cookie attribute.
+        domain: Optional ``Domain`` cookie attribute. Leave it unset to name
+            the cookie with the ``__Host-`` prefix, which a sibling subdomain
+            cannot shadow.
         path: ``Path`` cookie attribute (default ``"/"``).
         scheme_name: OpenAPI security scheme name (default ``APIKeyCookie_{name}``).
         description: Optional prose for the OpenAPI security scheme object.
         **kwargs: Extra keyword arguments forwarded to the validator on every call.
+
+    Raises:
+        ValueError: On an invalid configuration, including a ``__Secure-`` or
+            ``__Host-`` name with settings that make browsers drop the cookie.
     """
 
     def __init__(
@@ -93,6 +116,7 @@ class APIKeyCookieAuth(ValidatedAuthSource):
     ) -> None:
         if ttl <= 0:
             raise ValueError("ttl must be a positive number of seconds")
+        _check_name_prefix(name, secure=secure, domain=domain, path=path)
         self._name = name
         self._secret_keys = _normalize_secret_keys(secret_key)
         if session_id:

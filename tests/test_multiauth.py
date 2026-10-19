@@ -60,7 +60,9 @@ from fastapi_multiauth.abc import _DocOnlyScheme, _override_accepts_request
 from fastapi_multiauth.exceptions import UnauthorizedError
 from fastapi_multiauth.oauth import (
     OAuthDiscoveryError,
+    OAuthError,
     OAuthExchangeError,
+    OAuthStateError,
     OAuthUserinfoError,
     OIDCEndpoints,
     oauth_build_authorization_redirect,
@@ -1397,6 +1399,32 @@ class TestCookieSecretValidation:
             APIKeyCookieAuth("session", cookie_validator, secret_key="x" * 32, ttl=ttl)
 
 
+class TestCookieNamePrefix:
+    @pytest.mark.parametrize("name", ["__Host-session", "__Secure-session"])
+    def test_prefixed_name_with_defaults_accepted(self, name):
+        APIKeyCookieAuth(name, cookie_validator, secret_key=COOKIE_SECRET)
+
+    def test_secure_prefix_allows_domain_and_path(self):
+        APIKeyCookieAuth(
+            "__Secure-session", cookie_validator, domain="example.com", path="/app"
+        )
+
+    @pytest.mark.parametrize("name", ["__Host-session", "__secure-session"])
+    def test_prefixed_name_without_secure_rejected(self, name):
+        with pytest.raises(ValueError, match="secure=True"):
+            APIKeyCookieAuth(name, cookie_validator, secure=False)
+
+    @pytest.mark.parametrize("kwargs", [{"domain": "example.com"}, {"path": "/app"}])
+    def test_host_prefix_with_domain_or_path_rejected(self, kwargs):
+        with pytest.raises(ValueError, match="__Host-"):
+            APIKeyCookieAuth("__HOST-session", cookie_validator, **kwargs)
+
+    def test_unprefixed_name_unconstrained(self):
+        APIKeyCookieAuth(
+            "session", cookie_validator, secure=False, domain="example.com", path="/x"
+        )
+
+
 class TestCookieKeyRotation:
     """secret_key rotation: first key signs, every key verifies."""
 
@@ -2104,25 +2132,20 @@ class TestEncodeDecodeOAuthState:
             == url
         )
 
-    def test_decode_none_returns_fallback(self):
-        assert (
-            oauth_decode_state(None, expected_state_token="any", fallback="/home")
-            == "/home"
-        )
+    @pytest.mark.parametrize("state", [None, "", "null", "!!!notbase64!!!"])
+    def test_decode_missing_or_malformed_state_raises(self, state):
+        with pytest.raises(OAuthStateError):
+            oauth_decode_state(state, expected_state_token="any", fallback="/home")
 
-    def test_decode_null_string_returns_fallback(self):
-        assert (
-            oauth_decode_state("null", expected_state_token="any", fallback="/home")
-            == "/home"
-        )
+    def test_decode_deeply_nested_state_raises(self):
+        state = base64.urlsafe_b64encode(b"[" * 100_000).decode()
+        with pytest.raises(OAuthStateError):
+            oauth_decode_state(state, expected_state_token="any", fallback="/home")
 
-    def test_decode_invalid_base64_returns_fallback(self):
-        assert (
-            oauth_decode_state(
-                "!!!notbase64!!!", expected_state_token="any", fallback="/home"
-            )
-            == "/home"
-        )
+    def test_decode_lone_surrogate_token_raises(self):
+        state = _raw_state({"n": "\ud800", "d": "/x"})
+        with pytest.raises(OAuthStateError):
+            oauth_decode_state(state, expected_state_token="any", fallback="/home")
 
     def test_decode_handles_missing_padding(self):
         url = "/dashboard/x"
@@ -2133,23 +2156,28 @@ class TestEncodeDecodeOAuthState:
             == url
         )
 
-    def test_decode_wrong_state_token_returns_fallback(self):
-        url = "https://example.com/dashboard"
-        encoded = oauth_encode_state(url, "correct-token")
-        assert (
+    def test_decode_wrong_state_token_raises(self):
+        encoded = oauth_encode_state("/dashboard", "correct-token")
+        with pytest.raises(OAuthStateError):
             oauth_decode_state(
                 encoded, expected_state_token="wrong-token", fallback="/"
             )
-            == "/"
-        )
 
-    def test_decode_empty_expected_token_returns_fallback(self):
+    def test_decode_empty_expected_token_raises(self):
         """An empty stored token (session miss) must never match an empty "n"."""
-        encoded = oauth_encode_state("https://evil.example.com/x", "")
-        assert (
+        encoded = oauth_encode_state("/dashboard", "")
+        with pytest.raises(OAuthStateError):
             oauth_decode_state(encoded, expected_state_token="", fallback="/home")
-            == "/home"
-        )
+
+    def test_state_error_is_an_oauth_error(self):
+        assert issubclass(OAuthStateError, OAuthError)
+
+    def test_error_message_does_not_echo_state(self):
+        encoded = oauth_encode_state("/dashboard", "attacker-token")
+        with pytest.raises(OAuthStateError) as exc_info:
+            oauth_decode_state(encoded, expected_state_token="expected", fallback="/")
+        assert encoded not in str(exc_info.value)
+        assert "attacker-token" not in str(exc_info.value)
 
     def test_generate_state_token_is_random(self):
         assert oauth_generate_state_token() != oauth_generate_state_token()
@@ -2358,8 +2386,29 @@ class TestResolveProviderUrls:
             await oauth_resolve_provider_urls(DISCOVERY_URL)
 
 
+def _authorization_redirect(url="https://auth.example.com/authorize", **kwargs):
+    kwargs = {
+        "client_id": "my-client",
+        "scopes": "openid",
+        "redirect_uri": "https://app.example.com/callback",
+        "destination": "/dashboard",
+        "state_token": "test-state-token",
+        **kwargs,
+    }
+    return oauth_build_authorization_redirect(url, **kwargs)
+
+
 class TestOAuthHttpsEnforcement:
     """client_secret / codes / tokens must never travel over plaintext HTTP."""
+
+    def test_http_authorization_url_rejected(self):
+        with pytest.raises(ValueError, match="authorization_url must use https"):
+            _authorization_redirect("http://idp.example/authorize")
+
+    @pytest.mark.parametrize("host", ["localhost", "127.0.0.1"])
+    def test_http_loopback_authorization_url_allowed(self, host):
+        response = _authorization_redirect(f"http://{host}:8080/authorize")
+        assert response.headers["location"].startswith(f"http://{host}:8080/authorize?")
 
     @pytest.mark.anyio
     @respx.mock
@@ -2850,15 +2899,7 @@ class TestGeneratePkcePair:
 
 class TestAuthorizationRedirectPkce:
     def _params(self, **kwargs):
-        response = oauth_build_authorization_redirect(
-            "https://auth.example.com/authorize",
-            client_id="my-client",
-            scopes="openid",
-            redirect_uri="https://app.example.com/callback",
-            destination="/dashboard",
-            state_token="test-state-token",
-            **kwargs,
-        )
+        response = _authorization_redirect(**kwargs)
         return parse_qs(urlparse(response.headers["location"]).query)
 
     def test_code_challenge_sent_with_s256_method(self):
@@ -2967,8 +3008,8 @@ class TestDecodeStateOpenRedirectGuard:
             == "/fallback"
         )
 
-    def test_non_string_state_token_rejected(self):
-        state = _raw_state({"n": 12345, "d": "/x"})
+    def test_missing_destination_returns_fallback(self):
+        state = _raw_state({"n": self.TOKEN})
         assert (
             oauth_decode_state(
                 state, expected_state_token=self.TOKEN, fallback="/fallback"
@@ -2976,14 +3017,16 @@ class TestDecodeStateOpenRedirectGuard:
             == "/fallback"
         )
 
-    def test_non_dict_payload_rejected(self):
-        state = _raw_state(["not", "a", "dict"])
-        assert (
+    def test_unparsable_destination_returns_fallback(self):
+        assert self._decode("http://[::1", ("app.example.com",)) == "/fallback"
+
+    @pytest.mark.parametrize("payload", [{"n": 12345, "d": "/x"}, ["not", "a", "dict"]])
+    def test_bad_payload_raises(self, payload):
+        state = _raw_state(payload)
+        with pytest.raises(OAuthStateError):
             oauth_decode_state(
                 state, expected_state_token=self.TOKEN, fallback="/fallback"
             )
-            == "/fallback"
-        )
 
 
 class TestRequireExtra:
@@ -3541,11 +3584,17 @@ _RSA_KEY_1 = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 _RSA_KEY_2 = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 
-def _jwk(private_key, kid: str, **overrides) -> dict:
+def _jwk(private_key, kid: str | None, **overrides) -> dict:
     entry = json.loads(RSAAlgorithm.to_jwk(private_key.public_key()))
     entry.update({"kid": kid, "alg": "RS256", "use": "sig"})
     entry.update(overrides)
     return {k: v for k, v in entry.items() if v is not None}
+
+
+def _jwks_validator(jwks_url: str, **kwargs) -> JWTValidator:
+    """JWKS-mode validator; tests not about ``aud`` opt out of the check."""
+    kwargs.setdefault("audience", JWTValidator.ANY_AUDIENCE)
+    return JWTValidator(jwks_url=jwks_url, **kwargs)
 
 
 def _claims(**overrides) -> dict:
@@ -3603,7 +3652,18 @@ class TestJWTValidatorConfig:
             JWTValidator(jwks_url="http://idp.example.com/jwks")
 
     def test_loopback_http_jwks_url_accepted(self):
-        JWTValidator(jwks_url="http://localhost:8080/jwks")
+        _jwks_validator("http://localhost:8080/jwks")
+
+    @pytest.mark.parametrize("audience", [None, "", []])
+    def test_jwks_without_audience_rejected(self, audience):
+        with pytest.raises(ValueError, match="audience is required.*ANY_AUDIENCE"):
+            JWTValidator(jwks_url="https://idp.example.com/jwks", audience=audience)
+
+    def test_secret_mode_without_audience_accepted(self):
+        JWTValidator(secret=JWT_SECRET)
+
+    def test_any_audience_repr(self):
+        assert repr(JWTValidator.ANY_AUDIENCE) == "JWTValidator.ANY_AUDIENCE"
 
     def test_symmetric_algorithms_with_jwks_rejected(self):
         """Key-confusion guard: a public key must never act as an HMAC secret."""
@@ -3782,7 +3842,24 @@ class TestJWTValidatorJWKS:
         )
 
     def _validator(self, **kwargs) -> JWTValidator:
-        return JWTValidator(jwks_url=self.JWKS_URL, **kwargs)
+        return _jwks_validator(self.JWKS_URL, **kwargs)
+
+    @pytest.mark.parametrize(
+        ("audience", "aud", "expected"),
+        [
+            ("my-api", "my-api", 200),
+            ("my-api", "other-client", 401),
+            ("my-api", None, 401),
+            (JWTValidator.ANY_AUDIENCE, "other-client", 200),
+        ],
+    )
+    @respx.mock
+    def test_audience_check(self, audience, aud, expected):
+        respx.get(self.JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
+        client = _auth_client(self._validator(audience=audience))
+        token = self._rs_token(claims=_claims(aud=aud))
+        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == expected
 
     @respx.mock
     def test_valid_rs256_token(self):
@@ -4273,7 +4350,7 @@ class TestJWTValidatorJWKSRobustness:
     @respx.mock
     def test_garbage_token_rejected_before_jwks_lookup(self):
         respx.get(self.JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
-        client = _auth_client(JWTValidator(jwks_url=self.JWKS_URL))
+        client = _auth_client(_jwks_validator(self.JWKS_URL))
         response = client.get("/me", headers={"Authorization": "Bearer not.a.jwt"})
         assert response.status_code == 401
         assert len(respx.calls) == 0
@@ -4288,11 +4365,15 @@ class TestJWTValidatorJWKSRobustness:
                     {"kty": "OKP", "kid": "exotic"},  # no alg, none inferable
                     "garbage",  # not even an object
                     42,
+                    {"kty": "RSA", "alg": "RS256", "n": "AA", "e": "AQAB"},
+                    {"kty": "RSA", "alg": "RS256", "n": 12345, "e": "AQAB"},
+                    {"kty": "EC", "alg": "ES256", "crv": "P-256", "x": 1, "y": 2},
+                    {"kty": "oct", "alg": "none", "k": "AA"},
                     _jwk(_RSA_KEY_1, "key1"),
                 ]
             }
         )
-        client = _auth_client(JWTValidator(jwks_url=self.JWKS_URL))
+        client = _auth_client(_jwks_validator(self.JWKS_URL))
         token = pyjwt.encode(
             _claims(), _RSA_KEY_1, algorithm="RS256", headers={"kid": "key1"}
         )
@@ -4303,10 +4384,39 @@ class TestJWTValidatorJWKSRobustness:
     def test_alg_header_not_matching_jwks_key_rejected(self):
         """A cross-family 'alg' header against an RSA JWKS key is a 401, not a 500."""
         respx.get(self.JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
-        client = _auth_client(JWTValidator(jwks_url=self.JWKS_URL))
+        client = _auth_client(_jwks_validator(self.JWKS_URL))
         response = client.get(
             "/me", headers={"Authorization": f"Bearer {_forged_token('ES256')}"}
         )
+        assert response.status_code == 401
+
+    @respx.mock
+    def test_keys_outside_the_allowlist_are_not_cached(self):
+        """A kid-less token still finds the one key the validator can use."""
+        respx.get(self.JWKS_URL).respond(
+            json={
+                "keys": [
+                    _jwk(_RSA_KEY_1, None),
+                    _jwk(_RSA_KEY_2, None, alg="PS256"),
+                ]
+            }
+        )
+        client = _auth_client(_jwks_validator(self.JWKS_URL))
+        token = pyjwt.encode(_claims(), _RSA_KEY_1, algorithm="RS256")
+        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 200
+
+    @respx.mock
+    def test_header_alg_must_match_the_jwks_key_alg(self):
+        """An allowlisted alg other than the key's own is refused (PS256 vs RS256)."""
+        respx.get(self.JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
+        client = _auth_client(
+            _jwks_validator(self.JWKS_URL, algorithms=["RS256", "PS256"])
+        )
+        token = pyjwt.encode(
+            _claims(), _RSA_KEY_1, algorithm="PS256", headers={"kid": "key1"}
+        )
+        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
         assert response.status_code == 401
 
     @pytest.mark.anyio
@@ -4314,7 +4424,7 @@ class TestJWTValidatorJWKSRobustness:
     @respx.mock
     async def test_unusable_jwks_document_returns_503(self, document):
         respx.get(self.JWKS_URL).respond(json=document)
-        validator = JWTValidator(jwks_url=self.JWKS_URL)
+        validator = _jwks_validator(self.JWKS_URL)
         token = pyjwt.encode(
             _claims(), _RSA_KEY_1, algorithm="RS256", headers={"kid": "key1"}
         )
@@ -4352,7 +4462,7 @@ class TestJWKSRefreshCoalescing:
             return httpx.Response(200, json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
 
         respx.get(self.JWKS_URL).mock(side_effect=slow_jwks)
-        validator = JWTValidator(jwks_url=self.JWKS_URL)
+        validator = _jwks_validator(self.JWKS_URL)
         token = pyjwt.encode(
             _claims(), _RSA_KEY_1, algorithm="RS256", headers={"kid": "key1"}
         )
