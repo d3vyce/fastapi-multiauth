@@ -10,7 +10,7 @@ from fastapi.security import HTTPBasic
 from fastapi_multiauth.exceptions import UnauthorizedError
 
 from ..abc import ValidatedAuthSource
-from ..utils import authorization_credential
+from ..utils import authorization_credential, refusal
 
 
 def _basic_challenge(realm: str | None) -> str:
@@ -86,10 +86,10 @@ class HTTPBasicAuth(ValidatedAuthSource):
         try:
             decoded = base64.b64decode(credential, validate=True).decode("utf-8")
         except ValueError:  # covers binascii.Error and UnicodeDecodeError
-            raise UnauthorizedError() from None
+            raise refusal(UnauthorizedError(), "malformed") from None
         username, sep, password = decoded.partition(":")
         if not sep:
-            raise UnauthorizedError()
+            raise refusal(UnauthorizedError(), "malformed")
         return await self._call_validator(
             username, password, scopes=scopes, request=request
         )

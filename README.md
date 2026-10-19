@@ -88,6 +88,7 @@ async def me(user=Security(auth)):
 - **WebSocket routes**: every source and `MultiAuth` guard `@app.websocket` routes too, refusing the handshake with the same 401/403.
 - **Freshness / step-up auth**: `source.fresh(max_age=...)` refuses a credential proven too long ago on the endpoints that can take over an account, with the [RFC 9470](https://datatracker.ietf.org/doc/html/rfc9470) challenge that tells a client to re-authenticate. Signed cookies date themselves; anything else reads the instant off your identity. `source.stepped_up(acr_values=[...], acr=...)` asks for a stronger level instead, and composes with `fresh()` into one challenge; `AuthenticationMethodReference` names the [RFC 8176](https://datatracker.ietf.org/doc/html/rfc8176) `amr` values.
 - **Correct HTTP semantics**: 401 with `WWW-Authenticate` challenges ([RFC 7235](https://datatracker.ietf.org/doc/html/rfc7235)) and 403 via `ForbiddenError`.
+- **Security-event logging**: every refusal is a `WARNING` under `fastapi_multiauth.*` with a reason code (`invalid_signature`, `expired`, `stale`, …) in `extra`, never the credential or the identity; silent until your app configures logging.
 - **OAuth 2.0 / OIDC helpers** (`fastapi-multiauth[oauth]` extra): async discovery with TTL caching, HTTPS enforcement, CSRF-protected `state` encoding, PKCE (S256), code exchange delegated to [httpx-oauth](https://github.com/frankie567/httpx-oauth), and OpenID Connect ID token validation with `nonce` and `at_hash` (plus the `jwt` extra).
 
 ## Comparison

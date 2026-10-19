@@ -9,6 +9,8 @@ exported here, and require the ``oauth`` extra. Import them explicitly::
     redirect = oauth.oauth_build_authorization_redirect(...)
 """
 
+import logging
+
 from . import oauth
 from .abc import AuthSource
 from .amr import AuthenticationMethodReference
@@ -39,6 +41,8 @@ from .utils import (
 )
 
 __version__ = "0.7.0"
+
+logging.getLogger(__name__).addHandler(logging.NullHandler())
 
 __all__ = [
     "APIKeyCookieAuth",

@@ -8,11 +8,12 @@ from typing import Any, Literal
 from fastapi import Response
 from fastapi.requests import HTTPConnection
 from fastapi.security import APIKeyCookie
-from itsdangerous import BadSignature, TimestampSigner
+from itsdangerous import BadSignature, SignatureExpired, TimestampSigner
 
 from fastapi_multiauth.exceptions import UnauthorizedError
 
 from ..abc import ValidatedAuthSource, _accepts_kwarg
+from ..utils import refusal
 
 _MIN_SECRET_KEY_BYTES = 32
 _SALT_PREFIX = "fastapi-multiauth.cookie."
@@ -171,8 +172,10 @@ class APIKeyCookieAuth(ValidatedAuthSource):
             return self._signer.unsign(
                 cookie_value.encode(), max_age=self._ttl
             ).decode()
+        except SignatureExpired:
+            raise refusal(UnauthorizedError(), "expired") from None
         except BadSignature:
-            raise UnauthorizedError() from None
+            raise refusal(UnauthorizedError(), "invalid_signature") from None
 
     def authenticated_at(self, credential: str) -> float | None:
         """When the signed cookie was minted, ``None`` when it does not verify."""

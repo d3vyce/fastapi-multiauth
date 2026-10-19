@@ -4,6 +4,7 @@ import functools
 import hashlib
 import hmac
 import inspect
+import logging
 import math
 import secrets
 import string
@@ -11,7 +12,7 @@ import time
 import zlib
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypeVar
 
 import anyio.to_thread
 from fastapi import HTTPException
@@ -110,6 +111,62 @@ def verify_token_checksum(token: str, *, prefix: str | None = None) -> bool:
     if not body or not (token.isascii() and token.isalnum()):
         return False
     return _checksum(body) == checksum
+
+
+_HTTPError = TypeVar("_HTTPError", bound=HTTPException)
+
+_REFUSAL_REASON = "_fastapi_multiauth_reason"
+
+
+def refusal(exc: _HTTPError, reason: str) -> _HTTPError:
+    """Tag *exc* with the reason code logged when it refuses a request."""
+    setattr(exc, _REFUSAL_REASON, reason)
+    return exc
+
+
+def refusal_reason(exc: HTTPException) -> str:
+    """The reason code of a refusal, derived from its status when untagged."""
+    reason = getattr(exc, _REFUSAL_REASON, None)
+    if reason is not None:
+        return reason
+    if exc.status_code == 401:
+        return "rejected"
+    if exc.status_code == 403:
+        return "forbidden"
+    return "error"
+
+
+def log_decision(
+    logger: logging.Logger,
+    level: int,
+    reason: str,
+    *,
+    source: str,
+    scheme: str | None,
+    status: int | None = None,
+) -> None:
+    """Log one authentication decision, never the credential or the identity.
+
+    Args:
+        logger: The deciding module's logger.
+        level: ``WARNING`` for a refusal, ``DEBUG`` for a success.
+        reason: The decision's reason code (``"authenticated"`` on success).
+        source: Class name of the deciding source.
+        scheme: Its OpenAPI security scheme name, ``None`` when it has none.
+        status: The refusal's HTTP status, ``None`` when nothing was refused.
+    """
+    logger.log(
+        level,
+        "%s: %s",
+        source,
+        reason,
+        extra={
+            "auth_source": source,
+            "auth_scheme": scheme,
+            "auth_reason": reason,
+            "auth_status": status,
+        },
+    )
 
 
 def ensure_async(fn: Callable[..., Any]) -> Callable[..., Any]:

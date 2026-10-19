@@ -18,7 +18,7 @@ Out of scope, your responsibility:
 - **The validator.** The library hands you a credential; deciding whether it is valid is your code. Use the packaged patterns: `hash_token`/ `verify_token_hash` for opaque tokens, `secrets.compare_digest` for Basic credentials.
 - **Credential storage** (databases, password hashing: use argon2/bcrypt for passwords; SHA-256 is only appropriate for high-entropy opaque tokens).
 - **Transport security** of your own app (deploy behind HTTPS; cookie `secure=True` is the default and should stay on).
-- **Rate limiting / brute-force protection** on login endpoints.
+- **Rate limiting / brute-force protection** on login endpoints. The library [logs every refusal](usage.md#logging) with a reason code, so brute force and misconfiguration are visible; acting on them is yours.
 - **CSRF on cookie-authenticated routes.** A cookie is ambient authority, and `SameSite=lax` (the default) leaves gaps: state-changing `GET`s, same-site attackers on a sibling subdomain, and `samesite="none"`. Unsafe methods behind `APIKeyCookieAuth` need a CSRF token, an `Origin`/`Sec-Fetch-Site` check, or `samesite="strict"`.
 
 ## Nothing is encrypted

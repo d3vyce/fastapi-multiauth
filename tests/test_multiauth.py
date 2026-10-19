@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import json
+import logging
 import math
 import secrets
 import string
@@ -6612,3 +6613,281 @@ class TestSteppedUp:
             token = _hs_token(_claims(acr=acr))
             response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
             assert response.status_code == expected, acr
+
+
+SECRET_CREDENTIAL = "s3cr3t-credential-value"
+
+
+class TestSecurityLogging:
+    """One PII-free record per decision, under fastapi_multiauth.*."""
+
+    @pytest.fixture(autouse=True)
+    def _capture(self, caplog):
+        caplog.set_level(logging.DEBUG, logger="fastapi_multiauth")
+        self.caplog = caplog
+
+    def _decisions(self) -> list[Any]:
+        return [r for r in self.caplog.records if hasattr(r, "auth_reason")]
+
+    def _only(self) -> Any:
+        records = self._decisions()
+        assert len(records) == 1, [r.getMessage() for r in records]
+        return records[0]
+
+    def _assert_no_leak(self, *secrets_: str) -> None:
+        for record in self.caplog.records:
+            dumped = f"{record.getMessage()} {record.__dict__!r}"
+            for secret in (SECRET_CREDENTIAL, *secrets_):
+                assert secret not in dumped
+
+    def _assert_refusal(
+        self, logger_name, source, reason, status, level=logging.WARNING
+    ):
+        record = self._only()
+        assert record.name == logger_name
+        assert record.levelno == level
+        assert (record.auth_source, record.auth_reason, record.auth_status) == (
+            source,
+            reason,
+            status,
+        )
+        assert record.getMessage() == f"{source}: {reason}"
+        self._assert_no_leak()
+        return record
+
+    @staticmethod
+    def _bearer_header(token: str = SECRET_CREDENTIAL) -> dict[str, str]:
+        return {"Authorization": f"Bearer {token}"}
+
+    def test_the_package_logger_has_a_null_handler(self):
+        handlers = logging.getLogger("fastapi_multiauth").handlers
+        assert any(isinstance(h, logging.NullHandler) for h in handlers)
+
+    def test_success_is_logged_at_debug(self):
+        async def validate(token: str) -> dict:
+            return {"email": "alice@example.com"}
+
+        _client(HTTPBearerAuth(validate)).get("/me", headers=self._bearer_header())
+        record = self._only()
+        assert record.levelno == logging.DEBUG
+        assert record.name == "fastapi_multiauth.sources.bearer"
+        assert (record.auth_reason, record.auth_status) == ("authenticated", None)
+        assert record.auth_scheme == "HTTPBearer"
+        self._assert_no_leak("alice@example.com")
+
+    def test_success_builds_no_record_when_debug_is_off(self):
+        self.caplog.set_level(logging.WARNING, logger="fastapi_multiauth")
+        bearer_logger = logging.getLogger("fastapi_multiauth.sources.bearer")
+        with patch.object(bearer_logger, "log") as log:
+            _client(HTTPBearerAuth(simple_validator)).get(
+                "/me", headers=self._bearer_header(VALID_TOKEN)
+            )
+        log.assert_not_called()
+
+    def test_anonymous_is_logged_at_debug(self):
+        _client(HTTPBearerAuth(simple_validator).optional()).get("/me")
+        record = self._only()
+        assert (record.levelno, record.auth_reason) == (logging.DEBUG, "anonymous")
+
+    def test_a_missing_credential_is_logged_at_info(self):
+        _client(HTTPBearerAuth(simple_validator)).get("/me")
+        self._assert_refusal(
+            "fastapi_multiauth.sources.bearer",
+            "HTTPBearerAuth",
+            "missing_credential",
+            401,
+            level=logging.INFO,
+        )
+
+    @pytest.mark.parametrize(
+        ("status_code", "reason"),
+        [(401, "rejected"), (403, "forbidden"), (429, "error")],
+    )
+    def test_validator_refusals(self, status_code, reason):
+        async def validate(token: str) -> dict:
+            raise HTTPException(status_code=status_code, detail="alice@example.com")
+
+        _client(HTTPBearerAuth(validate)).get("/me", headers=self._bearer_header())
+        self._assert_refusal(
+            "fastapi_multiauth.sources.bearer", "HTTPBearerAuth", reason, status_code
+        )
+        self._assert_no_leak("alice@example.com")
+
+    def test_a_forged_cookie(self):
+        auth = APIKeyCookieAuth(
+            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
+        )
+        _client(auth).get("/me", cookies={"session": SECRET_CREDENTIAL})
+        record = self._assert_refusal(
+            "fastapi_multiauth.sources.cookie",
+            "APIKeyCookieAuth",
+            "invalid_signature",
+            401,
+        )
+        assert record.auth_scheme == "APIKeyCookie_session"
+
+    def test_an_expired_cookie(self):
+        auth = APIKeyCookieAuth(
+            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False, ttl=60
+        )
+        cookie = auth._sign(VALID_COOKIE)
+        with patch("time.time", return_value=time.time() + 120):
+            _client(auth).get("/me", cookies={"session": cookie})
+        self._assert_refusal(
+            "fastapi_multiauth.sources.cookie", "APIKeyCookieAuth", "expired", 401
+        )
+        self._assert_no_leak(cookie, VALID_COOKIE)
+
+    @pytest.mark.parametrize(
+        "blob",
+        ["!!!", base64.b64encode(SECRET_CREDENTIAL.encode()).decode()],
+        ids=["not-base64", "no-colon"],
+    )
+    def test_a_malformed_basic_blob(self, blob):
+        _client(HTTPBasicAuth(simple_validator)).get(
+            "/me", headers={"Authorization": f"Basic {blob}"}
+        )
+        self._assert_refusal(
+            "fastapi_multiauth.sources.basic", "HTTPBasicAuth", "malformed", 401
+        )
+        self._assert_no_leak(blob)
+
+    @pytest.mark.parametrize(
+        ("source", "logger_name"),
+        [
+            (APIKeyHeaderAuth("X-Key", simple_validator), "sources.header"),
+            (APIKeyQueryAuth("key", simple_validator), "sources.query"),
+            (
+                OAuth2PasswordBearerAuth(simple_validator, token_url="/token"),
+                "sources.oauth2",
+            ),
+            (_HeaderAuth(VALID_TOKEN), "abc"),
+        ],
+        ids=["header", "query", "oauth2", "custom"],
+    )
+    def test_each_module_logs_under_its_own_name(self, source, logger_name):
+        _client(source).get(
+            f"/me?key={SECRET_CREDENTIAL}",
+            headers={
+                "X-Key": SECRET_CREDENTIAL,
+                "X-Token": SECRET_CREDENTIAL,
+                **self._bearer_header(),
+            },
+        )
+        record = self._only()
+        assert record.name == f"fastapi_multiauth.{logger_name}"
+        assert record.auth_reason == "rejected"
+        self._assert_no_leak()
+
+    def test_a_stale_credential(self):
+        dep = HTTPBearerAuth(simple_validator).fresh(300, authenticated_at=lambda _: 0)
+        _client(dep).get("/me", headers=self._bearer_header(VALID_TOKEN))
+        self._assert_refusal(
+            "fastapi_multiauth.sources.bearer", "HTTPBearerAuth", "stale", 401
+        )
+
+    def test_an_insufficient_acr(self):
+        dep = HTTPBearerAuth(simple_validator).stepped_up(["gold"], acr=lambda _: "x")
+        _client(dep).get("/me", headers=self._bearer_header(VALID_TOKEN))
+        self._assert_refusal(
+            "fastapi_multiauth.sources.bearer",
+            "HTTPBearerAuth",
+            "insufficient_acr",
+            401,
+        )
+
+    def test_multiauth_exhausting_its_sources(self):
+        auth = MultiAuth(
+            HTTPBearerAuth(simple_validator),
+            APIKeyHeaderAuth("X-Key", simple_validator),
+        )
+        _client(auth).get("/me")
+        record = self._assert_refusal(
+            "fastapi_multiauth.sources.multi",
+            "MultiAuth",
+            "missing_credential",
+            401,
+            level=logging.INFO,
+        )
+        assert record.auth_scheme is None
+
+    def test_multiauth_logs_once_as_the_matched_source(self):
+        auth = MultiAuth(
+            HTTPBearerAuth(simple_validator),
+            APIKeyHeaderAuth("X-Key", simple_validator),
+        )
+        _client(auth).get("/me", headers={"X-Key": SECRET_CREDENTIAL})
+        self._assert_refusal(
+            "fastapi_multiauth.sources.header", "APIKeyHeaderAuth", "rejected", 401
+        )
+
+    @pytest.mark.parametrize(
+        ("token", "reason"),
+        [
+            (_hs_token(_id_claims(exp=int(time.time()) - 60)), "expired"),
+            (_hs_token(_id_claims(nbf=int(time.time()) + 3600)), "not_yet_valid"),
+            (_hs_token(_id_claims(aud="other")), "invalid_audience"),
+            (_hs_token(_id_claims(iss="https://evil.example")), "invalid_issuer"),
+            (_hs_token(_id_claims(exp=None)), "missing_claim"),
+            (
+                _hs_token(_id_claims(), secret="another-jwt-secret-32-bytes-min!!"),
+                "invalid_signature",
+            ),
+            (SECRET_CREDENTIAL, "invalid_token"),
+        ],
+        ids=["expired", "nbf", "aud", "iss", "no-exp", "signature", "garbage"],
+    )
+    def test_jwt_refusals_carry_the_pyjwt_reason(self, token, reason):
+        validator = JWTValidator(secret=JWT_SECRET, audience=CLIENT_ID, issuer=ISSUER)
+        _client(HTTPBearerAuth(validator)).get(
+            "/me", headers=self._bearer_header(token)
+        )
+        self._assert_refusal(
+            "fastapi_multiauth.sources.bearer", "HTTPBearerAuth", reason, 401
+        )
+        self._assert_no_leak(token)
+
+    def test_jwt_insufficient_scope(self):
+        validator = JWTValidator(secret=JWT_SECRET)
+        bearer = HTTPBearerAuth(validator)
+
+        def setup(app: FastAPI):
+            @app.get("/admin")
+            async def admin(user=Security(bearer, scopes=["admin"])):
+                return user
+
+        token = _hs_token(_claims(scope="read"))
+        TestClient(_app(setup)).get("/admin", headers=self._bearer_header(token))
+        self._assert_refusal(
+            "fastapi_multiauth.sources.bearer",
+            "HTTPBearerAuth",
+            "insufficient_scope",
+            403,
+        )
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("token", "reason"),
+        [("not.a-jwt", "malformed"), (_id_token(kid="nope"), "unknown_key")],
+        ids=["malformed", "unknown-key"],
+    )
+    def test_jwks_refusals(self, token, reason):
+        respx.get(ID_JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
+        _auth_client(_jwks_validator(ID_JWKS_URL)).get(
+            "/me", headers=self._bearer_header(token)
+        )
+        assert self._only().auth_reason == reason
+        self._assert_no_leak(token)
+
+    @respx.mock
+    def test_jwks_unavailable(self):
+        respx.get(ID_JWKS_URL).respond(500)
+        token = _id_token()
+        _auth_client(_jwks_validator(ID_JWKS_URL)).get(
+            "/me", headers=self._bearer_header(token)
+        )
+        decisions = self._decisions()
+        assert [(r.auth_reason, r.auth_status) for r in decisions] == [
+            ("jwks_unavailable", 503)
+        ]
+        self._assert_no_leak(token)
