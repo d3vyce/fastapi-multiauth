@@ -61,4 +61,5 @@ Signed is not encrypted. The signed cookie payload and JWT claims are **readable
 ## HTTP semantics
 
 - 401 = credential absent or invalid; 403 (`ForbiddenError`) = authenticated but insufficient (e.g. missing scopes, `JWTValidator` does this for you).
+- A credential that is valid but proven too long ago (`fresh()`) or at too weak a level (`stepped_up()`) gets a 401, since re-authenticating fixes it, with the RFC 9470 `insufficient_user_authentication` challenge listing every requirement of the route (`max_age`, `acr_values`). Neither guard can be combined with `optional()`.
 - 401 responses carry `WWW-Authenticate` challenges where a scheme exists (`Bearer`, `Basic realm="..."`); `MultiAuth` advertises the union.

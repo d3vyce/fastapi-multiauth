@@ -167,7 +167,7 @@ WWW-Authenticate: Bearer error="insufficient_user_authentication",
   error_description="More recent authentication is required", max_age="300"
 ```
 
-Cookie and API-key schemes have no challenge to carry, so the body holds the signal: `detail` is the stable string `"Insufficient user authentication"`. `StaleCredentialError` subclasses `UnauthorizedError`, so existing 401 handling still catches it; handle it to answer in your own shape:
+Cookie and API-key schemes have no challenge to carry, so the body holds the signal: `detail` is the stable string `"Insufficient user authentication"`. `StaleCredentialError` subclasses `UnauthorizedError` (through `InsufficientAuthenticationError`, see [authentication level](#authentication-level-acr_values)), so existing 401 handling still catches it; handle it to answer in your own shape:
 
 ```python
 @app.exception_handler(StaleCredentialError)
@@ -243,6 +243,65 @@ tokens_skip_window = MultiAuth(bearer, session.fresh(300))
 ```
 
 A custom `AuthSource` joins in by overriding `authenticated_at(credential)`.
+
+### Authentication level (`acr_values`)
+
+`fresh()` asks for a factor proven *recently*; `stepped_up(acr_values, acr=...)` asks for one proven *strongly enough*. The route lists the authentication context class references it accepts, and `acr` reads the one the caller achieved off the identity:
+
+```python
+bearer = HTTPBearerAuth(JWTValidator(jwks_url=..., audience="my-api"))
+StrongUser = Annotated[
+    dict,
+    Security(bearer.stepped_up(["urn:mfa", "urn:hwk"], acr=lambda c: c.get("acr"))),
+]
+
+
+@app.post("/payouts")
+async def payout(body: Payout, claims: StrongUser): ...
+```
+
+Any one of the listed values passes; anything else, `None` included, gets the RFC 9470 challenge naming what would:
+
+```http
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer error="insufficient_user_authentication",
+  error_description="A different authentication level is required",
+  acr_values="urn:mfa urn:hwk"
+```
+
+The client sends the user back to the provider with those `acr_values`, and retries with the stronger token. `acr` is a sync or async callable taking the identity, like `authenticated_at`, and a sync one pays the same worker-thread hop: prefer `async def` on a busy route. The values travel inside a quoted string, so an entry with whitespace, quotes, backslashes or non-ASCII raises `ValueError` at setup.
+
+`stepped_up()` and `fresh()` compose in either order, and the challenge then carries both requirements whichever one failed, so the client re-authenticates once:
+
+```python
+bearer.stepped_up(["urn:mfa"], acr=lambda c: c.get("acr")).fresh(
+    300, authenticated_at=lambda c: c.get("auth_time")
+)
+```
+
+```http
+WWW-Authenticate: Bearer error="insufficient_user_authentication",
+  error_description="More recent authentication is required",
+  acr_values="urn:mfa", max_age="300"
+```
+
+A level that falls short raises `InsufficientAuthenticationError`, the base of `StaleCredentialError`. Handle the base to answer both in your own shape; each carries the route's `max_age` and `acr_values` (`None` for a guard the route does not set). Like `fresh()`, `stepped_up()` refuses `optional()` either way round, is set once per copy, and `MultiAuth.stepped_up()` applies to every source.
+
+#### Authentication method references
+
+`acr` names a *level*; the `amr` claim lists the *methods* behind it. `AuthenticationMethodReference` is a `StrEnum` of the [RFC 8176](https://datatracker.ietf.org/doc/html/rfc8176) registry, so its members compare equal to the strings in the claim:
+
+```python
+from fastapi_multiauth import AuthenticationMethodReference as AMR, ForbiddenError
+
+
+async def require_hardware_key(claims: dict) -> dict:
+    if AMR.HARDWARE_KEY not in claims.get("amr", []):
+        raise ForbiddenError("A hardware key is required")
+    return claims
+```
+
+It holds the registered values only: compare a provider's own extensions as plain strings.
 
 ## Sources
 

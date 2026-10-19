@@ -10,7 +10,9 @@ from fastapi_multiauth import (
     HTTPBasicAuth,
     HTTPBearerAuth,
     APIKeyCookieAuth,
+    AuthenticationMethodReference,
     ForbiddenError,
+    InsufficientAuthenticationError,
     JWTValidator,
     MultiAuth,
     OAuth2AuthorizationCodeBearerAuth,
@@ -78,6 +80,10 @@ from fastapi_multiauth.oauth import (
 
 ## ::: fastapi_multiauth.JWTValidator
 
+## Claims
+
+## ::: fastapi_multiauth.AuthenticationMethodReference
+
 ## Introspection
 
 ## ::: fastapi_multiauth.auth_surface
@@ -101,6 +107,8 @@ from fastapi_multiauth.oauth import (
 ## ::: fastapi_multiauth.UnauthorizedError
 
 ## ::: fastapi_multiauth.ForbiddenError
+
+## ::: fastapi_multiauth.InsufficientAuthenticationError
 
 ## ::: fastapi_multiauth.StaleCredentialError
 
