@@ -1,4 +1,4 @@
-"""OpenID Connect ID token validation (OIDC Core §3.1.3.7), needs the ``jwt`` extra."""
+"""OpenID Connect ID token validation (OIDC Core §3.1.3.7), needs the `jwt` extra."""
 
 import functools
 import hmac
@@ -29,7 +29,7 @@ def _key_set(jwks_uri: str, algorithms: tuple[str, ...], timeout: float) -> _JWK
 
 
 def _check_at_hash(pyjwt: Any, alg: str, claim: Any, access_token: str) -> None:
-    """Refuse an ID token whose ``at_hash`` does not bind *access_token*."""
+    """Refuse an ID token whose `at_hash` does not bind `access_token`."""
     if not isinstance(claim, str):
         raise OAuthIDTokenError("ID token has no at_hash to bind the access token")
     try:
@@ -57,40 +57,34 @@ async def oauth_validate_id_token(
     leeway: float = 0.0,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
-    """Validate an ID token from :func:`oauth_exchange_code` and return its claims.
+    """Validate an OpenID Connect ID token and return its claims.
 
-    Requires the ``jwt`` extra on top of ``oauth``. The provider's JWKS is
-    fetched, cached and refreshed on key rotation exactly as
-    :class:`~fastapi_multiauth.JWTValidator` does it.
+    Needs the `jwt` extra too. Checks the signature against the provider's
+    keys (cached as `JWTValidator` does), `iss`, `aud`, `azp`, `exp`,
+    `iat` and `sub` ([OIDC Core 3.1.3.7](https://openid.net/specs/openid-connect-core-1_0.html#IDTokenValidation)).
 
     Args:
-        id_token: The ``id_token`` field of the token response.
-        issuer: Expected ``iss``, compared exactly (``OIDCEndpoints.issuer``).
-        jwks_uri: HTTPS URL of the provider's JWKS (``OIDCEndpoints.jwks_uri``).
-        client_id: This client's ID: it must be in ``aud``, and equal ``azp``
-            when the token carries one.
-        nonce: The nonce sent with the authorization redirect. When given, the
-            token must carry the same value; an empty string (a session miss)
-            never matches. ``None`` skips the check.
-        access_token: The access token issued alongside. When given, the token
-            must carry an ``at_hash`` that matches it; omit it for providers
-            that do not emit ``at_hash`` on the code flow.
-        algorithms: Accepted signature algorithms. Symmetric (``HS*``)
-            algorithms are rejected.
-        leeway: Clock-skew tolerance in seconds for ``exp`` and ``iat``.
-        timeout: Timeout in seconds for the JWKS request.
+        id_token: The `id_token` of the token response.
+        issuer: Expected `iss`, compared exactly (`OIDCEndpoints.issuer`).
+        jwks_uri: HTTPS URL of the provider's keys (`OIDCEndpoints.jwks_uri`).
+        client_id: Your client id: it must be in `aud`, and equal `azp`
+            when the token has one.
+        nonce: The nonce sent with the login, compared in constant time.
+            An empty string never matches; `None` skips the check.
+        access_token: The access token issued alongside, checked against
+            the token's `at_hash`. Omit it if the provider sends no `at_hash`.
+        algorithms: Accepted algorithms; `HS*` is refused.
+        leeway: Clock-skew tolerance in seconds for `exp` and `iat`.
+        timeout: Timeout of the key fetch, in seconds.
 
     Returns:
         The verified claims.
 
     Raises:
-        ValueError: If *jwks_uri* is not HTTPS, *issuer* or *client_id* is
-            empty, or *algorithms* is empty or holds an ``HS*`` algorithm.
-        OAuthIDTokenError: If the token is malformed, signed with an unknown
-            key or a bad signature, has the wrong ``iss``/``aud``/``azp``, is
-            expired or issued in the future, lacks ``sub``, or fails the
-            ``nonce`` or ``at_hash`` check; also when the JWKS cannot be fetched
-            and no key is cached.
+        ValueError: If `jwks_uri` is not HTTPS, `issuer` or `client_id` is
+            empty, or `algorithms` is empty or includes `HS*`.
+        OAuthIDTokenError: If any check fails, or the keys cannot be
+            fetched and none are cached.
     """
     pyjwt = _import_pyjwt()
     _require_https(jwks_uri, "OIDC jwks_uri")

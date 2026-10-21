@@ -1,10 +1,10 @@
-"""OAuth 2.0 / OIDC login-flow helpers (the ``oauth`` extra).
+"""OAuth 2.0 / OIDC login-flow helpers (the `oauth` extra).
 
-These obtain a credential through the browser authorization-code flow — a
-distinct concern from the request-time auth sources in the top-level package.
-``client`` holds the network operations (discovery, code exchange, userinfo);
-``id_token`` validates OpenID Connect ID tokens (needs the ``jwt`` extra too);
-``utils`` holds the pure helpers (state, nonce, PKCE, the authorization redirect).
+They obtain a credential through the browser authorization-code flow, unlike
+the sources in the top-level package, which check one on each request.
+`client` holds the network operations (discovery, code exchange, userinfo);
+`id_token` validates OpenID Connect ID tokens (needs the `jwt` extra too);
+`utils` holds the pure helpers (state, nonce, PKCE, the authorization redirect).
 """
 
 from ..exceptions import (

@@ -14,7 +14,7 @@ DEFAULT_TIMEOUT = 10.0
 
 
 def _require_https(url: str, description: str) -> str:
-    """Reject non-string URLs and URLs that would send credentials over plaintext HTTP."""
+    """Reject a URL that is not a string, or would send credentials over HTTP."""
     if not isinstance(url, str):
         raise ValueError(f"{description} must be a string URL (got {url!r})")  # noqa: TRY004
     parsed = urlsplit(url)
@@ -34,7 +34,7 @@ async def _get_json(
     headers: dict[str, str] | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> Any:
-    """GET *url* and decode the JSON body, mapping failures to *error_cls*."""
+    """GET `url` and decode the JSON body, mapping failures to `error_cls`."""
     async with (
         contextlib.nullcontext(client)
         if client is not None
