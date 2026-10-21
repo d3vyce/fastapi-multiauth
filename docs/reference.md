@@ -1,19 +1,23 @@
-# API Reference
+---
+icon: lucide/file-search
+---
 
-The auth sources, validators, token helpers, and core exceptions import directly from `fastapi_multiauth`:
+# API reference
+
+Everything below `fastapi_multiauth` is importable from the package root:
 
 ```python
 from fastapi_multiauth import (
+    APIKeyCookieAuth,
     APIKeyHeaderAuth,
     APIKeyQueryAuth,
     AuthSource,
-    HTTPBasicAuth,
-    HTTPBearerAuth,
-    APIKeyCookieAuth,
     AuthenticationMethodReference,
     ForbiddenError,
+    HTTPBasicAuth,
+    HTTPBearerAuth,
     InsufficientAuthenticationError,
-    JWTValidator,
+    JWTValidator,  # needs the jwt extra at construction
     MultiAuth,
     OAuth2AuthorizationCodeBearerAuth,
     OAuth2PasswordBearerAuth,
@@ -30,7 +34,7 @@ from fastapi_multiauth import (
 )
 ```
 
-The OAuth 2.0 / OIDC login-flow helpers are a separate concern: they obtain credentials via the browser redirect flow rather than validating credentials on an incoming request, and they require the `oauth` extra. They live in the `fastapi_multiauth.oauth` namespace:
+The OAuth login helpers live in `fastapi_multiauth.oauth` and need the `oauth` extra:
 
 ```python
 from fastapi_multiauth.oauth import (
@@ -56,6 +60,8 @@ from fastapi_multiauth.oauth import (
 
 ## Sources
 
+Request-time authentication dependencies. Guide: [the sources](guide/index.md#the-sources).
+
 ## ::: fastapi_multiauth.AuthSource
 
 ## ::: fastapi_multiauth.HTTPBearerAuth
@@ -78,13 +84,19 @@ from fastapi_multiauth.oauth import (
 
 ## Validators
 
+Ready-made validators to pass to a source. Guide: [JWT and OAuth 2.0 tokens](guide/jwt-and-oauth2.md).
+
 ## ::: fastapi_multiauth.JWTValidator
 
 ## Claims
 
+Guide: [step-up authentication](guide/step-up.md#strong-login-stepped_up).
+
 ## ::: fastapi_multiauth.AuthenticationMethodReference
 
 ## Introspection
+
+Guide: [auditing the auth surface](guide/auditing.md).
 
 ## ::: fastapi_multiauth.auth_surface
 
@@ -93,6 +105,8 @@ from fastapi_multiauth.oauth import (
 ## ::: fastapi_multiauth.SchemeRequirement
 
 ## Token helpers
+
+Guide: [issuing and storing tokens](guide/bearer-tokens.md#issuing-and-storing-tokens).
 
 ## ::: fastapi_multiauth.hash_token
 
@@ -104,6 +118,8 @@ from fastapi_multiauth.oauth import (
 
 ## Exceptions
 
+Guide: [status codes](security-model.md#status-codes).
+
 ## ::: fastapi_multiauth.UnauthorizedError
 
 ## ::: fastapi_multiauth.ForbiddenError
@@ -114,29 +130,11 @@ from fastapi_multiauth.oauth import (
 
 ## OAuth helpers
 
-The OAuth login-flow helpers live in the `fastapi_multiauth.oauth` namespace and require the `oauth` extra (`pip install fastapi-multiauth[oauth]`). See [OAuth 2.0 / OIDC login](oauth.md) for the walkthrough.
-
-## ::: fastapi_multiauth.oauth.OAuthError
-
-## ::: fastapi_multiauth.oauth.OAuthDiscoveryError
-
-## ::: fastapi_multiauth.oauth.OAuthStateError
-
-## ::: fastapi_multiauth.oauth.OAuthExchangeError
-
-## ::: fastapi_multiauth.oauth.OAuthUserinfoError
-
-## ::: fastapi_multiauth.oauth.OAuthIDTokenError
-
-## ::: fastapi_multiauth.oauth.OIDCEndpoints
+The login-flow helpers in `fastapi_multiauth.oauth`. Guide: [OAuth login flow](guide/oauth-login.md).
 
 ## ::: fastapi_multiauth.oauth.oauth_resolve_provider_urls
 
-## ::: fastapi_multiauth.oauth.oauth_exchange_code
-
-## ::: fastapi_multiauth.oauth.oauth_fetch_userinfo
-
-## ::: fastapi_multiauth.oauth.oauth_validate_id_token
+## ::: fastapi_multiauth.oauth.OIDCEndpoints
 
 ## ::: fastapi_multiauth.oauth.oauth_generate_state_token
 
@@ -149,3 +147,21 @@ The OAuth login-flow helpers live in the `fastapi_multiauth.oauth` namespace and
 ## ::: fastapi_multiauth.oauth.oauth_encode_state
 
 ## ::: fastapi_multiauth.oauth.oauth_decode_state
+
+## ::: fastapi_multiauth.oauth.oauth_exchange_code
+
+## ::: fastapi_multiauth.oauth.oauth_fetch_userinfo
+
+## ::: fastapi_multiauth.oauth.oauth_validate_id_token
+
+## ::: fastapi_multiauth.oauth.OAuthError
+
+## ::: fastapi_multiauth.oauth.OAuthStateError
+
+## ::: fastapi_multiauth.oauth.OAuthDiscoveryError
+
+## ::: fastapi_multiauth.oauth.OAuthExchangeError
+
+## ::: fastapi_multiauth.oauth.OAuthUserinfoError
+
+## ::: fastapi_multiauth.oauth.OAuthIDTokenError

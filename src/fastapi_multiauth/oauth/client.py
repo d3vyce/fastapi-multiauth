@@ -26,10 +26,10 @@ TokenEndpointAuthMethod = Literal["client_secret_post", "client_secret_basic"]
 
 
 class OIDCEndpoints(NamedTuple):
-    """Validated endpoint URLs from an OIDC discovery document.
+    """Endpoints read from a provider's discovery document.
 
-    All URLs are HTTPS-checked (loopback hosts excepted). Optional fields are
-    ``None`` when the provider does not advertise them.
+    Every URL has been checked to be HTTPS (loopback hosts excepted).
+    Optional fields are `None` when the provider does not advertise them.
     """
 
     authorization_endpoint: str
@@ -66,7 +66,7 @@ def _validate_issuer(discovery_url: str, issuer: Any) -> None:
 
 @functools.lru_cache(maxsize=1)
 def _import_httpx_oauth() -> Any:
-    """Import ``httpx_oauth.oauth2`` lazily (the optional ``oauth`` extra)."""
+    """Import `httpx_oauth.oauth2` lazily (the optional `oauth` extra)."""
     try:
         from httpx_oauth import oauth2
     except ImportError:  # pragma: no cover
@@ -76,7 +76,7 @@ def _import_httpx_oauth() -> Any:
 
 @functools.lru_cache(maxsize=1)
 def _oauth2_client_class() -> type:
-    """Return an httpx-oauth ``OAuth2`` subclass with an explicit timeout."""
+    """Return an httpx-oauth `OAuth2` subclass with an explicit timeout."""
 
     class _TimeoutOAuth2(_import_httpx_oauth().OAuth2):
         """OAuth2 client whose HTTP calls run under an explicit timeout."""
@@ -117,22 +117,22 @@ async def oauth_resolve_provider_urls(
     discovery_url: str,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> OIDCEndpoints:
-    """Fetch the OIDC discovery document and return its validated endpoints.
+    """Fetch a provider's discovery document and return its endpoints.
 
-    Cached for one hour. The discovery URL must come from configuration, never
-    from request input (SSRF / cache-poisoning).
+    Results are cached for an hour. The URL must come from your
+    configuration, never from the request.
 
     Args:
-        discovery_url: Provider's openid-configuration URL.
-        timeout: Discovery request timeout in seconds.
+        discovery_url: HTTPS URL of the provider's discovery document.
+        timeout: Request timeout in seconds.
 
     Returns:
-        Validated :class:`OIDCEndpoints`; optional fields are ``None`` when absent.
+        The provider's endpoints.
 
     Raises:
-        ValueError: If *discovery_url* is not HTTPS.
-        OAuthDiscoveryError: If the document is unreachable, malformed, or
-            advertises non-HTTPS endpoints or a mismatched issuer.
+        ValueError: If `discovery_url` is not HTTPS.
+        OAuthDiscoveryError: If the document cannot be fetched, is
+            malformed, lists a non-HTTPS endpoint, or names another issuer.
     """
     _require_https(discovery_url, "OIDC discovery URL")
     cfg = await _get_json(
@@ -177,40 +177,38 @@ async def oauth_exchange_code(
     redirect_uri: str,
     required_scopes: str | None = None,
     code_verifier: str | None = None,
-    token_endpoint_auth_method: TokenEndpointAuthMethod = "client_secret_post",  # noqa: S107 — method name, not a secret
+    token_endpoint_auth_method: TokenEndpointAuthMethod = "client_secret_post",  # noqa: S107 (a method name, not a secret)
     timeout: float = DEFAULT_TIMEOUT,
     client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
-    """Exchange an authorization code for tokens and return the token response.
+    """Exchange an authorization code for tokens.
 
-    Delegates the exchange (including PKCE) to httpx-oauth (the ``oauth`` extra).
+    The exchange itself, PKCE included, is done by httpx-oauth.
 
     Args:
-        token_url: Provider's token endpoint.
-        code: Authorization code from the provider's callback.
-        client_id: OAuth application client ID.
-        client_secret: OAuth application client secret.
-        redirect_uri: Redirect URI used in the authorization request.
-        required_scopes: Space-separated scopes that must be present in the
-            token response (RFC 6749 §3.3).
-        code_verifier: PKCE code verifier matching the challenge sent earlier
-            (from :func:`~fastapi_multiauth.oauth.oauth_generate_pkce_pair`).
-        token_endpoint_auth_method: How credentials are sent — in the POST body
-            (``client_secret_post``, default) or as a Basic header.
-        timeout: Timeout in seconds for the token request. Ignored when
-            *client* is provided.
-        client: Optional ``httpx.AsyncClient`` to reuse (connection pooling
-            across the login flow). Borrowed, not closed; its own configuration
-            (timeouts included) governs the request.
+        token_url: HTTPS URL of the provider's token endpoint.
+        code: The `code` query parameter of the callback.
+        client_id: Your application's client id.
+        client_secret: Your application's client secret.
+        redirect_uri: The redirect URI sent with the authorization request.
+        required_scopes: Space-separated scopes the grant must include.
+        code_verifier: PKCE verifier from `oauth_generate_pkce_pair()`.
+        token_endpoint_auth_method: Send the client credentials in the
+            request body (`client_secret_post`) or as HTTP Basic
+            (`client_secret_basic`).
+        timeout: Request timeout in seconds, unless `client` is given.
+        client: An `httpx.AsyncClient` to reuse. It is not closed, and its
+            own settings apply.
 
     Returns:
-        The full token response as a ``dict`` (``access_token`` plus whatever
-        else the provider returned).
+        The provider's token response: `access_token` and whatever else
+        was granted. An `id_token` in it is unverified until
+        `oauth_validate_id_token()` checks it.
 
     Raises:
-        ValueError: If *token_url* is not HTTPS.
-        OAuthExchangeError: If the exchange is rejected or fails, grants a
-            non-bearer token, or omits a required scope.
+        ValueError: If `token_url` is not HTTPS.
+        OAuthExchangeError: If the provider refuses or the request fails,
+            the token is not a bearer token, or a required scope is missing.
     """
     _require_https(token_url, "OAuth token_url")
 
@@ -248,23 +246,21 @@ async def oauth_fetch_userinfo(
     timeout: float = DEFAULT_TIMEOUT,
     client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
-    """Fetch the userinfo payload with a bearer access token.
+    """Fetch the user's profile from the userinfo endpoint.
 
     Args:
-        userinfo_url: Provider's userinfo endpoint.
-        access_token: Access token from :func:`oauth_exchange_code`.
-        timeout: Timeout in seconds for the userinfo request. Ignored when
-            *client* is provided.
-        client: Optional ``httpx.AsyncClient`` to reuse (connection pooling
-            across the login flow). Borrowed, not closed; its own configuration
-            (timeouts included) governs the request.
+        userinfo_url: HTTPS URL of the provider's userinfo endpoint.
+        access_token: Access token from `oauth_exchange_code()`.
+        timeout: Request timeout in seconds, unless `client` is given.
+        client: An `httpx.AsyncClient` to reuse. It is not closed, and its
+            own settings apply.
 
     Returns:
-        The JSON payload returned by the userinfo endpoint as a plain ``dict``.
+        The JSON profile returned by the provider.
 
     Raises:
-        ValueError: If *userinfo_url* is not HTTPS.
-        OAuthUserinfoError: If the endpoint fails or does not return JSON.
+        ValueError: If `userinfo_url` is not HTTPS.
+        OAuthUserinfoError: If the request fails or does not return JSON.
     """
     _require_https(userinfo_url, "OAuth userinfo_url")
     return await _get_json(

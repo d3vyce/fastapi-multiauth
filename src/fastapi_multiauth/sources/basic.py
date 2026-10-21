@@ -14,7 +14,7 @@ from ..utils import authorization_credential, refusal
 
 
 def _basic_challenge(realm: str | None) -> str:
-    """Build the ``WWW-Authenticate`` challenge, escaping *realm* (RFC 7230 §3.2.6)."""
+    """Build the `WWW-Authenticate` challenge, escaping `realm` (RFC 7230 §3.2.6)."""
     if realm is None:
         return "Basic"
     if not (realm.isascii() and realm.isprintable()):
@@ -28,19 +28,19 @@ def _basic_challenge(realm: str | None) -> str:
 
 
 class HTTPBasicAuth(ValidatedAuthSource):
-    """HTTP Basic authentication source (wraps ``HTTPBasic`` for OpenAPI, RFC 7617).
+    """Authentication source for HTTP Basic credentials.
 
-    The validator is called as ``await validator(username, password, **kwargs)``;
-    compare the password in constant time (``secrets.compare_digest``).
+    Decodes the header as [RFC 7617](https://datatracker.ietf.org/doc/html/rfc7617)
+    defines it and calls the validator with `username, password`. Compare secrets with
+    `secrets.compare_digest`, never `==`.
 
     Args:
-        validator: Sync or async callable receiving ``(username, password)`` and
-            returning the identity; raises
-            :class:`~fastapi_multiauth.exceptions.UnauthorizedError` on failure.
-        realm: Optional protection-space name for the ``WWW-Authenticate``.
-        scheme_name: OpenAPI security scheme name (default ``HTTPBasic``).
-        description: Optional prose for the OpenAPI security scheme object.
-        **kwargs: Extra keyword arguments forwarded to the validator on every call.
+        validator: Sync or async callable taking `username, password` and
+            returning the identity, or raising to refuse.
+        realm: Realm sent in the `WWW-Authenticate` challenge.
+        scheme_name: Name of the security scheme in OpenAPI, `HTTPBasic` by default.
+        description: Description of the security scheme in OpenAPI.
+        **kwargs: Keyword arguments passed to the validator on every call.
     """
 
     def __init__(
@@ -64,14 +64,14 @@ class HTTPBasicAuth(ValidatedAuthSource):
         )
 
     def www_authenticate(self) -> str:
-        """``Basic`` challenge, with the realm when configured (RFC 7617 §2)."""
+        """Return the `Basic` challenge, with the realm when configured."""
         return self._challenge
 
     async def extract(self, request: HTTPConnection) -> str | None:
-        """Return the base64 credentials blob, or ``None`` when absent or empty.
+        """Return the encoded credentials, or `None` when absent or empty.
 
-        The ``Basic`` scheme is matched case-insensitively; decoding and the
-        split happen in :meth:`authenticate`, so a malformed blob is a 401.
+        Decoding happens in `authenticate_scoped()`, so a malformed value is a
+        401 rather than a missing credential.
         """
         return authorization_credential(request, "basic")
 
@@ -82,7 +82,7 @@ class HTTPBasicAuth(ValidatedAuthSource):
         *,
         request: HTTPConnection | None = None,
     ) -> Any:
-        """Decode the blob, forwarding route-declared scopes to the validator."""
+        """Decode the credentials, then pass them on to the validator."""
         try:
             decoded = base64.b64decode(credential, validate=True).decode("utf-8")
         except ValueError:  # covers binascii.Error and UnicodeDecodeError
