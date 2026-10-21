@@ -52,7 +52,7 @@ def _reject_reserved_kwargs(kwargs: dict[str, Any]) -> None:
 def _signature_params(
     fn: Callable[..., Any],
 ) -> Mapping[str, inspect.Parameter] | None:
-    """The parameters of *fn*, ``None`` when it has no inspectable signature."""
+    """The parameters of `fn`, `None` when it has no inspectable signature."""
     try:
         return inspect.signature(fn).parameters
     except (TypeError, ValueError):
@@ -60,7 +60,7 @@ def _signature_params(
 
 
 def _accepts_kwarg(fn: Callable[..., Any], name: str) -> bool:
-    """Return whether *fn* declares a *name* parameter, ``False`` when uninspectable."""
+    """Return whether `fn` declares a `name` parameter, `False` when uninspectable."""
     parameters = _signature_params(fn)
     if parameters is None:
         return False
@@ -72,7 +72,7 @@ def _accepts_kwarg(fn: Callable[..., Any], name: str) -> bool:
 
 
 def _override_accepts_request(method: Callable[..., Any]) -> bool:
-    """Whether an ``authenticate_scoped`` override can be handed the request."""
+    """Whether an `authenticate_scoped` override can be handed the request."""
     parameters = _signature_params(method)
     if parameters is None:  # not introspectable: take the override at its word
         return True
@@ -125,7 +125,7 @@ def _step_up_optional_error(owner: object, guard: str) -> ValueError:
 
 
 def _step_up_optional_guard(owner: Any) -> str | None:
-    """The step-up guard that keeps *owner* from being optional, if any."""
+    """The step-up guard that keeps `owner` from being optional, if any."""
     if owner._freshness is not None:
         return "fresh()"
     if owner._assurance is not None:
@@ -134,7 +134,7 @@ def _step_up_optional_guard(owner: Any) -> str | None:
 
 
 def _validate_acr_values(acr_values: Sequence[str]) -> tuple[str, ...]:
-    """Check *acr_values* can travel in the step-up challenge's quoted string."""
+    """Check `acr_values` can travel in the step-up challenge's quoted string."""
     if isinstance(acr_values, str):
         raise TypeError("acr_values must be a sequence of strings, not a string")
     values = tuple(acr_values)
@@ -169,10 +169,10 @@ def _undeclared_scopes_error(
 
 
 class _DocOnlyScheme(SecurityBase):
-    """Inert stand-in for a ``fastapi.security`` scheme.
+    """Inert stand-in for a `fastapi.security` scheme.
 
     Carries the scheme's OpenAPI metadata but never executes its parsing, so
-    there is no second authentication path diverging from ``extract()``.
+    there is no second authentication path diverging from `extract()`.
     """
 
     def __init__(self, scheme: Any) -> None:
@@ -187,7 +187,7 @@ _SCHEME_CLASSES: dict[type, type] = {}
 
 
 def _carry_scheme(dependency: Any, scheme: SecurityBase) -> None:
-    """Make *dependency* itself the security scheme FastAPI puts in OpenAPI."""
+    """Make `dependency` itself the security scheme FastAPI puts in OpenAPI."""
     cls = type(dependency)
     promoted = _SCHEME_CLASSES.get(cls)
     if promoted is None:
@@ -203,36 +203,39 @@ def _carry_scheme(dependency: Any, scheme: SecurityBase) -> None:
 
 @dataclass(frozen=True, slots=True)
 class _Freshness:
-    """The window set by :meth:`AuthSource.fresh`."""
+    """The window set by `fresh()`."""
 
     max_age: float
     leeway: float
     read: Callable[[Any], Awaitable[Any]] | None
-    """Caller-supplied reader of the instant, ``None`` to use the source's own."""
+    """Caller-supplied reader of the instant, `None` to use the source's own."""
 
 
 @dataclass(frozen=True, slots=True)
 class _Assurance:
-    """The levels set by :meth:`AuthSource.stepped_up`."""
+    """The levels set by `stepped_up()`."""
 
     acr_values: tuple[str, ...]
     read: Callable[[Any], Awaitable[Any]]
-    """Caller-supplied reader of the identity's ``acr``."""
+    """Caller-supplied reader of the identity's `acr`."""
 
 
 class AuthSource(ABC):
-    """Abstract base class for authentication sources.
+    """Base class for authentication sources.
 
-    Subclasses implement :meth:`extract` and :meth:`authenticate`; both
-    ``Security(source)`` and ``MultiAuth`` route through that pair via
-    :meth:`dispatch`. Optional hooks: :meth:`www_authenticate` for the 401
-    challenge, :meth:`authenticated_at` for :meth:`fresh`.
+    Subclass it to read a credential the built-in sources do not handle.
+    Implement `extract()` and `authenticate()`; override `www_authenticate()`,
+    `authenticated_at()` or `authenticate_scoped()` when the source needs them.
+
+    Args:
+        scheme: A `fastapi.security` scheme describing the source in OpenAPI.
+            Only its metadata is used; `extract()` always reads the credential.
     """
 
     scheme: SecurityBase | None
     _optional: bool = False
     _scope_catalogue: dict[str, str] | None = None
-    """The scopes this source publishes to OpenAPI, ``None`` when it has none."""
+    """The scopes this source publishes to OpenAPI, `None` when it has none."""
     _freshness: _Freshness | None = None
     _assurance: _Assurance | None = None
     _logger: ClassVar[logging.Logger] = logger
@@ -245,12 +248,6 @@ class AuthSource(ABC):
             cls._logger = logging.getLogger(cls.__module__)
 
     def __init__(self, scheme: Any = None) -> None:
-        """Set up the FastAPI dependency signature.
-
-        Args:
-            scheme: Optional ``fastapi.security`` scheme; only its OpenAPI
-                metadata is used, extraction always goes through :meth:`extract`.
-        """
         self._scoped_takes_request = _override_accepts_request(
             type(self).authenticate_scoped
         )
@@ -274,20 +271,22 @@ class AuthSource(ABC):
 
     @abstractmethod
     async def extract(self, request: HTTPConnection) -> str | None:
-        """Extract the raw credential from the request without validating.
+        """Return the credential found in the request, without validating it.
 
-        Must return ``None`` — never an empty string — when the credential is
-        absent, empty, or does not belong to this source.
+        Return `None`, never an empty string, when the credential is absent,
+        empty, or belongs to another source: this is what lets `MultiAuth` try
+        the next source and `optional()` serve an anonymous caller.
         """
 
     @abstractmethod
     async def authenticate(self, credential: str) -> Any:
-        """Validate a credential and return the authenticated identity."""
+        """Validate a credential and return the identity, or raise to refuse it."""
 
     def www_authenticate(self) -> str | None:
-        """Challenge value for the ``WWW-Authenticate`` header on 401 responses.
+        """Return the `WWW-Authenticate` challenge sent with this source's 401s.
 
-        Returns ``None`` when the source has no HTTP auth scheme (cookies, API keys).
+        Returns:
+            The challenge, or `None` when the scheme has none (cookies, API keys).
         """
         return None
 
@@ -298,13 +297,17 @@ class AuthSource(ABC):
         *,
         request: HTTPConnection | None = None,
     ) -> Any:
-        """Validate a credential, enforcing the scopes declared on the route.
+        """Validate a credential against the scopes the route declares.
+
+        The default refuses any route that declares scopes, since
+        `authenticate()` cannot check them. Override it to enforce scopes or
+        to use the request.
 
         Args:
-            credential: The raw credential returned by :meth:`extract`.
-            scopes: The scopes the route declared, empty outside a route.
-            request: The request being authenticated, ``None`` when there is
-                none. Ignored here; override to use it.
+            credential: The credential returned by `extract()`.
+            scopes: The scopes declared on the route, empty when there are none.
+            request: The request or WebSocket being authenticated, `None`
+                when called outside one.
         """
         if scopes:  # fail closed: plain authenticate() cannot check scopes
             raise _unenforceable_scopes_error(self, scopes)
@@ -317,7 +320,7 @@ class AuthSource(ABC):
     async def _call_scoped(
         self, credential: str, scopes: list[str], *, request: HTTPConnection | None
     ) -> Any:
-        """Call :meth:`authenticate_scoped`, honouring overrides predating ``request``."""
+        """Call `authenticate_scoped()`, honouring overrides predating `request`."""
         if self._scoped_takes_request:
             return await self.authenticate_scoped(credential, scopes, request=request)
         return await self.authenticate_scoped(credential, scopes)
@@ -357,11 +360,12 @@ class AuthSource(ABC):
         )
 
     def optional(self) -> Self:
-        """Return a copy that yields ``None`` instead of 401 when no credential is sent.
+        """Return a copy that yields `None` instead of a 401 when no credential is sent.
+
+        A credential that is sent and refused still gets its 401 or 403.
 
         Raises:
-            ValueError: On a :meth:`fresh` or :meth:`stepped_up` copy:
-                anonymous has proven no factor.
+            ValueError: On a copy made by `fresh()` or `stepped_up()`.
         """
         guard = _step_up_optional_guard(self)
         if guard is not None:
@@ -371,11 +375,16 @@ class AuthSource(ABC):
         return clone
 
     def authenticated_at(self, credential: str) -> Any:
-        """When the factor behind *credential* was proven, for :meth:`fresh`.
+        """Return when a credential was proven, for `fresh()`.
 
-        Epoch seconds, a ``datetime``, or ``None`` when this source cannot date
-        the credential. Sources that can override this (a signed cookie carries
-        its mint time); the others pass ``authenticated_at=`` to :meth:`fresh`.
+        Override it in a source that can date its own credentials, as the
+        signed cookie does.
+
+        Args:
+            credential: The credential returned by `extract()`.
+
+        Returns:
+            Epoch seconds or a `datetime`, `None` when the source cannot tell.
         """
         return None
 
@@ -390,22 +399,25 @@ class AuthSource(ABC):
         authenticated_at: Callable[..., Any] | None = None,
         leeway: float = 0.0,
     ) -> Self:
-        """Return a copy that refuses a credential proven more than *max_age* ago.
+        """Return a copy that refuses a credential proven more than `max_age` ago.
+
+        The refusal is a 401 with the [RFC 9470](https://datatracker.ietf.org/doc/html/rfc9470)
+        `max_age` challenge. Composes with `stepped_up()` into one challenge.
 
         Args:
             max_age: Freshness window in seconds.
             authenticated_at: Sync or async callable taking the identity and
-                returning the instant the caller proved a factor, as epoch
-                seconds or a ``datetime`` (naive read as UTC). Required when the
-                source cannot date its own credentials, and overrides
-                :meth:`authenticated_at`. ``None`` refuses the request.
-            leeway: Clock-skew tolerance in seconds, either way: an instant
-                further than *leeway* in the future is refused too.
+                returning when it was proven, as epoch seconds or a `datetime`
+                (naive means UTC). Required when the source cannot date its
+                credentials, and overrides `authenticated_at()` when given.
+                A `None` result refuses the request.
+            leeway: Clock-skew tolerance in seconds. It applies both ways: an
+                instant further than `leeway` in the future is refused too.
 
         Raises:
-            ValueError: Non-positive or non-finite *max_age*, negative or
-                non-finite *leeway*, an :meth:`optional` copy, a copy that
-                already has a window, or no way to date the credential.
+            ValueError: If `max_age` is not positive, `leeway` is negative,
+                either is not finite, the copy is `optional()` or already has
+                a window, or the credential cannot be dated.
         """
         if not math.isfinite(max_age) or max_age <= 0:
             raise ValueError("max_age must be a positive, finite number of seconds")
@@ -437,26 +449,23 @@ class AuthSource(ABC):
         *,
         acr: Callable[..., Any],
     ) -> Self:
-        """Return a copy that refuses a credential not proven at one of *acr_values*.
+        """Return a copy that refuses a credential not proven at one of `acr_values`.
 
-        The `RFC 9470 <https://datatracker.ietf.org/doc/html/rfc9470>`_
-        counterpart of :meth:`fresh`: "authenticate more strongly" rather than
-        "authenticate again". Both compose, in either order, into one
-        challenge carrying ``acr_values`` and ``max_age``.
+        The refusal is a 401 with the [RFC 9470](https://datatracker.ietf.org/doc/html/rfc9470)
+        `acr_values` challenge. Composes with `fresh()` into one challenge.
 
         Args:
-            acr_values: The authentication context class references the route
-                accepts; any one of them passes.
+            acr_values: The accepted authentication context class references;
+                any one of them passes.
             acr: Sync or async callable taking the identity and returning the
-                ``acr`` the caller authenticated with, e.g.
-                ``lambda claims: claims.get("acr")``. Anything outside
-                *acr_values*, ``None`` included, refuses the request.
+                `acr` it achieved, e.g. `lambda claims: claims.get("acr")`.
+                Any other value, `None` included, refuses the request.
 
         Raises:
-            TypeError: If *acr_values* is a bare string.
-            ValueError: An empty *acr_values*, an entry that cannot travel in
-                the challenge (whitespace, quotes, backslashes, non-ASCII), an
-                :meth:`optional` copy, or a copy that already has levels.
+            TypeError: If `acr_values` is a bare string.
+            ValueError: If `acr_values` is empty or holds a value that cannot
+                be sent in a header (whitespace, quotes, backslashes,
+                non-ASCII), or the copy is `optional()` or already has levels.
         """
         values = _validate_acr_values(acr_values)
         if self._optional:
@@ -471,7 +480,7 @@ class AuthSource(ABC):
         return clone
 
     async def _enforce_step_up(self, credential: str, identity: Any) -> None:
-        """Refuse an identity outside the :meth:`fresh` window or :meth:`stepped_up` levels."""
+        """Refuse an identity outside the `fresh()` window or `stepped_up()` levels."""
         freshness, assurance = self._freshness, self._assurance
         if freshness is not None and not await self._is_fresh(
             freshness, credential, identity
@@ -525,13 +534,17 @@ class AuthSource(ABC):
             raise _undeclared_scopes_error(self, unknown, catalogue)
 
     async def dispatch(self, request: HTTPConnection, scopes: list[str]) -> Any:
-        """Extract the credential, then authenticate it with the route scopes.
+        """Authenticate a request: extract the credential, then validate it.
+
+        Args:
+            request: The request or WebSocket being authenticated.
+            scopes: The scopes declared on the route.
 
         Raises:
-            UnauthorizedError: When no credential is present. This source's
-                ``WWW-Authenticate`` challenge is attached to any 401 raised.
-            RuntimeError: When an :meth:`optional` copy meets a route that
-                declares scopes, which an anonymous caller could never satisfy.
+            UnauthorizedError: If no credential is present. Every 401 carries
+                this source's `WWW-Authenticate` challenge.
+            RuntimeError: If an `optional()` copy guards a route declaring
+                scopes, which an anonymous caller could never satisfy.
         """
         if scopes:
             if self._optional:
@@ -554,10 +567,16 @@ class AuthSource(ABC):
 
 
 class ValidatedAuthSource(AuthSource):
-    """Base for sources whose credential is checked by a user-supplied validator.
+    """Base class for sources that hand their credential to a validator.
 
-    Owns the shared validator plumbing (sync/async normalization, scope and
-    kwargs forwarding, :meth:`require`). Subclasses implement :meth:`extract`.
+    It provides the validator plumbing shared by the built-in sources:
+    sync and async validators, `require()`, and the `scopes`,
+    `session_id` and `request` arguments. Subclasses implement `extract()`.
+
+    Args:
+        validator: Sync or async callable returning the identity, or raising to refuse.
+        scheme: A `fastapi.security` scheme describing the source in OpenAPI.
+        **kwargs: Keyword arguments passed to the validator on every call.
     """
 
     def __init__(
@@ -567,15 +586,6 @@ class ValidatedAuthSource(AuthSource):
         /,
         **kwargs: Any,
     ) -> None:
-        """Bind the validator and its forwarded kwargs.
-
-        Args:
-            validator: Sync or async callable returning the identity.
-            scheme: Optional ``fastapi.security`` scheme for OpenAPI.
-            **kwargs: Extra keyword arguments forwarded to the validator on
-                every call. Names the library injects itself are reserved:
-                ``scopes``, ``session_id`` and ``request``.
-        """
         _reject_reserved_kwargs(kwargs)
         self._validator = ensure_async(validator)
         self._accepts_scopes = _accepts_kwarg(validator, "scopes")
@@ -602,7 +612,7 @@ class ValidatedAuthSource(AuthSource):
     async def authenticate(
         self, credential: str, *, request: HTTPConnection | None = None
     ) -> Any:
-        """Validate a credential and return the identity (no route scopes)."""
+        """Validate a credential and return the identity, ignoring route scopes."""
         return await self._call_scoped(credential, [], request=request)
 
     async def authenticate_scoped(
@@ -612,7 +622,7 @@ class ValidatedAuthSource(AuthSource):
         *,
         request: HTTPConnection | None = None,
     ) -> Any:
-        """Validate a credential, forwarding route scopes and request to the validator."""
+        """Validate a credential, passing the route's scopes and request on."""
         return await self._call_validator(credential, scopes=scopes, request=request)
 
     def _enforces_scopes(self) -> bool:
@@ -620,9 +630,14 @@ class ValidatedAuthSource(AuthSource):
         return self._accepts_scopes
 
     def require(self, **kwargs: Any) -> Self:
-        """Return a copy of this source with additional (or overriding) validator kwargs.
+        """Return a copy that passes extra keyword arguments to the validator.
 
-        Reserved names (``scopes``, ``session_id``, ``request``) are rejected here too.
+        Args:
+            **kwargs: Keyword arguments added to, or overriding, the source's own.
+
+        Raises:
+            ValueError: If a reserved name (`scopes`, `session_id`, `request`)
+                is passed.
         """
         _reject_reserved_kwargs(kwargs)
         clone = copy.copy(self)

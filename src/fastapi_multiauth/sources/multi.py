@@ -26,16 +26,17 @@ logger = logging.getLogger(__name__)
 
 
 class MultiAuth:
-    """Combine multiple authentication sources into a single callable.
+    """Combine several sources on one route.
 
-    Sources are tried in declaration order through the same ``extract()``/
-    ``authenticate()`` pair used by direct ``Security(source)`` access.
+    Sources are tried in order, and the first one that finds a credential
+    decides: an invalid credential is refused, not passed to the next
+    source. All sources appear in OpenAPI.
 
     Args:
-        *sources: Auth source instances to try in order.
+        *sources: The sources to try, in order.
 
     Raises:
-        TypeError: If a source is not an :class:`AuthSource` instance.
+        TypeError: If a source is not an `AuthSource`, or is a `MultiAuth`.
     """
 
     _optional: bool = False
@@ -99,15 +100,14 @@ class MultiAuth:
         )
 
     def www_authenticate(self) -> str | None:
-        """Combined challenge of all sources (RFC 9110 §11.6.1), or ``None``."""
+        """Return the challenges of all sources, joined, or `None` when none has one."""
         return self._www_authenticate
 
     def optional(self) -> Self:
-        """Return a copy that yields ``None`` when no source has a credential.
+        """Return a copy that yields `None` when no source finds a credential.
 
         Raises:
-            ValueError: On a :meth:`fresh` or :meth:`stepped_up` copy:
-                anonymous has proven no factor.
+            ValueError: On a copy made by `fresh()` or `stepped_up()`.
         """
         for source in self._sources:
             guard = _step_up_optional_guard(source)
@@ -124,14 +124,12 @@ class MultiAuth:
         authenticated_at: Callable[..., Any] | None = None,
         leeway: float = 0.0,
     ) -> "MultiAuth":
-        """Return a copy whose sources all require a recently proven credential.
+        """Return a copy whose sources all refuse a credential older than `max_age`.
 
-        Applies :meth:`AuthSource.fresh` to every source, so one that cannot be
-        dated refuses here instead of becoming the way around the window.
+        Applies `AuthSource.fresh()` to every source, with the same arguments.
 
         Raises:
-            ValueError: As :meth:`AuthSource.fresh`, naming the source that
-                cannot be dated or already has a window of its own.
+            ValueError: As `AuthSource.fresh()`, naming the source at fault.
         """
         if self._optional:
             raise _step_up_optional_error(self, "fresh()")
@@ -146,15 +144,13 @@ class MultiAuth:
         *,
         acr: Callable[..., Any],
     ) -> "MultiAuth":
-        """Return a copy whose sources all require one of *acr_values*.
+        """Return a copy whose sources all require one of `acr_values`.
 
-        Applies :meth:`AuthSource.stepped_up` to every source, so no source
-        becomes the way around the requirement.
+        Applies `AuthSource.stepped_up()` to every source, with the same arguments.
 
         Raises:
-            TypeError: As :meth:`AuthSource.stepped_up`.
-            ValueError: As :meth:`AuthSource.stepped_up`, naming the source
-                that already has levels of its own.
+            TypeError: As `AuthSource.stepped_up()`.
+            ValueError: As `AuthSource.stepped_up()`, naming the source at fault.
         """
         if self._optional:
             raise _step_up_optional_error(self, "stepped_up()")
@@ -163,13 +159,13 @@ class MultiAuth:
         )
 
     def _with_sources(self, sources: Iterable[AuthSource]) -> "MultiAuth":
-        """A new :class:`MultiAuth` over *sources*, carrying this one's flags."""
+        """A new `MultiAuth` over `sources`, carrying this one's flags."""
         clone = MultiAuth(*sources)
         clone._optional = self._optional
         return clone
 
     async def dispatch(self, request: HTTPConnection, scopes: list[str]) -> Any:
-        """Authenticate with the first source whose credential is present."""
+        """Authenticate with the first source that finds a credential."""
         if scopes:
             if self._optional:
                 raise _anonymous_scopes_error(self, scopes)
@@ -205,10 +201,11 @@ class MultiAuth:
         raise UnauthorizedError(headers=challenge_headers(self.www_authenticate()))
 
     async def __call__(self, **kwargs: Any) -> Any:
+        """Run as a FastAPI dependency."""
         return await self.dispatch(kwargs["request"], kwargs["security_scopes"].scopes)
 
     def require(self, **kwargs: Any) -> "MultiAuth":
-        """Return a new :class:`MultiAuth` with kwargs forwarded to each source."""
+        """Return a copy passing extra keyword arguments to every validator."""
         return self._with_sources(
             cast(Any, source).require(**kwargs)
             if hasattr(source, "require")

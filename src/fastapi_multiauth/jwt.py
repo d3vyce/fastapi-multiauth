@@ -1,4 +1,4 @@
-"""JWT validation built on PyJWT, for use as a ``HTTPBearerAuth`` validator."""
+"""JWT validation built on PyJWT, for use as a `HTTPBearerAuth` validator."""
 
 import enum
 import logging
@@ -20,7 +20,7 @@ _MIN_SECRET_BYTES = 32
 
 
 class AnyAudience(enum.Enum):
-    """Type of :attr:`JWTValidator.ANY_AUDIENCE`, the explicit ``aud`` opt-out."""
+    """Type of `JWTValidator.ANY_AUDIENCE`."""
 
     ANY = "any"
 
@@ -50,7 +50,7 @@ class _UnknownKey(Exception):
 
 
 def _reject_symmetric(algorithms: Sequence[str], url_param: str) -> None:
-    """Refuse ``HS*`` algorithms against a public JWKS (key confusion)."""
+    """Refuse `HS*` algorithms against a public JWKS (key confusion)."""
     if any(alg.upper().startswith("HS") for alg in algorithms):
         raise ValueError(
             f"symmetric (HS*) algorithms cannot be used with {url_param}: "
@@ -68,7 +68,7 @@ def _import_pyjwt() -> Any:
 
 
 def _default_alg(entry: dict[str, Any]) -> str | None:
-    """Best-effort default algorithm for a JWKS entry without ``alg``."""
+    """Best-effort default algorithm for a JWKS entry without `alg`."""
     kty = entry.get("kty")
     if kty == "EC":
         return _CRV_DEFAULT_ALG.get(entry.get("crv", ""))
@@ -79,7 +79,7 @@ class _JWKSKeySet:
     """The signing keys of one JWKS document, cached and refreshed on rotation.
 
     Args:
-        pyjwt: The imported ``jwt`` module.
+        pyjwt: The imported `jwt` module.
         url: HTTPS URL of the JWKS document.
         algorithms: Accepted signature algorithms; entries for any other
             algorithm are never loaded.
@@ -110,7 +110,7 @@ class _JWKSKeySet:
         self._refresh_lock = anyio.Lock()
 
     async def key_for_token(self, token: str) -> Any:
-        """The key that signed *token*, found by its header ``kid``.
+        """The key that signed `token`, found by its header `kid`.
 
         Raises:
             _MalformedToken: The token header does not parse.
@@ -146,7 +146,7 @@ class _JWKSKeySet:
     async def _refresh(self, force: bool = False) -> None:
         """Refetch the JWKS, coalescing concurrent and repeated refreshes.
 
-        At most one attempt per ``refresh_cooldown``; a failed fetch falls
+        At most one attempt per `refresh_cooldown`; a failed fetch falls
         back on cached keys, or raises when the cache is empty.
         """
         async with self._refresh_lock:
@@ -210,41 +210,39 @@ class _JWKSKeySet:
 
 
 class JWTValidator:
-    """Validate JWTs — plug directly into :class:`~fastapi_multiauth.HTTPBearerAuth`.
+    """Validator for JWTs, to pass to `HTTPBearerAuth` or an OAuth 2.0 source.
 
-    Requires the ``jwt`` extra. Configure exactly one of ``secret`` (symmetric
-    ``HS*``) or ``jwks_url`` (asymmetric, against the provider's JWKS).
+    Needs the `jwt` extra. Give either `secret` (tokens you sign) or
+    `jwks_url` (tokens from an identity provider). Keys from a JWKS are
+    cached and refreshed when the provider rotates them; if the provider
+    is down, cached keys keep working, and a cold start answers 503.
 
     Args:
-        secret: Symmetric key for ``HS*`` validation (at least 32 bytes).
-        jwks_url: HTTPS URL of the provider's JWKS document.
-        algorithms: Accepted signature algorithms. Defaults to ``["HS256"]``
-            in secret mode and ``["RS256", "ES256"]`` in JWKS mode. Symmetric
-            algorithms are rejected in JWKS mode (key-confusion risk).
-        audience: Expected ``aud`` claim value(s). Required in JWKS mode,
-            where the provider's keys also sign tokens for its other clients
-            and tenants; pass :attr:`ANY_AUDIENCE` to skip the check on
-            purpose. Unset in secret mode → ``aud`` not checked.
-        issuer: Expected ``iss`` claim value. Unset → ``iss`` not checked.
-        leeway: Clock-skew tolerance in seconds for time-based claims.
-        required_claims: Claims that must be present (default ``("exp",)``).
-        scopes_claim: Claim holding granted scopes — a space-separated string
-            (``scope``) or a list (``scp``, ``roles``). A valid token missing
-            a route-declared scope raises a 403.
-        claims_to_identity: Optional sync or async hook mapping verified claims
-            to a domain object. Defaults to returning the claims.
-        jwks_cache_ttl: JWKS cache lifetime in seconds (default 1 h).
-        jwks_refresh_cooldown: Minimum interval in seconds between JWKS fetch
-            attempts (default 30 s).
-        timeout: Timeout in seconds for the JWKS request.
+        secret: Shared HMAC key of at least 32 bytes.
+        jwks_url: HTTPS URL of the provider's public keys.
+        algorithms: Accepted algorithms; `["HS256"]` with a secret,
+            `["RS256", "ES256"]` with a JWKS, where `HS*` is refused.
+        audience: Expected `aud`. Required with a JWKS, since a provider
+            signs every application's tokens with the same keys; pass
+            `ANY_AUDIENCE` to skip the check on purpose.
+        issuer: Expected `iss`; not checked when unset.
+        leeway: Clock-skew tolerance in seconds for `exp`, `nbf` and `iat`.
+        required_claims: Claims every token must carry.
+        scopes_claim: Claim holding granted scopes: a space-separated string
+            (`scope`) or a list (`scp`, `roles`). A missing route scope is a 403.
+        claims_to_identity: Sync or async callable turning the verified
+            claims into your identity; the claims are returned otherwise.
+        jwks_cache_ttl: How long fetched keys are cached, in seconds.
+        jwks_refresh_cooldown: Minimum delay between key fetches, in seconds.
+        timeout: Timeout of the key fetch, in seconds.
 
     Raises:
-        ValueError: On an invalid configuration, including a JWKS mode
-            validator without ``audience``.
+        ValueError: On an invalid configuration, such as both or neither of
+            `secret` and `jwks_url`, a short secret, or a JWKS without `audience`.
     """
 
     ANY_AUDIENCE: ClassVar[AnyAudience] = AnyAudience.ANY
-    """Explicit ``audience`` opt-out: accept a token whatever its ``aud``."""
+    """Explicit `audience` opt-out: accept a token whatever its `aud`."""
 
     def __init__(
         self,
@@ -321,13 +319,12 @@ class JWTValidator:
         )
 
     async def __call__(self, token: str, scopes: list[str] | None = None) -> Any:
-        """Verify *token* and return the identity.
+        """Verify a token and return the identity.
 
         Raises:
-            UnauthorizedError: Invalid/expired signature or claims (401).
-            ForbiddenError: Valid token missing route-required scopes (403).
-            HTTPException: 503 when the JWKS cannot be fetched and no keys
-                are cached — the token cannot be checked either way.
+            UnauthorizedError: If the signature or a claim is invalid (401).
+            ForbiddenError: If the token lacks a scope the route requires (403).
+            HTTPException: 503 if the keys cannot be fetched and none are cached.
         """
         if self._key_set is None:
             key: Any = self._secret
@@ -373,7 +370,7 @@ class JWTValidator:
 
     @staticmethod
     async def _resolve_jwks_key(key_set: _JWKSKeySet, token: str) -> Any:
-        """Resolve the verification key for *token* from the cached JWKS."""
+        """Resolve the verification key for `token` from the cached JWKS."""
         try:
             return await key_set.key_for_token(token)
         except _MalformedToken:

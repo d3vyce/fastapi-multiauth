@@ -18,14 +18,14 @@ class SchemeRequirement:
     """One authentication scheme a route accepts, with the scopes it checks.
 
     Args:
-        scheme_name: OpenAPI security scheme name, ``None`` for a source
-            carrying no ``fastapi.security`` scheme.
-        source: Name of the class enforcing it, e.g. ``"HTTPBearerAuth"``.
-        scopes: Scopes this scheme must check, in declaration order. A
-            dependency declared in several positions carries the union.
-        optional: Whether an absent credential is accepted, ``None`` when the
-            scheme does not say. Read from ``auto_error``, and always ``False``
-            inside a required :class:`MultiAuth`.
+        scheme_name: OpenAPI security scheme name, `None` for a source
+            without a `fastapi.security` scheme.
+        source: Class name of the source, e.g. `"HTTPBearerAuth"`.
+        scopes: Scopes this scheme checks, in declaration order; the union
+            when the dependency is declared in several places.
+        optional: Whether a request without a credential passes, `None`
+            when the scheme does not say. Always `False` inside a
+            required `MultiAuth`.
     """
 
     scheme_name: str | None
@@ -39,22 +39,20 @@ class RouteAuth:
     """What guards one route.
 
     Args:
-        path: Full routed path, including any router prefix.
+        path: Full path of the route, router prefix included.
         methods: HTTP methods, sorted; empty for a WebSocket route.
-        alternatives: Ways to satisfy the route, OR-ed; the schemes within one
-            are AND-ed. A :class:`MultiAuth` contributes one entry per source,
-            separate ``Security()`` dependencies share an entry, and
-            dependencies that resolve alike count once. Empty when nothing
-            guards the route.
-        scopes: Every scope named on the route, first-seen order. An inventory
-            for filtering, not a requirement: what one credential must carry is
-            the scope list of the entry in ``alternatives`` it satisfies.
-        unguarded: Whether a credential-less request reaches the endpoint. True
-            when nothing guards the route, and when every AND-ed position
-            offers a scheme that does not refuse it. An ``optional`` of
-            ``None`` counts as one, so an unreadable guard is reported.
-        include_in_schema: Whether the route appears in ``app.openapi()``.
-            ``False`` for ``include_in_schema=False`` and for WebSocket routes.
+        alternatives: The ways to satisfy the route. Entries are
+            alternatives (OR); the schemes inside one entry must all pass
+            (AND). A `MultiAuth` gives one entry per source; separate
+            `Security()` dependencies share one, and dependencies that
+            resolve alike count once. Empty when nothing guards the route.
+        scopes: Every scope named on the route, in first-seen order. What a
+            credential must carry is the scope list of its own entry.
+        unguarded: Whether a request without a credential reaches the
+            route, including through `optional()` sources or a scheme
+            that does not say (`optional=None`).
+        include_in_schema: Whether the route appears in `app.openapi()`;
+            `False` for WebSocket routes.
     """
 
     path: str
@@ -66,12 +64,12 @@ class RouteAuth:
 
 
 def _dedupe(scopes: Iterable[str]) -> tuple[str, ...]:
-    """Drop repeats from *scopes*, keeping first-seen order."""
+    """Drop repeats from `scopes`, keeping first-seen order."""
     return tuple(dict.fromkeys(scopes))
 
 
 def _declared_scopes(dependant: Dependant) -> tuple[str, ...]:
-    """Return the scopes reaching *dependant* from the route and its parents."""
+    """Return the scopes reaching `dependant` from the route and its parents."""
     return _dedupe(
         (
             *(dependant.parent_oauth_scopes or ()),
@@ -85,7 +83,7 @@ def _requirements(
     scopes: tuple[str, ...],
     optional: bool | None,
 ) -> tuple[SchemeRequirement, ...]:
-    """Describe each of *sources* as a requirement carrying *scopes*."""
+    """Describe each of `sources` as a requirement carrying `scopes`."""
     return tuple(
         SchemeRequirement(
             scheme_name=getattr(source, "scheme_name", None),
@@ -98,7 +96,7 @@ def _requirements(
 
 
 def _is_optional(source: AuthSource | MultiAuth | SecurityBase) -> bool | None:
-    """Say whether *source* on its own lets a credential-less request through."""
+    """Say whether `source` on its own lets a credential-less request through."""
     if isinstance(source, (AuthSource, MultiAuth)):
         return source._optional
     auto_error = getattr(source, "auto_error", None)
@@ -106,7 +104,7 @@ def _is_optional(source: AuthSource | MultiAuth | SecurityBase) -> bool | None:
 
 
 def _may_admit_anonymous(requirement: SchemeRequirement) -> bool:
-    """Say whether *requirement* fails to refuse a credential-less request."""
+    """Say whether `requirement` fails to refuse a credential-less request."""
     return requirement.optional is not False
 
 
@@ -127,7 +125,7 @@ class _Unit:
 
 
 def _positions(dependant: Dependant) -> Iterator[tuple[_Resolution, _Unit]]:
-    """Yield each security dependency below *dependant*, keyed by resolution.
+    """Yield each security dependency below `dependant`, keyed by resolution.
 
     Dependencies sharing a key resolve alike, so their scopes fold together.
     """
@@ -164,7 +162,7 @@ def _auth_units(dependant: Dependant) -> list[tuple[SchemeRequirement, ...]]:
 
 
 def _effective_route(context: Any) -> Any:
-    """Return *context*, or the merged route 0.137.2 to 0.143.0 leave off it."""
+    """Return `context`, or the merged route 0.137.2 to 0.143.0 leave off it."""
     if getattr(context, "dependant", None) is not None:
         return context
     effective = getattr(
@@ -182,16 +180,18 @@ def _routes_of(app: FastAPI) -> Iterable[Any]:
 
 
 def auth_surface(app: FastAPI) -> list[RouteAuth]:
-    """Report the authentication requirements of every route in *app*.
+    """Report what guards every route of `app`.
+
+    Reads the routes themselves rather than the OpenAPI schema, so hidden
+    routes are included.
 
     Args:
-        app: The application to inspect. A mounted sub-application is opaque,
-            so call this on the sub-application as well.
+        app: The application to inspect. Mounted sub-applications are not
+            inspected; call this on them separately.
 
     Returns:
-        One :class:`RouteAuth` per routed endpoint, in registration order.
-        WebSocket routes are included with no methods; routes carrying no
-        dependency tree, such as ``/docs``, are skipped.
+        One `RouteAuth` per route, in registration order. Routes without
+        dependencies, such as `/docs`, are skipped.
     """
     surface: list[RouteAuth] = []
     for route in _routes_of(app):

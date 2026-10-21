@@ -31,30 +31,29 @@ def _b64url(data: bytes) -> str:
 
 
 def oauth_generate_state_token() -> str:
-    """Generate a cryptographically random CSRF token for the OAuth ``state`` parameter."""
+    """Generate a random CSRF token for the OAuth `state` parameter."""
     return secrets.token_urlsafe(32)
 
 
 def oauth_generate_nonce() -> str:
-    """Generate a cryptographically random OpenID Connect ``nonce``.
+    """Generate a random OpenID Connect `nonce`.
 
-    Store it server-side next to the state token, send it with
-    :func:`oauth_build_authorization_redirect`, and hand it back to
-    :func:`~fastapi_multiauth.oauth.oauth_validate_id_token` on the callback,
-    which refuses an ID token minted for another authorization request.
+    Store it next to the state token, send it with
+    `oauth_build_authorization_redirect()`, and pass it to
+    `oauth_validate_id_token()` on the callback.
     """
     return oauth_generate_state_token()
 
 
 def oauth_generate_pkce_pair() -> tuple[str, str]:
-    """Generate a PKCE ``(code_verifier, code_challenge)`` pair (RFC 7636, S256).
+    """Generate a PKCE verifier and its S256 challenge.
 
-    Store the verifier server-side and pass it back to
-    :func:`~fastapi_multiauth.oauth.oauth_exchange_code` on the callback.
+    See [RFC 7636](https://datatracker.ietf.org/doc/html/rfc7636). Send the
+    challenge with the redirect, keep the verifier server-side, and pass it
+    to `oauth_exchange_code()` on the callback.
 
     Returns:
-        A ``(code_verifier, code_challenge)`` tuple; the challenge is the
-        base64url SHA-256 of the verifier.
+        A `(code_verifier, code_challenge)` tuple.
     """
     code_verifier = secrets.token_urlsafe(64)
     digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
@@ -72,28 +71,25 @@ def oauth_build_authorization_redirect(
     code_challenge: str | None = None,
     nonce: str | None = None,
 ) -> RedirectResponse:
-    """Return an OAuth 2.0 authorization ``RedirectResponse`` (303 See Other).
+    """Return the redirect that sends the user to the provider's login page.
 
     Args:
-        authorization_url: Provider's authorization endpoint.
-        client_id: OAuth application client ID.
-        scopes: Space-separated list of requested scopes.
-        redirect_uri: URI the provider should redirect back to.
-        destination: Post-login URL (embedded in ``state``).
-        state_token: CSRF token from :func:`oauth_generate_state_token`; verify
-            it with :func:`oauth_decode_state` on the callback.
-        code_challenge: PKCE challenge from :func:`oauth_generate_pkce_pair`;
-            when set, ``code_challenge_method=S256`` is sent along.
-        nonce: OpenID Connect nonce from :func:`oauth_generate_nonce`; the
-            provider copies it into the ID token, checked by
-            :func:`~fastapi_multiauth.oauth.oauth_validate_id_token`.
+        authorization_url: HTTPS URL of the provider's authorization endpoint.
+        client_id: Your application's client id.
+        scopes: Space-separated scopes to request.
+        redirect_uri: Where the provider sends the user back.
+        destination: Where to send the user after login, carried in `state`.
+        state_token: CSRF token from `oauth_generate_state_token()`.
+        code_challenge: PKCE challenge from `oauth_generate_pkce_pair()`, sent
+            with `code_challenge_method=S256`.
+        nonce: OpenID Connect nonce from `oauth_generate_nonce()`.
 
     Returns:
-        A :class:`~fastapi.responses.RedirectResponse` to the provider's
-        authorization page, retaining any query string already present.
+        A 303 redirect to the provider, keeping any query string already
+        in `authorization_url`.
 
     Raises:
-        ValueError: If *authorization_url* is not HTTPS.
+        ValueError: If `authorization_url` is not HTTPS.
     """
     _require_https(authorization_url, "OAuth authorization_url")
     params = {
@@ -116,11 +112,13 @@ def oauth_build_authorization_redirect(
 
 
 def oauth_encode_state(url: str, state_token: str) -> str:
-    """Encode a destination URL and CSRF token into an OAuth ``state`` parameter.
+    """Encode a destination and a CSRF token into an OAuth `state` value.
+
+    `oauth_build_authorization_redirect()` calls it for you.
 
     Args:
-        url: Post-login destination URL.
-        state_token: CSRF token from :func:`oauth_generate_state_token`.
+        url: Where to send the user after login.
+        state_token: CSRF token from `oauth_generate_state_token()`.
     """
     payload = json.dumps({"n": state_token, "d": url}, separators=(",", ":"))
     return base64.urlsafe_b64encode(payload.encode()).decode()
@@ -130,7 +128,7 @@ def _destination_allowed(destination: str, allowed_hosts: Sequence[str]) -> bool
     """Check a decoded destination against the open-redirect allowlist."""
     # Browsers normalize backslashes to slashes ("/\evil.com" becomes a
     # scheme-relative redirect) and strip tabs/newlines before parsing
-    # ("/\t/evil.com" becomes "//evil.com") — reject control chars outright.
+    # ("/\t/evil.com" becomes "//evil.com"), so reject control chars outright.
     if "\\" in destination or any(ch <= " " for ch in destination):
         return False
     try:
@@ -147,7 +145,7 @@ def _destination_allowed(destination: str, allowed_hosts: Sequence[str]) -> bool
 def _verified_payload(
     state: str | None, expected_state_token: str
 ) -> dict[str, Any] | None:
-    """Decode *state* and return its payload when its token matches, else ``None``."""
+    """Decode `state` and return its payload when its token matches, else `None`."""
     if not state:
         return None
     try:
@@ -169,28 +167,25 @@ def oauth_decode_state(
     fallback: str,
     allowed_hosts: Sequence[str] | None = (),
 ) -> str:
-    """Decode and CSRF-verify an OAuth ``state`` parameter (constant-time).
+    """Verify the `state` of a callback and return the destination it carries.
 
-    The stored token is single-use: pop it from the session before this call,
-    so a captured callback cannot be replayed whether or not it verifies.
+    Pop the stored token from the session before calling this, so a
+    callback cannot be replayed. The comparison is constant-time.
 
     Args:
-        state: Raw ``state`` query parameter from the callback.
-        expected_state_token: Token stored before the authorization redirect.
-            An empty token (e.g. a session miss) never matches.
-        fallback: URL returned when ``state`` verifies but its destination is
-            missing, malformed, or refused by ``allowed_hosts``.
-        allowed_hosts: Open-redirect guard: the decoded destination must be a
-            relative path or an absolute http(s) URL whose host is listed. The
-            default (``()``) allows relative paths only; ``None`` disables the check.
+        state: The `state` query parameter of the callback.
+        expected_state_token: The token stored before the redirect. An
+            empty token never matches.
+        fallback: Returned when the destination is missing or refused.
+        allowed_hosts: Hosts allowed in an absolute destination. The
+            default allows relative paths only; `None` disables the check.
 
     Returns:
-        The destination URL embedded in ``state``, or ``fallback``.
+        The destination, or `fallback`.
 
     Raises:
-        OAuthStateError: If no token was stored, or ``state`` is absent,
-            malformed, or carries a different token. The callback did not come
-            from a redirect this session started: do not exchange the code.
+        OAuthStateError: If no token was stored, or `state` is missing,
+            malformed or carries another token. Do not exchange the code.
     """
     if not expected_state_token:
         raise OAuthStateError("no state token was stored for this session")

@@ -10,17 +10,14 @@ from ..abc import ValidatedAuthSource
 
 
 class APIKeyHeaderAuth(ValidatedAuthSource):
-    """API key header authentication source (wraps ``APIKeyHeader`` for OpenAPI).
-
-    The validator is called as ``await validator(api_key, **kwargs)``.
+    """Authentication source for an API key in a request header.
 
     Args:
-        name: HTTP header name that carries the API key (e.g. ``"X-API-Key"``).
-        validator: Sync or async callable returning the identity; raises
-            :class:`~fastapi_multiauth.exceptions.UnauthorizedError` on failure.
-        scheme_name: OpenAPI security scheme name (default ``APIKeyHeader_{name}``).
-        description: Optional prose for the OpenAPI security scheme object.
-        **kwargs: Extra keyword arguments forwarded to the validator on every call.
+        name: Header name, e.g. `"X-API-Key"`.
+        validator: Sync or async callable returning the identity, or raising to refuse.
+        scheme_name: Name of the security scheme in OpenAPI, `APIKeyHeader_{name}` by default.
+        description: Description of the security scheme in OpenAPI.
+        **kwargs: Keyword arguments passed to the validator on every call.
     """
 
     def __init__(
@@ -45,5 +42,5 @@ class APIKeyHeaderAuth(ValidatedAuthSource):
         )
 
     async def extract(self, request: HTTPConnection) -> str | None:
-        """Return the API key from the configured header, or ``None`` when absent or empty."""
+        """Return the header value, or `None` when absent or empty."""
         return request.headers.get(self._name) or None

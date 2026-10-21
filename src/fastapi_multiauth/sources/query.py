@@ -10,22 +10,18 @@ from ..abc import ValidatedAuthSource
 
 
 class APIKeyQueryAuth(ValidatedAuthSource):
-    """API key query-string authentication source (wraps ``APIKeyQuery`` for OpenAPI).
+    """Authentication source for an API key in the query string.
 
-    The validator is called as ``await validator(api_key, **kwargs)``.
-
-    .. warning::
-        Credentials in the query string leak into access logs, browser history,
-        and ``Referer`` headers. Prefer a header or cookie when you can; use this
-        only for clients that cannot set headers.
+    Warning:
+        Query strings end up in access logs, browser history and `Referer`
+        headers. Use this only for clients that cannot set a header.
 
     Args:
-        name: Query parameter name that carries the API key (e.g. ``"api_key"``).
-        validator: Sync or async callable returning the identity; raises
-            :class:`~fastapi_multiauth.exceptions.UnauthorizedError` on failure.
-        scheme_name: OpenAPI security scheme name (default ``APIKeyQuery_{name}``).
-        description: Optional prose for the OpenAPI security scheme object.
-        **kwargs: Extra keyword arguments forwarded to the validator on every call.
+        name: Query parameter name, e.g. `"api_key"`.
+        validator: Sync or async callable returning the identity, or raising to refuse.
+        scheme_name: Name of the security scheme in OpenAPI, `APIKeyQuery_{name}` by default.
+        description: Description of the security scheme in OpenAPI.
+        **kwargs: Keyword arguments passed to the validator on every call.
     """
 
     def __init__(
@@ -50,5 +46,5 @@ class APIKeyQueryAuth(ValidatedAuthSource):
         )
 
     async def extract(self, request: HTTPConnection) -> str | None:
-        """Return the API key from the configured query parameter, or ``None`` when absent or empty."""
+        """Return the query parameter value, or `None` when absent or empty."""
         return request.query_params.get(self._name) or None

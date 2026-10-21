@@ -22,7 +22,7 @@ SameSite = Literal["lax", "strict", "none"]
 
 
 def _normalize_secret_keys(secret_key: str | Sequence[str] | None) -> list[str]:
-    """Validate and normalize ``secret_key`` into a list of keys."""
+    """Validate and normalize `secret_key` into a list of keys."""
     if secret_key is None:
         return []
     keys = [secret_key] if isinstance(secret_key, str) else list(secret_key)
@@ -41,7 +41,7 @@ def _normalize_secret_keys(secret_key: str | Sequence[str] | None) -> list[str]:
 def _check_name_prefix(
     name: str, *, secure: bool, domain: str | None, path: str
 ) -> None:
-    """Refuse settings that make browsers drop a ``__Secure-``/``__Host-`` cookie."""
+    """Refuse settings that make browsers drop a `__Secure-`/`__Host-` cookie."""
     lowered = name.lower()
     if lowered.startswith(("__secure-", "__host-")) and not secure:
         raise ValueError(
@@ -56,7 +56,7 @@ def _check_name_prefix(
 
 
 def _precomputed_signer(keys: list[str], salt: str) -> TimestampSigner:
-    """A ``TimestampSigner`` deriving its keys once here instead of per ``unsign``."""
+    """A `TimestampSigner` deriving its keys once here instead of per `unsign`."""
     probe = TimestampSigner(keys, salt=salt, digest_method=hashlib.sha256)
     return TimestampSigner(
         [probe.derive_key(key) for key in keys],
@@ -66,37 +66,33 @@ def _precomputed_signer(keys: list[str], salt: str) -> TimestampSigner:
 
 
 class APIKeyCookieAuth(ValidatedAuthSource):
-    """Cookie-based authentication source (wraps ``APIKeyCookie`` for OpenAPI).
+    """Authentication source for cookies, signed into sessions with a `secret_key`.
 
-    When ``secret_key`` is set, the cookie is signed (HMAC-SHA256 with an
-    embedded timestamp, salted by the cookie name) for stateless, tamper-proof
-    sessions; otherwise the raw cookie value is passed through.
+    With a `secret_key`, the cookie is signed with HMAC-SHA256, bound to its
+    name, and expires after `ttl`: a session without a session table. The
+    validator receives the plain value once the signature checks out.
 
     Args:
-        name: Cookie name.
-        validator: Sync or async callable receiving the cookie value (plain,
-            after signature verification when signed) and returning the identity.
-        secret_key: One key or a sequence to rotate (first signs, all verify);
-            each at least 32 bytes. When ``None``, the cookie is not signed.
-        session_id: Mint a random id per :meth:`set_cookie` and inject it into
-            the validator as ``session_id``. Requires ``secret_key`` and a
-            validator declaring that parameter; changing it invalidates
-            existing cookies.
-        ttl: Cookie lifetime in seconds (default 24 h); also enforced
-            server-side when the cookie is signed.
-        secure: Set the ``Secure`` flag (default ``True``); disable only in local dev.
-        samesite: ``SameSite`` cookie attribute (default ``"lax"``).
-        domain: Optional ``Domain`` cookie attribute. Leave it unset to name
-            the cookie with the ``__Host-`` prefix, which a sibling subdomain
-            cannot shadow.
-        path: ``Path`` cookie attribute (default ``"/"``).
-        scheme_name: OpenAPI security scheme name (default ``APIKeyCookie_{name}``).
-        description: Optional prose for the OpenAPI security scheme object.
-        **kwargs: Extra keyword arguments forwarded to the validator on every call.
+        name: Cookie name. Prefer a `__Host-` name, which a subdomain
+            cannot overwrite.
+        validator: Sync or async callable returning the identity, or raising to refuse.
+        secret_key: Signing key of at least 32 bytes, or a list to rotate
+            keys (the first signs, all verify). `None` disables signing.
+        session_id: Give each session a random id, passed to the validator
+            as `session_id`, so sessions can be revoked. Needs a
+            `secret_key`; turning it on or off logs existing sessions out.
+        ttl: Lifetime in seconds, also checked server-side when signed.
+        secure: Send the cookie over HTTPS only. Turn off for local HTTP only.
+        samesite: The `SameSite` attribute: `"lax"`, `"strict"` or `"none"`.
+        domain: The `Domain` attribute. Leave unset for a `__Host-` cookie.
+        path: The `Path` attribute.
+        scheme_name: Name of the security scheme in OpenAPI, `APIKeyCookie_{name}` by default.
+        description: Description of the security scheme in OpenAPI.
+        **kwargs: Keyword arguments passed to the validator on every call.
 
     Raises:
-        ValueError: On an invalid configuration, including a ``__Secure-`` or
-            ``__Host-`` name with settings that make browsers drop the cookie.
+        ValueError: On an invalid configuration, such as a short key or a
+            `__Host-` name with settings a browser would refuse.
     """
 
     def __init__(
@@ -133,7 +129,7 @@ class APIKeyCookieAuth(ValidatedAuthSource):
                 )
         self._session_id = session_id
         # itsdangerous verifies against every key in the list but signs with
-        # the last one — reverse so the first configured key is the signer.
+        # the last one, so reverse them to make the first configured key the signer.
         # The salt also separates the two payload layouts.
         self._signer = (
             _precomputed_signer(
@@ -178,7 +174,7 @@ class APIKeyCookieAuth(ValidatedAuthSource):
             raise refusal(UnauthorizedError(), "invalid_signature") from None
 
     def authenticated_at(self, credential: str) -> float | None:
-        """When the signed cookie was minted, ``None`` when it does not verify."""
+        """Return when the signed cookie was set, `None` when it does not verify."""
         if self._signer is None:
             return None
         try:
@@ -190,28 +186,29 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         return signed_at.timestamp()
 
     def _dates_credentials(self) -> bool:
-        """Only a signed cookie carries the timestamp :meth:`fresh` needs."""
+        """Only a signed cookie carries the timestamp `fresh()` needs."""
         return self._signer is not None
 
     @property
     def name(self) -> str:
-        """Cookie name. Read-only: the signing salt is derived from it."""
+        """The cookie name."""
         return self._name
 
     @property
     def ttl(self) -> int:
-        """Cookie lifetime in seconds: use it to derive your session's expiry."""
+        """The cookie lifetime in seconds, to derive a stored session's expiry from."""
         return self._ttl
 
     async def extract(self, request: HTTPConnection) -> str | None:
-        """Return the raw cookie value, or ``None`` when absent or empty."""
+        """Return the cookie value, or `None` when absent or empty."""
         return request.cookies.get(self._name) or None
 
     def session_id_of(self, request: HTTPConnection) -> str | None:
-        """Return *request*'s session id without running the validator.
+        """Return the session id of the request's cookie, without the validator.
 
-        ``None`` when ``session_id`` is off, or the cookie is absent, expired
-        or forged.
+        Returns:
+            The id, or `None` when `session_id` is off or the cookie is absent,
+            expired or forged.
         """
         if not self._session_id:
             return None
@@ -230,7 +227,7 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         *,
         request: HTTPConnection | None = None,
     ) -> Any:
-        """Verify the cookie, forwarding route-declared scopes to the validator."""
+        """Verify the cookie, then pass its value on to the validator."""
         plain = self._verify(credential)
         if not self._session_id:
             return await self._call_validator(plain, scopes=scopes, request=request)
@@ -240,10 +237,17 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         )
 
     def set_cookie(self, response: Response, value: str) -> str | None:
-        """Attach the cookie to *response*, signing it when ``secret_key`` is set.
+        """Set the cookie on `response`, signed when a `secret_key` is configured.
 
-        Returns the minted session id: always a ``str`` when ``session_id`` is
-        on, always ``None`` when it is off.
+        Each call stamps the current time, so the caller counts as freshly
+        authenticated for `fresh()`.
+
+        Args:
+            response: The response to set the cookie on.
+            value: The value to store, typically a user id.
+
+        Returns:
+            The new session id when `session_id` is on, otherwise `None`.
         """
         sid = secrets.token_urlsafe(16) if self._session_id else None
         if sid is not None:
@@ -264,10 +268,17 @@ class APIKeyCookieAuth(ValidatedAuthSource):
     def delete_cookie(
         self, response: Response, request: HTTPConnection | None = None
     ) -> str | None:
-        """Clear the session cookie (logout) from this client only.
+        """Clear the cookie on `response`, signing this browser out.
 
-        Returns *request*'s session id when it verifies (revoke it server-side
-        for a hard logout), ``None`` otherwise.
+        The signed cookie itself stays valid until it expires. With
+        `session_id` on, revoke the returned id to end the session for real.
+
+        Args:
+            response: The response to clear the cookie on.
+            request: The current request, to read its session id from.
+
+        Returns:
+            The request's session id when its cookie verifies, otherwise `None`.
         """
         response.delete_cookie(
             self._name,

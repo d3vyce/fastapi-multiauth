@@ -1,16 +1,21 @@
 [project]
 site_name = "FastAPI MultiAuth"
-site_description = "Composable authentication sources for FastAPI."
+site_description = "Composable authentication sources for FastAPI: bring your own validator, combine schemes, get correct OpenAPI."
 site_author = "d3vyce"
 site_url = "https://fastapi-multiauth.d3vyce.fr/"
 copyright = "Copyright &copy; 2026 d3vyce"
 repo_url = "https://github.com/d3vyce/fastapi-multiauth"
+repo_name = "d3vyce/fastapi-multiauth"
+edit_uri = "edit/main/docs/"
+strict = true
 
 [project.theme]
 custom_dir = "docs/overrides"
 language = "en"
 features = [
     "announce.dismiss",
+    "content.action.copy",
+    "content.action.edit",
     "content.action.view",
     "content.code.annotate",
     "content.code.copy",
@@ -19,7 +24,6 @@ features = [
     "content.tabs.link",
     "content.tooltips",
     "navigation.footer",
-    "navigation.indexes",
     "navigation.instant",
     "navigation.instant.prefetch",
     "navigation.path",
@@ -47,15 +51,114 @@ code = "Jetbrains Mono"
 [project.theme.icon]
 repo = "fontawesome/brands/github"
 
+[project.validation]
+invalid_links = true
+invalid_link_anchors = true
+
+[project.plugins.search]
+
+[project.plugins.minify]
+minify_html = true
+
+[project.plugins.social]
+
+[project.plugins.llmstxt]
+markdown_description = "Composable authentication sources for FastAPI. You provide the validator; the library handles credential extraction, scheme combination, and OpenAPI declaration."
+full_output = "llms-full.txt"
+
+[project.plugins.llmstxt.sections]
+Home = ["index.md"]
+Guide = [
+    "guide/index.md",
+    "guide/comparison.md",
+    "guide/validators.md",
+    "guide/multiauth.md",
+    "guide/scopes.md",
+    "guide/bearer-tokens.md",
+    "guide/cookie-sessions.md",
+    "guide/api-keys-and-basic.md",
+    "guide/jwt-and-oauth2.md",
+    "guide/custom-sources.md",
+    "guide/step-up.md",
+    "guide/websockets.md",
+    "guide/oauth-login.md",
+    "guide/logging.md",
+    "guide/auditing.md",
+    "guide/testing.md",
+]
+Recipes = [
+    "recipes/index.md",
+    "recipes/sessions-and-tokens.md",
+    "recipes/personal-access-tokens.md",
+    "recipes/role-gated-routes.md",
+    "recipes/sign-out-everywhere.md",
+    "recipes/oidc-sign-in.md",
+    "recipes/websocket-tickets.md",
+    "recipes/audit-routes.md",
+]
+"Security model" = ["security-model.md"]
+"API reference" = ["reference.md"]
+
+[project.plugins.redirects.redirect_maps]
+"usage.md" = "guide/index.md"
+"usage.md#the-validator-contract" = "guide/validators.md"
+"usage.md#reaching-the-request" = "guide/validators.md#reaching-the-request"
+"usage.md#custom-sources" = "guide/custom-sources.md"
+"usage.md#optional-authentication" = "guide/multiauth.md#optional-authentication"
+"usage.md#combining-with-require" = "guide/multiauth.md#optional-authentication"
+"usage.md#freshness-step-up-authentication" = "guide/step-up.md"
+"usage.md#where-the-instant-comes-from" = "guide/step-up.md#recent-login-fresh"
+"usage.md#the-re-auth-loop" = "guide/step-up.md#recent-login-fresh"
+"usage.md#authentication-level-acr_values" = "guide/step-up.md#strong-login-stepped_up"
+"usage.md#authentication-method-references" = "guide/step-up.md#strong-login-stepped_up"
+"usage.md#sources" = "guide/index.md#the-sources"
+"usage.md#bearer-tokens" = "guide/bearer-tokens.md"
+"usage.md#token-prefixes" = "guide/bearer-tokens.md#prefixes"
+"usage.md#generating-and-storing-tokens" = "guide/bearer-tokens.md#issuing-and-storing-tokens"
+"usage.md#checksummed-tokens" = "guide/bearer-tokens.md#checksummed-tokens"
+"usage.md#cookie-sessions" = "guide/cookie-sessions.md"
+"usage.md#key-rotation" = "guide/cookie-sessions.md#key-rotation"
+"usage.md#per-session-identity" = "guide/cookie-sessions.md#revocable-sessions"
+"usage.md#api-keys" = "guide/api-keys-and-basic.md"
+"usage.md#basic-auth" = "guide/api-keys-and-basic.md#basic-auth"
+"usage.md#oauth-20-and-openid-connect" = "guide/jwt-and-oauth2.md#a-real-authorize-button"
+"usage.md#combining-sources-with-multiauth" = "guide/multiauth.md"
+"usage.md#websocket-routes" = "guide/websockets.md"
+"usage.md#security-scopes" = "guide/scopes.md"
+"usage.md#logging" = "guide/logging.md"
+"usage.md#jwt-validation" = "guide/jwt-and-oauth2.md"
+"oauth.md" = "guide/oauth-login.md"
+"comparison.md" = "guide/comparison.md"
+"guide/observability.md" = "guide/logging.md"
+"recipes/index.md#web-session-api-tokens-on-the-same-routes" = "recipes/sessions-and-tokens.md"
+"recipes/index.md#stripe-style-token-prefixes" = "recipes/personal-access-tokens.md"
+"recipes/index.md#token-revocation" = "recipes/personal-access-tokens.md"
+"recipes/index.md#full-oauth-login-with-pkce" = "recipes/oidc-sign-in.md"
+"recipes/index.md#logout" = "recipes/sign-out-everywhere.md"
+"recipes/index.md#admin-only-dependency-with-require" = "recipes/role-gated-routes.md"
+"recipes/index.md#auditing-the-auth-surface" = "recipes/audit-routes.md"
+
 [project.plugins.mkdocstrings.handlers.python]
-inventories = ["https://docs.python.org/3/objects.inv"]
+inventories = [
+    "https://docs.python.org/3/objects.inv",
+    "https://fastapi.tiangolo.com/objects.inv",
+]
 paths = ["src"]
 
 [project.plugins.mkdocstrings.handlers.python.options]
+backlinks = "tree"
 docstring_style = "google"
+filters = ["!^_"]
 inherited_members = true
-show_source = false
+members_order = "source"
+merge_init_into_class = true
+separate_signature = true
 show_root_heading = true
+show_signature_annotations = true
+show_source = false
+show_symbol_type_heading = true
+show_symbol_type_toc = true
+signature_crossrefs = true
 
 [project.markdown_extensions]
 abbr = {}
@@ -64,11 +167,9 @@ attr_list = {}
 def_list = {}
 footnotes = {}
 md_in_html = {}
-"pymdownx.arithmatex" = {generic = true}
 "pymdownx.betterem" = {}
 "pymdownx.caret" = {}
 "pymdownx.details" = {}
-"pymdownx.emoji" = {}
 "pymdownx.inlinehilite" = {}
 "pymdownx.keys" = {}
 "pymdownx.magiclink" = {}
@@ -77,7 +178,7 @@ md_in_html = {}
 "pymdownx.tasklist" = {custom_checkbox = true}
 "pymdownx.tilde" = {}
 
-[project.markdown_extensions.pymdownx.emoji]
+[project.markdown_extensions."pymdownx.emoji"]
 emoji_index = "zensical.extensions.emoji.twemoji"
 emoji_generator = "zensical.extensions.emoji.to_svg"
 
@@ -104,19 +205,48 @@ check_paths = true
 Home = "index.md"
 
 [[project.nav]]
-Usage = "usage.md"
+Guide = [
+    "guide/index.md",
+    { "Getting started" = [
+        "guide/comparison.md",
+        "guide/validators.md",
+        "guide/multiauth.md",
+        "guide/scopes.md",
+    ] },
+    { "Sources" = [
+        "guide/bearer-tokens.md",
+        "guide/cookie-sessions.md",
+        "guide/api-keys-and-basic.md",
+        "guide/jwt-and-oauth2.md",
+        "guide/custom-sources.md",
+    ] },
+    { "Going further" = [
+        "guide/step-up.md",
+        "guide/websockets.md",
+        "guide/oauth-login.md",
+        "guide/logging.md",
+        "guide/auditing.md",
+        "guide/testing.md",
+    ] },
+]
 
 [[project.nav]]
-OAuth = "oauth.md"
-
-[[project.nav]]
-Recipes = "recipes.md"
+Recipes = [
+    "recipes/index.md",
+    "recipes/sessions-and-tokens.md",
+    "recipes/personal-access-tokens.md",
+    "recipes/role-gated-routes.md",
+    "recipes/sign-out-everywhere.md",
+    "recipes/oidc-sign-in.md",
+    "recipes/websocket-tickets.md",
+    "recipes/audit-routes.md",
+]
 
 [[project.nav]]
 "Security model" = "security-model.md"
 
 [[project.nav]]
-"API Reference" = "reference.md"
+"API reference" = "reference.md"
 
 [[project.nav]]
 "Changelog ↗" = "https://github.com/d3vyce/fastapi-multiauth/releases"
