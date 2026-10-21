@@ -14,19 +14,19 @@ from ..utils import authorization_credential
 
 
 class _BearerSource(ValidatedAuthSource):
-    """Extraction shared by every source carrying an ``Authorization: Bearer`` token."""
+    """Extraction shared by every source carrying an `Authorization: Bearer` token."""
 
     _prefix: str | None = None
 
     def www_authenticate(self) -> str:
-        """``Bearer`` challenge per RFC 6750 §3."""
+        """Return the `Bearer` challenge, as RFC 6750 defines it."""
         return "Bearer"
 
     async def extract(self, request: HTTPConnection) -> str | None:
-        """Return the bearer token, or ``None`` when absent, empty, or mismatched.
+        """Return the bearer token, or `None` when absent, empty, or without the prefix.
 
-        The ``Bearer`` scheme is matched case-insensitively; the prefix, when
-        configured, is kept in the returned value.
+        The `Bearer` scheme is matched case-insensitively, and the prefix is
+        kept in the returned token.
         """
         token = authorization_credential(request, "bearer")
         if token is None:
@@ -42,32 +42,26 @@ class _BearerSource(ValidatedAuthSource):
         *,
         request: HTTPConnection | None = None,
     ) -> Any:
-        """Validate the credential, re-checking the prefix and forwarding scopes."""
+        """Validate the token, passing the route's scopes and request on."""
         if self._prefix is not None and not credential.startswith(self._prefix):
             raise UnauthorizedError()
         return await self._call_validator(credential, scopes=scopes, request=request)
 
 
 class HTTPBearerAuth(_BearerSource):
-    """Bearer token authentication source (wraps ``HTTPBearer`` for OpenAPI).
-
-    The validator is called as ``await validator(credential, **kwargs)``.
+    """Authentication source for `Authorization: Bearer` tokens.
 
     Args:
-        validator: Sync or async callable returning the identity; raises
-            :class:`~fastapi_multiauth.exceptions.UnauthorizedError` on failure.
-        prefix: Optional token prefix (e.g. ``"user_"``); only tokens with this
-            prefix are matched, and the prefix is kept in the validated value.
-        scheme_name: OpenAPI security scheme name (default ``HTTPBearer``); give
-            each source a distinct name when several appear in the same app.
-        description: Optional prose for the OpenAPI security scheme object.
-        bearer_format: Optional hint at the token format (e.g. ``"JWT"``), for
-            documentation only.
-        token_generator: Callable building the token body from the ``nbytes``
-            :meth:`generate_token` is given, owning its alphabet and entropy;
-            ``prefix`` is still prepended. Defaults to ``secrets.token_urlsafe``.
-            Use a CSPRNG (:mod:`secrets`), never :mod:`random`.
-        **kwargs: Extra keyword arguments forwarded to the validator on every call.
+        validator: Sync or async callable returning the identity, or raising to refuse.
+        prefix: Only accept tokens starting with this, e.g. `"user_"`. The
+            prefix stays in the token the validator receives.
+        scheme_name: Name of the security scheme in OpenAPI, `HTTPBearer` by default. Give each
+            source its own name when several share an app.
+        description: Description of the security scheme in OpenAPI.
+        bearer_format: Format hint shown in OpenAPI, e.g. `"JWT"`.
+        token_generator: Callable building a token body from `nbytes`, used
+            by `generate_token()`. Build it on `secrets`, never `random`.
+        **kwargs: Keyword arguments passed to the validator on every call.
     """
 
     def __init__(
@@ -95,18 +89,18 @@ class HTTPBearerAuth(_BearerSource):
         )
 
     def generate_token(self, nbytes: int = 32) -> str:
-        """Generate a token with ``token_generator``, prefixed when configured.
+        """Generate a new random token, with the source's prefix in front.
 
         Args:
-            nbytes: Number of random bytes, handed to the ``token_generator``,
-                which decides what to make of it.
+            nbytes: Bytes of entropy, passed to `token_generator`.
 
         Returns:
-            A ready-to-use token string (e.g. ``"user_Xk3..."``).
+            The token, e.g. `"user_Xk3..."`. Store its `hash_token()` digest,
+            never the token itself.
 
         Raises:
-            ValueError: If the generator returns an empty token, or one that
-                leaves the final token with leading or trailing whitespace.
+            ValueError: If the generator returns an empty token, or one with
+                leading or trailing whitespace.
         """
         token = self._token_generator(nbytes)
         if not token:

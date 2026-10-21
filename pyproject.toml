@@ -69,23 +69,32 @@ tests = [
 ]
 docs = [
     "mkdocstrings-python>=2.0.2",
-    "zensical>=0.0.30",
+    "zensical>=0.0.71",
 ]
 
 [build-system]
 requires = ["uv_build>=0.11.21,<0.14.0"]
 build-backend = "uv_build"
 
+[tool.ruff]
+extend-exclude = ["docs"]
+
 [tool.ruff.lint]
-# "S" = flake8-bandit security rules, scoped to the library source.
-extend-select = ["S", "UP"]
+# "D" = Google-style docstrings, "S" = flake8-bandit; both scoped to the library source.
+extend-select = ["D", "S", "UP"]
+ignore = ["D105", "D107"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S", "B008"]
-"benchmarks/**" = ["S", "B008"]
+"tests/**" = ["D", "S", "B008"]
+"benchmarks/**" = ["D", "S", "B008"]
+"docs_src/**" = ["D", "S", "B008"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 anyio_mode = "auto"
 filterwarnings = [
     "ignore::DeprecationWarning",

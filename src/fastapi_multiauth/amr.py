@@ -1,13 +1,14 @@
-"""Authentication Method Reference values (RFC 8176) for ``amr`` claims."""
+"""Authentication Method Reference values (RFC 8176) for `amr` claims."""
 
 from enum import StrEnum
 
 
 class AuthenticationMethodReference(StrEnum):
-    """The registered values of the ``amr`` claim (RFC 8176 §2, IANA registry).
+    """The registered values of the `amr` claim.
 
-    A ``StrEnum``, so members compare equal to the strings a provider puts in
-    the claim: ``AuthenticationMethodReference.MULTI_FACTOR in claims["amr"]``.
+    Values of the [RFC 8176](https://datatracker.ietf.org/doc/html/rfc8176)
+    registry. A `StrEnum`, so members compare equal to the strings in the
+    claim: `AuthenticationMethodReference.HARDWARE_KEY in claims["amr"]`.
     """
 
     FACE = "face"

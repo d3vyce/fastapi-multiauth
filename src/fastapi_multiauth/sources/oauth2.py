@@ -2,9 +2,9 @@
 
 These validate the bearer token an OAuth 2.0 or OIDC provider already issued.
 They declare no flow of their own: the URLs and scope catalogue they carry are
-OpenAPI metadata, which is what lets ``/docs`` offer a real Authorize dialog
+OpenAPI metadata, which is what lets `/docs` offer a real Authorize dialog
 with per-scope checkboxes. The login flow that mints those tokens lives in
-:mod:`fastapi_multiauth.oauth`.
+`fastapi_multiauth.oauth`.
 """
 
 from collections.abc import Callable
@@ -20,15 +20,18 @@ from .bearer import _BearerSource
 
 
 class OAuth2PasswordBearerAuth(_BearerSource):
-    """Bearer tokens issued by a password-grant token endpoint.
+    """Authentication source for bearer tokens from a password-grant endpoint.
+
+    The URL and scopes only describe the flow in OpenAPI.
 
     Args:
-        validator: Sync or async callable returning the identity.
-        token_url: URL of the token endpoint, as advertised to OpenAPI.
-        scopes: Catalogue of scope names mapped to their descriptions.
-        scheme_name: OpenAPI security scheme name.
-        description: Optional prose for the OpenAPI security scheme object.
-        **kwargs: Extra keyword arguments forwarded to the validator.
+        validator: Sync or async callable returning the identity, or raising to refuse.
+        token_url: URL of the token endpoint.
+        scopes: Available scopes mapped to their descriptions. A route
+            declaring a scope outside this catalogue is refused.
+        scheme_name: Name of the security scheme in OpenAPI, `OAuth2PasswordBearer` by default.
+        description: Description of the security scheme in OpenAPI.
+        **kwargs: Keyword arguments passed to the validator on every call.
     """
 
     def __init__(
@@ -56,17 +59,21 @@ class OAuth2PasswordBearerAuth(_BearerSource):
 
 
 class OAuth2AuthorizationCodeBearerAuth(_BearerSource):
-    """Bearer tokens issued by an authorization-code flow.
+    """Authentication source for bearer tokens from an authorization-code flow.
+
+    The URLs and scopes only describe the flow in OpenAPI, which gives
+    `/docs` a working Authorize dialog.
 
     Args:
-        validator: Sync or async callable returning the identity.
-        authorization_url: URL the Authorize dialog sends the user to.
-        token_url: URL that exchanges the code for a token.
-        refresh_url: Optional refresh endpoint.
-        scopes: Catalogue of scope names mapped to their descriptions.
-        scheme_name: OpenAPI security scheme name.
-        description: Optional prose for the OpenAPI security scheme object.
-        **kwargs: Extra keyword arguments forwarded to the validator.
+        validator: Sync or async callable returning the identity, or raising to refuse.
+        authorization_url: URL of the provider's authorization endpoint.
+        token_url: URL of the provider's token endpoint.
+        refresh_url: URL of the provider's refresh endpoint, if any.
+        scopes: Available scopes mapped to their descriptions. A route
+            declaring a scope outside this catalogue is refused.
+        scheme_name: Name of the security scheme in OpenAPI, `OAuth2AuthorizationCodeBearer` by default.
+        description: Description of the security scheme in OpenAPI.
+        **kwargs: Keyword arguments passed to the validator on every call.
     """
 
     def __init__(
@@ -98,14 +105,16 @@ class OAuth2AuthorizationCodeBearerAuth(_BearerSource):
 
 
 class OpenIdConnectAuth(_BearerSource):
-    """Bearer tokens issued by an OpenID Connect provider.
+    """Authentication source for bearer tokens from an OpenID Connect provider.
+
+    `/docs` reads the flow from the provider's discovery document.
 
     Args:
-        validator: Sync or async callable returning the identity.
-        openid_connect_url: The provider's ``.well-known`` discovery URL.
-        scheme_name: OpenAPI security scheme name.
-        description: Optional prose for the OpenAPI security scheme object.
-        **kwargs: Extra keyword arguments forwarded to the validator.
+        validator: Sync or async callable returning the identity, or raising to refuse.
+        openid_connect_url: URL of the provider's discovery document.
+        scheme_name: Name of the security scheme in OpenAPI, `OpenIdConnect` by default.
+        description: Description of the security scheme in OpenAPI.
+        **kwargs: Keyword arguments passed to the validator on every call.
     """
 
     def __init__(
