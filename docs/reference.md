@@ -18,6 +18,7 @@ from fastapi_multiauth import (
     HTTPBasicAuth,
     HTTPBearerAuth,
     InsufficientAuthenticationError,
+    IntrospectionValidator,
     JWTValidator,  # needs the jwt extra at construction
     MultiAuth,
     OAuth2AuthorizationCodeBearerAuth,
@@ -90,6 +91,8 @@ Request-time authentication dependencies. Guide: [the sources](guide/index.md#th
 Ready-made validators to pass to a source. Guide: [JWT and OAuth 2.0 tokens](guide/jwt-and-oauth2.md).
 
 ## ::: fastapi_multiauth.JWTValidator
+
+## ::: fastapi_multiauth.IntrospectionValidator
 
 ## Claims
 

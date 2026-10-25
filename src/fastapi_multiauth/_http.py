@@ -25,6 +25,33 @@ def _require_https(url: str, description: str) -> str:
     raise ValueError(f"{description} must use https:// (got {url!r})")
 
 
+async def _request_json(
+    method: str,
+    url: str,
+    *,
+    timeout: float,
+    error_cls: type[Exception],
+    description: str,
+    headers: dict[str, str] | None = None,
+    data: dict[str, str] | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> Any:
+    """Send a request and decode the JSON body, mapping failures to `error_cls`."""
+    async with (
+        contextlib.nullcontext(client)
+        if client is not None
+        else httpx.AsyncClient(timeout=timeout)
+    ) as http:
+        try:
+            resp = await http.request(method, url, headers=headers, data=data)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as exc:
+            raise error_cls(f"failed to fetch {description}: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise error_cls(f"{description} is not valid JSON") from exc
+
+
 async def _get_json(
     url: str,
     *,
@@ -35,16 +62,12 @@ async def _get_json(
     client: httpx.AsyncClient | None = None,
 ) -> Any:
     """GET `url` and decode the JSON body, mapping failures to `error_cls`."""
-    async with (
-        contextlib.nullcontext(client)
-        if client is not None
-        else httpx.AsyncClient(timeout=timeout)
-    ) as http:
-        try:
-            resp = await http.get(url, headers=headers)
-            resp.raise_for_status()
-            return resp.json()
-        except httpx.HTTPError as exc:
-            raise error_cls(f"failed to fetch {description}: {exc}") from exc
-        except json.JSONDecodeError as exc:
-            raise error_cls(f"{description} is not valid JSON") from exc
+    return await _request_json(
+        "GET",
+        url,
+        timeout=timeout,
+        error_cls=error_cls,
+        description=description,
+        headers=headers,
+        client=client,
+    )

@@ -53,6 +53,7 @@ from fastapi_multiauth import (
     HTTPBasicAuth,
     HTTPBearerAuth,
     InsufficientAuthenticationError,
+    IntrospectionValidator,
     JWTValidator,
     MultiAuth,
     OAuth2AuthorizationCodeBearerAuth,
@@ -5533,6 +5534,221 @@ class TestHMACSignatureAuth:
                 "name": "Stripe-Signature",
             }
         }
+
+
+class TestIntrospectionValidator:
+    """RFC 7662: opaque tokens checked by the provider, answers cached."""
+
+    URL = "https://idp.example.com/introspect"
+
+    @staticmethod
+    def _active(**overrides) -> dict:
+        return {
+            "active": True,
+            "sub": "user-1",
+            "aud": "my-api",
+            "scope": "read write",
+            "exp": int(time.time()) + 300,
+            **overrides,
+        }
+
+    def _validator(self, **kwargs) -> IntrospectionValidator:
+        kwargs.setdefault("audience", "my-api")
+        return IntrospectionValidator(
+            url=self.URL, client_id="my-api", client_secret="api-secret", **kwargs
+        )
+
+    @respx.mock
+    def test_an_active_token_passes(self):
+        route = respx.post(self.URL).respond(json=self._active())
+        validator = IntrospectionValidator(
+            url=self.URL,
+            client_id="my:api",
+            client_secret="s:c r%t",
+            audience="my-api",
+        )
+        response = _auth_client(validator).get(
+            "/me", headers={"Authorization": "Bearer opaque-token"}
+        )
+        assert response.json()["sub"] == "user-1"
+        request = route.calls.last.request
+        assert parse_qs(request.content.decode()) == {
+            "token": ["opaque-token"],
+            "token_type_hint": ["access_token"],
+        }
+        scheme, _, encoded = request.headers["authorization"].partition(" ")
+        assert scheme == "Basic"
+        assert base64.b64decode(encoded) == b"my%3Aapi:s%3Ac+r%25t"
+
+    @respx.mock
+    def test_active_answers_are_cached(self):
+        route = respx.post(self.URL).respond(json=self._active())
+        client = _auth_client(self._validator())
+        for _ in range(3):
+            assert _status(client, "token-a") == 200
+        assert route.call_count == 1
+        assert _status(client, "token-b") == 200
+        assert route.call_count == 2
+
+        with patch("time.monotonic", return_value=time.monotonic() + 61):
+            assert _status(client, "token-a") == 200
+        assert route.call_count == 3
+
+        route.reset()
+        route.respond(json=self._active(exp=int(time.time()) + 5))
+        client = _auth_client(self._validator())
+        _status(client, "short-lived")
+        with patch("time.monotonic", return_value=time.monotonic() + 6):
+            _status(client, "short-lived")
+        assert route.call_count == 2
+
+        for kwargs, tokens, calls in [
+            ({"cache_ttl": 0}, ["a", "a"], 2),
+            ({"cache_size": 1}, ["a", "b", "a"], 3),
+        ]:
+            route.reset()
+            route.respond(json=self._active())
+            client = _auth_client(self._validator(**kwargs))
+            for token in tokens:
+                _status(client, token)
+            assert route.call_count == calls, kwargs
+
+    @respx.mock
+    def test_an_inactive_token_is_refused_and_not_cached(self, caplog):
+        caplog.set_level(logging.WARNING, logger="fastapi_multiauth")
+        route = respx.post(self.URL)
+        client = _auth_client(self._validator())
+        for answer in [
+            {"active": False},
+            {"sub": "user-1"},
+            self._active(active="true"),
+        ]:
+            caplog.clear()
+            route.respond(json=answer)
+            response = client.get("/me", headers={"Authorization": "Bearer t"})
+            assert response.status_code == 401, answer
+            assert response.headers["www-authenticate"] == "Bearer"
+            assert [r.auth_reason for r in caplog.records] == ["inactive"]
+        assert route.call_count == 3
+
+    @respx.mock
+    def test_an_unusable_endpoint_answers_503(self, caplog):
+        caplog.set_level(logging.WARNING, logger="fastapi_multiauth")
+        route = respx.post(self.URL)
+        client = _auth_client(self._validator())
+        for outcome in [
+            httpx.Response(500),
+            httpx.ConnectTimeout("slow"),
+            httpx.Response(200, text="not json"),
+            httpx.Response(200, json=["active"]),
+            httpx.Response(401),
+        ]:
+            caplog.clear()
+            route.side_effect = [outcome]
+            response = client.get("/me", headers={"Authorization": "Bearer t"})
+            assert response.status_code == 503, outcome
+            assert response.json() == {
+                "detail": "Authentication temporarily unavailable"
+            }
+            reasons = [getattr(r, "auth_reason", None) for r in caplog.records]
+            assert reasons[-1] == "introspection_unavailable"
+        assert "refused the client credentials" in caplog.text
+
+    @respx.mock
+    def test_claims_are_checked(self):
+        route = respx.post(self.URL)
+        now = int(time.time())
+        for kwargs, answer, expected in [
+            ({}, self._active(aud="other-api"), 401),
+            ({}, self._active(aud=None), 401),
+            ({}, self._active(aud=[{"x": 1}]), 401),
+            ({}, self._active(aud=["other-api", "my-api"]), 200),
+            ({"audience": ["my-api", "admin-api"]}, self._active(aud="admin-api"), 200),
+            (
+                {"audience": IntrospectionValidator.ANY_AUDIENCE},
+                self._active(aud=None),
+                200,
+            ),
+            (
+                {"issuer": "https://idp.example.com"},
+                self._active(iss="https://evil.example"),
+                401,
+            ),
+            (
+                {"issuer": "https://idp.example.com"},
+                self._active(iss="https://idp.example.com"),
+                200,
+            ),
+            ({}, self._active(exp=now - 10), 401),
+            ({"leeway": 30}, self._active(exp=now - 10), 200),
+            ({}, self._active(exp="soon"), 401),
+            ({}, self._active(nbf=now + 60), 401),
+            ({}, self._active(nbf=None), 401),
+            ({}, self._active(nbf=now - 60), 200),
+        ]:
+            route.respond(json=answer)
+            client = _auth_client(self._validator(**kwargs))
+            assert _status(client, "t") == expected, (kwargs, answer)
+
+    @respx.mock
+    def test_scopes_and_identity(self):
+        respx.post(self.URL).respond(
+            json=self._active(acr="mfa", auth_time=int(time.time()))
+        )
+        source = HTTPBearerAuth(self._validator(claims_to_identity=lambda c: c["sub"]))
+
+        def setup(app: FastAPI):
+            @app.get("/read")
+            async def read(user=Security(source, scopes=["read"])):
+                return user
+
+            @app.get("/admin")
+            async def admin(user=Security(source, scopes=["admin"])):
+                return user
+
+        client = TestClient(_app(setup))
+        headers = {"Authorization": "Bearer t"}
+        assert client.get("/read", headers=headers).json() == "user-1"
+        assert client.get("/admin", headers=headers).status_code == 403
+
+        strong = HTTPBearerAuth(self._validator()).stepped_up(
+            ["mfa"], acr=lambda claims: claims.get("acr")
+        )
+        recent = HTTPBearerAuth(self._validator()).fresh(
+            300, authenticated_at=lambda claims: claims.get("auth_time")
+        )
+        for dep in [strong, recent]:
+            assert _client(dep).get("/me", headers=headers).status_code == 200
+
+    @respx.mock
+    def test_a_borrowed_client_is_reused(self):
+        respx.post(self.URL).respond(json=self._active())
+        http = httpx.AsyncClient()
+        client = _auth_client(self._validator(client=http))
+        assert _status(client, "t") == 200
+        assert not http.is_closed
+
+    def test_misconfiguration_rejected(self):
+        with pytest.raises(ValueError, match="https"):
+            IntrospectionValidator(
+                url="http://idp.example.com/introspect",
+                client_id="a",
+                client_secret="b",
+                audience="my-api",
+            )
+        IntrospectionValidator(
+            url="http://localhost:8080/introspect",
+            client_id="a",
+            client_secret="b",
+            audience="my-api",
+        )
+        with pytest.raises(ValueError, match="audience is required"):
+            IntrospectionValidator(url=self.URL, client_id="a", client_secret="b")
+        for cache_ttl in [-1, math.inf, math.nan]:
+            with pytest.raises(ValueError, match="cache_ttl"):
+                self._validator(cache_ttl=cache_ttl)
+        with pytest.raises(ValueError, match="cache_size"):
+            self._validator(cache_size=0)
 
 
 SECRET_CREDENTIAL = "s3cr3t-credential-value"
