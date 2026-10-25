@@ -1,14 +1,34 @@
 version: 2
 updates:
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    commit-message:
-      prefix: ⬆
   - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "weekly"
+    allow:
+      - dependency-type: "all"
+    versioning-strategy: "increase-if-necessary"
+    groups:
+      python:
+        patterns: ["*"]
+    commit-message:
+      prefix: ⬆
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ⬆
+
+  - package-ecosystem: "pre-commit"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      pre-commit:
+        patterns: ["*"]
     commit-message:
       prefix: ⬆
