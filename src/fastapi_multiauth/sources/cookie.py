@@ -4,7 +4,7 @@ import hashlib
 import json
 import secrets
 from collections.abc import Callable, Sequence
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 from urllib.parse import urlsplit
 
 from fastapi import Response
@@ -26,6 +26,7 @@ from ..utils import (
 _MIN_SECRET_KEY_BYTES = 32
 _SALT_PREFIX = "fastapi-multiauth.cookie."
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_OPENED = "fastapi_multiauth.cookie"
 
 SameSite = Literal["lax", "strict", "none"]
 
@@ -95,6 +96,14 @@ def _decode_assurance(header: str) -> dict[str, Any]:
     if not header:
         return {}
     return json.loads(b64url_decode(header))
+
+
+class _Opened(NamedTuple):
+    """A verified cookie: its acr/amr header, plain value and signing time if asked."""
+
+    assurance: str
+    value: str
+    signed_at: float | None
 
 
 def _precomputed_signer(keys: list[str], salt: str) -> TimestampSigner:
@@ -217,56 +226,93 @@ class APIKeyCookieAuth(ValidatedAuthSource):
             raise RuntimeError("_sign called without secret_key configured")
         return self._signer.sign(f"{assurance}.{value}".encode()).decode()
 
-    def _unsign(self, cookie_value: str, **kwargs: Any) -> tuple[Any, bool]:
-        """Verify signature + expiry, saying whether the payload predates acr/amr."""
+    def _unsign(self, cookie_value: str, *, dated: bool = False) -> _Opened:
+        """Verify signature + expiry, reading payloads from before acr/amr too.
+
+        The signing time is only read when `dated`.
+        """
         if self._signer is None or self._legacy_signer is None:
             raise RuntimeError("_unsign called without secret_key configured")
         data = cookie_value.encode()
+        legacy = False
         try:
-            return self._signer.unsign(data, max_age=self._ttl, **kwargs), False
+            result = self._signer.unsign(
+                data, max_age=self._ttl, return_timestamp=dated
+            )
         except SignatureExpired:
             raise
         except BadSignature:
-            return self._legacy_signer.unsign(data, max_age=self._ttl, **kwargs), True
-
-    def _open(self, cookie_value: str) -> tuple[str, str]:
-        """Return the acr/amr header and the plain value of a signed cookie."""
-        payload, legacy = self._unsign(cookie_value)
+            legacy = True
+            result = self._legacy_signer.unsign(
+                data, max_age=self._ttl, return_timestamp=dated
+            )
+        signed_at = None
+        if isinstance(result, tuple):
+            result, stamp = result
+            signed_at = stamp.timestamp()
         if legacy:
-            return "", payload.decode()
-        assurance, _, value = payload.decode().partition(".")
-        return assurance, value
+            return _Opened("", result.decode(), signed_at)
+        assurance, _, value = result.decode().partition(".")
+        return _Opened(assurance, value, signed_at)
 
-    def _verify(self, cookie_value: str) -> str:
-        """Return the plain value, verifying signature + expiry when signed."""
-        if self._signer is None:
-            return cookie_value
+    def _open(self, cookie_value: str, *, dated: bool = False) -> _Opened:
+        """Verify a signed cookie, refusing it with a 401 when it does not verify."""
         try:
-            return self._open(cookie_value)[1]
+            return self._unsign(cookie_value, dated=dated)
         except SignatureExpired:
             raise refusal(UnauthorizedError(), "expired") from None
         except BadSignature:
             raise refusal(UnauthorizedError(), "invalid_signature") from None
+
+    def _verify(self, cookie_value: str) -> str:
+        """Return the plain value of a signed cookie, verifying signature + expiry."""
+        return self._open(cookie_value).value
 
     def _assurance_of(self, cookie_value: str | None) -> dict[str, Any]:
         """Return the acr/amr of a signed cookie, empty when it does not verify."""
         if self._signer is None or not cookie_value:
             return {}
         try:
-            assurance, _ = self._open(cookie_value)
+            assurance = self._unsign(cookie_value).assurance
         except BadSignature:
             return {}
         return _decode_assurance(assurance)
+
+    def _opened_for(
+        self, credential: str, request: HTTPConnection | None
+    ) -> _Opened | None:
+        """The cookie verified earlier in `request`, when it is `credential`."""
+        opened = request.scope.get(_OPENED) if request is not None else None
+        if opened is None or opened[0] is not self._signer or opened[1] != credential:
+            return None
+        return opened[2]
+
+    def _credential_authenticated_at(
+        self, credential: str, request: HTTPConnection | None
+    ) -> float | None:
+        """`authenticated_at()`, reusing what `authenticate_scoped()` verified."""
+        opened = self._opened_for(credential, request)
+        if opened is None or opened.signed_at is None:
+            return self.authenticated_at(credential)
+        return opened.signed_at
+
+    def _credential_acr(
+        self, credential: str, request: HTTPConnection | None
+    ) -> str | None:
+        """`authenticated_acr()`, reusing what `authenticate_scoped()` verified."""
+        opened = self._opened_for(credential, request)
+        if opened is None:
+            return self.authenticated_acr(credential)
+        return _decode_assurance(opened.assurance).get("acr")
 
     def authenticated_at(self, credential: str) -> float | None:
         """Return when the signed cookie was set, `None` when it does not verify."""
         if self._signer is None:
             return None
         try:
-            (_, signed_at), _ = self._unsign(credential, return_timestamp=True)
+            return self._unsign(credential, dated=True).signed_at
         except BadSignature:
             return None
-        return signed_at.timestamp()
 
     def _dates_credentials(self) -> bool:
         """Only a signed cookie carries the timestamp `fresh()` needs."""
@@ -356,7 +402,15 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         request: HTTPConnection | None = None,
     ) -> Any:
         """Verify the cookie and its origin, then pass its value on to the validator."""
-        plain = self._verify(credential)
+        if self._signer is None:
+            plain = credential
+        else:
+            opened = self._open(credential, dated=self._freshness is not None)
+            plain = opened.value
+            if request is not None and (
+                self._freshness is not None or self._assurance is not None
+            ):
+                request.scope[_OPENED] = (self._signer, credential, opened)
         if self._csrf:
             self._check_origin(request)
         if not self._session_id:

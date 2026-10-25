@@ -348,7 +348,7 @@ class AuthSource(ABC):
         """
         try:
             identity = await self._call_scoped(credential, scopes, request=request)
-            await self._enforce_step_up(credential, identity)
+            await self._enforce_step_up(credential, identity, request)
         except HTTPException as exc:
             add_challenge(exc, self.www_authenticate())
             self._log(logging.WARNING, refusal_reason(exc), exc.status_code)
@@ -514,18 +514,20 @@ class AuthSource(ABC):
         )
         return clone
 
-    async def _enforce_step_up(self, credential: str, identity: Any) -> None:
+    async def _enforce_step_up(
+        self, credential: str, identity: Any, request: HTTPConnection | None = None
+    ) -> None:
         """Refuse an identity outside the `fresh()` window or `stepped_up()` levels."""
         freshness, assurance = self._freshness, self._assurance
         if freshness is not None and not await self._is_fresh(
-            freshness, credential, identity
+            freshness, credential, identity, request
         ):
             raise refusal(self._step_up_error(StaleCredentialError), "stale")
         if assurance is not None:
             if assurance.read is not None:
                 achieved = await assurance.read(identity)
             else:
-                achieved = self.authenticated_acr(credential)
+                achieved = self._credential_acr(credential, request)
             if achieved not in assurance.acr_values:
                 raise refusal(
                     self._step_up_error(InsufficientAuthenticationError),
@@ -533,17 +535,31 @@ class AuthSource(ABC):
                 )
 
     async def _is_fresh(
-        self, freshness: _Freshness, credential: str, identity: Any
+        self,
+        freshness: _Freshness,
+        credential: str,
+        identity: Any,
+        request: HTTPConnection | None,
     ) -> bool:
         """Whether the credential was proven inside the window."""
         if freshness.read is not None:
             instant = await freshness.read(identity)
         else:
-            instant = self.authenticated_at(credential)
+            instant = self._credential_authenticated_at(credential, request)
         age = credential_age(instant)
         return age is not None and (
             -freshness.leeway <= age <= freshness.max_age + freshness.leeway
         )
+
+    def _credential_authenticated_at(
+        self, credential: str, request: HTTPConnection | None
+    ) -> Any:
+        """`authenticated_at()` for the guards, which also know the request."""
+        return self.authenticated_at(credential)
+
+    def _credential_acr(self, credential: str, request: HTTPConnection | None) -> Any:
+        """`authenticated_acr()` for the guards, which also know the request."""
+        return self.authenticated_acr(credential)
 
     def _step_up_error(
         self, error_cls: type[InsufficientAuthenticationError]
