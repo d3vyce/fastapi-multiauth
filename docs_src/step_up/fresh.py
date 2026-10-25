@@ -2,7 +2,7 @@ import hashlib
 import hmac
 import os
 import secrets
-from typing import Annotated
+from typing import Annotated, TypedDict
 
 from fastapi import FastAPI, Response, Security
 from pydantic import BaseModel
@@ -21,7 +21,14 @@ def check_password(password: str, stored: bytes) -> bool:
     return hmac.compare_digest(hash_password(password, stored[:16]), stored)
 
 
-USERS = {"alice": {"password": hash_password("wonderland"), "generation": 0}}
+class User(TypedDict):
+    password: bytes
+    generation: int
+
+
+USERS: dict[str, User] = {
+    "alice": {"password": hash_password("wonderland"), "generation": 0}
+}
 
 
 class Password(BaseModel):
