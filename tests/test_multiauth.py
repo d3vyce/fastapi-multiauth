@@ -113,6 +113,21 @@ def _client(auth) -> TestClient:
     return TestClient(_app(setup))
 
 
+def _request(*, query_string: bytes = b"", **headers: str) -> Request:
+    """Bare HTTP request; header names are given in snake_case."""
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "query_string": query_string,
+            "headers": [
+                (k.replace("_", "-").encode(), v.encode()) for k, v in headers.items()
+            ],
+        }
+    )
+
+
 async def simple_validator(credential: str) -> dict:
     if credential != VALID_TOKEN:
         raise UnauthorizedError()
@@ -132,54 +147,19 @@ async def cookie_validator(value: str) -> dict:
 
 
 class TestBearerTokenAuth:
-    def test_valid_token_returns_identity(self):
-        bearer = HTTPBearerAuth(simple_validator)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(bearer)):
-                return user
-
-        client = TestClient(_app(setup))
+    def test_authenticates_the_bearer_token(self):
+        client = _client(HTTPBearerAuth(simple_validator))
         response = client.get("/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
         assert response.status_code == 200
         assert response.json() == {"user": "alice"}
+        assert client.get("/me").status_code == 401
+        assert (
+            client.get("/me", headers={"Authorization": "Bearer wrong"}).status_code
+            == 401
+        )
 
-    def test_missing_header_returns_401(self):
-        bearer = HTTPBearerAuth(simple_validator)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(bearer)):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get("/me")
-        assert response.status_code == 401
-
-    def test_invalid_token_returns_401(self):
-        bearer = HTTPBearerAuth(simple_validator)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(bearer)):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get("/me", headers={"Authorization": "Bearer wrong"})
-        assert response.status_code == 401
-
-    def test_kwargs_forwarded_to_validator(self):
-        bearer = HTTPBearerAuth(role_validator, role="admin")
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(bearer)):
-                return user
-
-        client = TestClient(_app(setup))
+        client = _client(HTTPBearerAuth(role_validator, role="admin"))
         response = client.get("/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
-        assert response.status_code == 200
         assert response.json() == {"user": "alice", "role": "admin"}
 
     def test_prefix_matching_passes_full_token(self):
@@ -190,113 +170,38 @@ class TestBearerTokenAuth:
             received.append(credential)
             return {"user": "alice"}
 
-        bearer = HTTPBearerAuth(capturing_validator, prefix="user_")
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(bearer)):
-                return user
-
-        client = TestClient(_app(setup))
+        client = _client(HTTPBearerAuth(capturing_validator, prefix="user_"))
         response = client.get("/me", headers={"Authorization": "Bearer user_abc123"})
         assert response.status_code == 200
         # Prefix is kept — validator receives the full token as stored in DB
         assert received == ["user_abc123"]
 
-    def test_prefix_mismatch_returns_401(self):
-        bearer = HTTPBearerAuth(simple_validator, prefix="user_")
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(bearer)):
-                return user
-
-        client = TestClient(_app(setup))
         response = client.get("/me", headers={"Authorization": "Bearer org_abc123"})
         assert response.status_code == 401
+        assert received == ["user_abc123"]
 
     @pytest.mark.anyio
-    async def test_extract_no_header(self):
-        from starlette.requests import Request
-
+    async def test_extract(self):
         bearer = HTTPBearerAuth(simple_validator)
-        scope = {"type": "http", "method": "GET", "path": "/", "headers": []}
-        request = Request(scope)
-        assert await bearer.extract(request) is None
+        assert await bearer.extract(_request()) is None
+        assert await bearer.extract(_request(authorization="Bearer ")) is None
+        assert (
+            await bearer.extract(_request(authorization="Bearer mytoken")) == "mytoken"
+        )
 
-    @pytest.mark.anyio
-    async def test_extract_empty_token(self):
-        from starlette.requests import Request
+        prefixed = HTTPBearerAuth(simple_validator, prefix="user_")
+        assert (
+            await prefixed.extract(_request(authorization="Bearer user_abc"))
+            == "user_abc"
+        )
+        assert await prefixed.extract(_request(authorization="Bearer org_abc")) is None
 
-        bearer = HTTPBearerAuth(simple_validator)
-        scope = {
-            "type": "http",
-            "method": "GET",
-            "path": "/",
-            "headers": [(b"authorization", b"Bearer ")],
-        }
-        request = Request(scope)
-        assert await bearer.extract(request) is None
-
-    @pytest.mark.anyio
-    async def test_extract_no_prefix(self):
-        from starlette.requests import Request
-
-        bearer = HTTPBearerAuth(simple_validator)
-        scope = {
-            "type": "http",
-            "method": "GET",
-            "path": "/",
-            "headers": [(b"authorization", b"Bearer mytoken")],
-        }
-        request = Request(scope)
-        assert await bearer.extract(request) == "mytoken"
-
-    @pytest.mark.anyio
-    async def test_extract_prefix_match(self):
-        from starlette.requests import Request
-
-        bearer = HTTPBearerAuth(simple_validator, prefix="user_")
-        scope = {
-            "type": "http",
-            "method": "GET",
-            "path": "/",
-            "headers": [(b"authorization", b"Bearer user_abc")],
-        }
-        request = Request(scope)
-        assert await bearer.extract(request) == "user_abc"
-
-    @pytest.mark.anyio
-    async def test_extract_prefix_no_match(self):
-        from starlette.requests import Request
-
-        bearer = HTTPBearerAuth(simple_validator, prefix="user_")
-        scope = {
-            "type": "http",
-            "method": "GET",
-            "path": "/",
-            "headers": [(b"authorization", b"Bearer org_abc")],
-        }
-        request = Request(scope)
-        assert await bearer.extract(request) is None
-
-    def test_generate_token_no_prefix(self):
-        bearer = HTTPBearerAuth(simple_validator)
-        token = bearer.generate_token()
+    def test_generate_token(self):
+        """A generated token (with prefix) is accepted by the same auth source."""
+        token = HTTPBearerAuth(simple_validator).generate_token()
         assert isinstance(token, str)
         assert len(token) > 0
 
-    def test_generate_token_with_prefix(self):
-        bearer = HTTPBearerAuth(simple_validator, prefix="user_")
-        token = bearer.generate_token()
-        assert token.startswith("user_")
-
-    def test_generate_token_uniqueness(self):
-        bearer = HTTPBearerAuth(simple_validator)
-        assert bearer.generate_token() != bearer.generate_token()
-
-    def test_generate_token_is_valid_credential(self):
-        """A generated token (with prefix) is accepted by the same auth source."""
         stored: list[str] = []
 
         async def storing_validator(credential: str) -> dict:
@@ -305,24 +210,16 @@ class TestBearerTokenAuth:
 
         bearer = HTTPBearerAuth(storing_validator, prefix="user_")
         token = bearer.generate_token()
+        assert token.startswith("user_")
+        assert bearer.generate_token() != token
 
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(bearer)):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
+        response = _client(bearer).get(
+            "/me", headers={"Authorization": f"Bearer {token}"}
+        )
         assert response.status_code == 200
         assert stored == [token]
 
-    def test_generate_token_custom_generator_keeps_prefix(self):
-        bearer = HTTPBearerAuth(
-            simple_validator, prefix="user_", token_generator=lambda _n: "fixed-body"
-        )
-        assert bearer.generate_token() == "user_fixed-body"
-
-    def test_generate_token_custom_generator_receives_nbytes(self):
+    def test_custom_generator(self):
         seen: list[int] = []
 
         def generator(nbytes: int) -> str:
@@ -334,21 +231,31 @@ class TestBearerTokenAuth:
         bearer.generate_token(8)
         assert seen == [32, 8]
 
-    @pytest.mark.parametrize(
-        ("returned", "match"),
-        [
+        bearer = HTTPBearerAuth(
+            simple_validator, prefix="user_", token_generator=lambda _n: "fixed-body"
+        )
+        assert bearer.generate_token() == "user_fixed-body"
+        assert bearer.optional().generate_token() == "user_fixed-body"
+        assert bearer.require(tenant="acme").generate_token() == "user_fixed-body"
+
+    def test_custom_generator_whitespace(self):
+        """Only the edges matter: `partition(" ")` keeps everything after the scheme."""
+        for returned, match in [
             ("", "must return a non-empty string"),
             (" leading", "leading or trailing whitespace"),
             ("trailing ", "leading or trailing whitespace"),
-        ],
-    )
-    def test_generate_token_custom_generator_bad_return(self, returned, match):
-        bearer = HTTPBearerAuth(simple_validator, token_generator=lambda _n: returned)
-        with pytest.raises(ValueError, match=match):
-            bearer.generate_token()
+        ]:
+            bearer = HTTPBearerAuth(
+                simple_validator, token_generator=lambda _n, returned=returned: returned
+            )
+            with pytest.raises(ValueError, match=match):
+                bearer.generate_token()
 
-    def test_generate_token_interior_whitespace_allowed(self):
-        """Only the edges matter: `partition(" ")` keeps everything after the scheme."""
+        bearer = HTTPBearerAuth(
+            simple_validator, prefix="user_", token_generator=lambda _n: " leading"
+        )
+        assert bearer.generate_token() == "user_ leading"
+
         stored: list[str] = []
 
         async def storing_validator(credential: str) -> dict:
@@ -361,395 +268,128 @@ class TestBearerTokenAuth:
         token = bearer.generate_token()
         assert token == "has space"
 
-        client = _client(bearer)
-        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
+        response = _client(bearer).get(
+            "/me", headers={"Authorization": f"Bearer {token}"}
+        )
         assert response.status_code == 200
         assert stored == [token]
 
-    def test_generate_token_whitespace_checked_after_the_prefix(self):
-        """A leading space is harmless once the prefix sits in front of it."""
-        bearer = HTTPBearerAuth(
-            simple_validator, prefix="user_", token_generator=lambda _n: " leading"
-        )
-        assert bearer.generate_token() == "user_ leading"
-
-    def test_generate_token_custom_generator_survives_clone(self):
-        """optional()/require() clones keep the custom generator."""
-        bearer = HTTPBearerAuth(
-            simple_validator, prefix="user_", token_generator=lambda _n: "fixed-body"
-        )
-        assert bearer.optional().generate_token() == "user_fixed-body"
-        assert bearer.require(tenant="acme").generate_token() == "user_fixed-body"
-
 
 class TestCookieAuth:
-    def test_valid_cookie_returns_identity(self):
-        cookie_auth = APIKeyCookieAuth("session", cookie_validator)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(cookie_auth)):
-                return user
-
-        client = TestClient(_app(setup))
+    def test_authenticates_the_cookie(self):
+        client = _client(APIKeyCookieAuth("session", cookie_validator))
         response = client.get("/me", cookies={"session": VALID_COOKIE})
         assert response.status_code == 200
         assert response.json() == {"session": VALID_COOKIE}
+        assert client.get("/me").status_code == 401
+        assert client.get("/me", cookies={"session": "wrong"}).status_code == 401
 
-    def test_missing_cookie_returns_401(self):
-        cookie_auth = APIKeyCookieAuth("session", cookie_validator)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(cookie_auth)):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get("/me")
-        assert response.status_code == 401
-
-    def test_invalid_cookie_returns_401(self):
-        cookie_auth = APIKeyCookieAuth("session", cookie_validator)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(cookie_auth)):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get("/me", cookies={"session": "wrong"})
-        assert response.status_code == 401
-
-    def test_kwargs_forwarded_to_validator(self):
         async def session_validator(value: str, *, scope: str) -> dict:
             if value != VALID_COOKIE:
                 raise UnauthorizedError()
             return {"session": value, "scope": scope}
 
-        cookie_auth = APIKeyCookieAuth("session", session_validator, scope="read")
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(cookie_auth)):
-                return user
-
-        client = TestClient(_app(setup))
+        client = _client(APIKeyCookieAuth("session", session_validator, scope="read"))
         response = client.get("/me", cookies={"session": VALID_COOKIE})
-        assert response.status_code == 200
         assert response.json() == {"session": VALID_COOKIE, "scope": "read"}
 
     @pytest.mark.anyio
-    async def test_extract_no_cookie(self):
-        from starlette.requests import Request
-
+    async def test_extract(self):
         auth = APIKeyCookieAuth("session", cookie_validator)
-        scope = {"type": "http", "method": "GET", "path": "/", "headers": []}
-        request = Request(scope)
-        assert await auth.extract(request) is None
-
-    @pytest.mark.anyio
-    async def test_extract_cookie_present(self):
-        from starlette.requests import Request
-
-        auth = APIKeyCookieAuth("session", cookie_validator)
-        scope = {
-            "type": "http",
-            "method": "GET",
-            "path": "/",
-            "headers": [(b"cookie", b"session=abc")],
-        }
-        request = Request(scope)
-        assert await auth.extract(request) == "abc"
+        assert await auth.extract(_request()) is None
+        assert await auth.extract(_request(cookie="session=abc")) == "abc"
 
 
 class TestAPIKeyHeaderAuth:
-    def test_valid_key_returns_identity(self):
-        auth = APIKeyHeaderAuth("X-API-Key", simple_validator)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        client = TestClient(_app(setup))
+    def test_authenticates_the_header(self):
+        client = _client(APIKeyHeaderAuth("X-API-Key", simple_validator))
         response = client.get("/me", headers={"X-API-Key": VALID_TOKEN})
         assert response.status_code == 200
         assert response.json() == {"user": "alice"}
+        assert client.get("/me").status_code == 401
+        assert client.get("/me", headers={"X-API-Key": "wrong"}).status_code == 401
 
-    def test_missing_header_returns_401(self):
-        auth = APIKeyHeaderAuth("X-API-Key", simple_validator)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get("/me")
-        assert response.status_code == 401
-
-    def test_invalid_key_returns_401(self):
-        auth = APIKeyHeaderAuth("X-API-Key", simple_validator)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get("/me", headers={"X-API-Key": "wrong"})
-        assert response.status_code == 401
-
-    def test_kwargs_forwarded_to_validator(self):
-        auth = APIKeyHeaderAuth("X-API-Key", role_validator, role="admin")
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        client = TestClient(_app(setup))
+        client = _client(APIKeyHeaderAuth("X-API-Key", role_validator, role="admin"))
         response = client.get("/me", headers={"X-API-Key": VALID_TOKEN})
-        assert response.status_code == 200
         assert response.json() == {"user": "alice", "role": "admin"}
 
-    def test_require_forwards_kwargs(self):
-        auth = APIKeyHeaderAuth("X-API-Key", role_validator)
-
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(auth.require(role="admin"))):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get("/admin", headers={"X-API-Key": VALID_TOKEN})
-        assert response.status_code == 200
-        assert response.json() == {"user": "alice", "role": "admin"}
-
-    def test_require_preserves_name(self):
-        auth = APIKeyHeaderAuth("X-API-Key", simple_validator)
+    def test_require(self):
+        auth = APIKeyHeaderAuth("X-API-Key", role_validator, role="user")
         derived = auth.require(role="admin")
         assert derived._name == "X-API-Key"
-
-    def test_require_does_not_mutate_original(self):
-        auth = APIKeyHeaderAuth("X-API-Key", role_validator, role="user")
-        auth.require(role="admin")
         assert auth._kwargs == {"role": "user"}
+
+        response = _client(derived).get("/me", headers={"X-API-Key": VALID_TOKEN})
+        assert response.status_code == 200
+        assert response.json() == {"user": "alice", "role": "admin"}
 
     def test_in_multi_auth(self):
         """APIKeyHeaderAuth.authenticate() is exercised inside MultiAuth."""
-        bearer = HTTPBearerAuth(simple_validator)
         api_key = APIKeyHeaderAuth("X-API-Key", simple_validator)
-        multi = MultiAuth(bearer, api_key)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(multi)):
-                return user
-
-        client = TestClient(_app(setup))
+        assert isinstance(api_key, AuthSource)
+        client = _client(MultiAuth(HTTPBearerAuth(simple_validator), api_key))
         # No bearer → falls through to API key header
         response = client.get("/me", headers={"X-API-Key": VALID_TOKEN})
         assert response.status_code == 200
         assert response.json() == {"user": "alice"}
 
-    def test_is_auth_source(self):
-        auth = APIKeyHeaderAuth("X-API-Key", simple_validator)
-        assert isinstance(auth, AuthSource)
-
     @pytest.mark.anyio
-    async def test_extract_no_header(self):
-        from starlette.requests import Request
-
+    async def test_extract(self):
         auth = APIKeyHeaderAuth("X-API-Key", simple_validator)
-        scope = {"type": "http", "method": "GET", "path": "/", "headers": []}
-        request = Request(scope)
-        assert await auth.extract(request) is None
-
-    @pytest.mark.anyio
-    async def test_extract_empty_header(self):
-        from starlette.requests import Request
-
-        auth = APIKeyHeaderAuth("X-API-Key", simple_validator)
-        scope = {
-            "type": "http",
-            "method": "GET",
-            "path": "/",
-            "headers": [(b"x-api-key", b"")],
-        }
-        request = Request(scope)
-        assert await auth.extract(request) is None
-
-    @pytest.mark.anyio
-    async def test_extract_key_present(self):
-        from starlette.requests import Request
-
-        auth = APIKeyHeaderAuth("X-API-Key", simple_validator)
-        scope = {
-            "type": "http",
-            "method": "GET",
-            "path": "/",
-            "headers": [(b"x-api-key", b"mykey")],
-        }
-        request = Request(scope)
-        assert await auth.extract(request) == "mykey"
+        assert await auth.extract(_request()) is None
+        assert await auth.extract(_request(x_api_key="")) is None
+        assert await auth.extract(_request(x_api_key="mykey")) == "mykey"
 
 
 class TestAPIKeyQueryAuth:
-    def test_valid_key_returns_identity(self):
-        auth = APIKeyQueryAuth("api_key", simple_validator)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        client = TestClient(_app(setup))
+    def test_authenticates_the_query_param(self):
+        client = _client(APIKeyQueryAuth("api_key", simple_validator))
         response = client.get("/me", params={"api_key": VALID_TOKEN})
         assert response.status_code == 200
         assert response.json() == {"user": "alice"}
+        assert client.get("/me").status_code == 401
+        assert client.get("/me", params={"api_key": "wrong"}).status_code == 401
 
-    def test_missing_param_returns_401(self):
-        auth = APIKeyQueryAuth("api_key", simple_validator)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get("/me")
-        assert response.status_code == 401
-
-    def test_invalid_key_returns_401(self):
-        auth = APIKeyQueryAuth("api_key", simple_validator)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get("/me", params={"api_key": "wrong"})
-        assert response.status_code == 401
-
-    def test_kwargs_forwarded_to_validator(self):
-        auth = APIKeyQueryAuth("api_key", role_validator, role="admin")
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        client = TestClient(_app(setup))
+        client = _client(APIKeyQueryAuth("api_key", role_validator, role="admin"))
         response = client.get("/me", params={"api_key": VALID_TOKEN})
-        assert response.status_code == 200
         assert response.json() == {"user": "alice", "role": "admin"}
 
     def test_in_multi_auth(self):
         """APIKeyQueryAuth.authenticate() is exercised inside MultiAuth."""
-        bearer = HTTPBearerAuth(simple_validator)
         query = APIKeyQueryAuth("api_key", simple_validator)
-        multi = MultiAuth(bearer, query)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(multi)):
-                return user
-
-        client = TestClient(_app(setup))
+        assert isinstance(query, AuthSource)
+        client = _client(MultiAuth(HTTPBearerAuth(simple_validator), query))
         # No bearer → falls through to API key query param
         response = client.get("/me", params={"api_key": VALID_TOKEN})
         assert response.status_code == 200
         assert response.json() == {"user": "alice"}
 
-    def test_is_auth_source(self):
-        auth = APIKeyQueryAuth("api_key", simple_validator)
-        assert isinstance(auth, AuthSource)
-
     @pytest.mark.anyio
-    async def test_extract_no_param(self):
-        from starlette.requests import Request
-
+    async def test_extract(self):
         auth = APIKeyQueryAuth("api_key", simple_validator)
-        scope = {"type": "http", "method": "GET", "path": "/", "query_string": b""}
-        request = Request(scope)
-        assert await auth.extract(request) is None
-
-    @pytest.mark.anyio
-    async def test_extract_empty_param(self):
-        from starlette.requests import Request
-
-        auth = APIKeyQueryAuth("api_key", simple_validator)
-        scope = {
-            "type": "http",
-            "method": "GET",
-            "path": "/",
-            "query_string": b"api_key=",
-        }
-        request = Request(scope)
-        assert await auth.extract(request) is None
-
-    @pytest.mark.anyio
-    async def test_extract_key_present(self):
-        from starlette.requests import Request
-
-        auth = APIKeyQueryAuth("api_key", simple_validator)
-        scope = {
-            "type": "http",
-            "method": "GET",
-            "path": "/",
-            "query_string": b"api_key=mykey",
-        }
-        request = Request(scope)
-        assert await auth.extract(request) == "mykey"
+        assert await auth.extract(_request()) is None
+        assert await auth.extract(_request(query_string=b"api_key=")) is None
+        assert await auth.extract(_request(query_string=b"api_key=mykey")) == "mykey"
 
 
 class TestMultiAuth:
-    def test_first_source_matches(self):
-        bearer = HTTPBearerAuth(simple_validator)
-        cookie = APIKeyCookieAuth("session", cookie_validator)
-        multi = MultiAuth(bearer, cookie)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(multi)):
-                return user
-
-        client = TestClient(_app(setup))
+    def test_first_present_source_wins(self):
+        client = _client(
+            MultiAuth(
+                HTTPBearerAuth(simple_validator),
+                APIKeyCookieAuth("session", cookie_validator),
+            )
+        )
         response = client.get("/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
         assert response.status_code == 200
         assert response.json() == {"user": "alice"}
 
-    def test_second_source_matches_when_first_absent(self):
-        bearer = HTTPBearerAuth(simple_validator)
-        cookie = APIKeyCookieAuth("session", cookie_validator)
-        multi = MultiAuth(bearer, cookie)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(multi)):
-                return user
-
-        client = TestClient(_app(setup))
         # No Authorization header — falls through to cookie
         response = client.get("/me", cookies={"session": VALID_COOKIE})
         assert response.status_code == 200
         assert response.json() == {"session": VALID_COOKIE}
 
-    def test_no_source_matches_returns_401(self):
-        bearer = HTTPBearerAuth(simple_validator)
-        cookie = APIKeyCookieAuth("session", cookie_validator)
-        multi = MultiAuth(bearer, cookie)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(multi)):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get("/me")
-        assert response.status_code == 401
+        assert client.get("/me").status_code == 401
 
     def test_invalid_credential_does_not_fallthrough(self):
         """If a credential is found but invalid, the next source is NOT tried."""
@@ -761,14 +401,7 @@ class TestMultiAuth:
 
         bearer = HTTPBearerAuth(simple_validator)  # raises on wrong token
         cookie = APIKeyCookieAuth("session", tracking_validator)
-        multi = MultiAuth(bearer, cookie)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(multi)):
-                return user
-
-        client = TestClient(_app(setup))
+        client = _client(MultiAuth(bearer, cookie))
         # Bearer credential present but wrong — should NOT try cookie
         response = client.get(
             "/me",
@@ -793,14 +426,7 @@ class TestMultiAuth:
 
         user_bearer = HTTPBearerAuth(user_validator, prefix="user_")
         org_bearer = HTTPBearerAuth(org_validator, prefix="org_")
-        multi = MultiAuth(user_bearer, org_bearer)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(multi)):
-                return user
-
-        client = TestClient(_app(setup))
+        client = _client(MultiAuth(user_bearer, org_bearer))
 
         response = client.get("/me", headers={"Authorization": "Bearer user_alice"})
         assert response.status_code == 200
@@ -816,111 +442,61 @@ class TestMultiAuth:
         assert user_calls == []
         assert org_calls == ["org_acme"]
 
-    def test_rejects_non_auth_source_at_construction(self):
+    def test_rejects_invalid_sources_at_construction(self):
         with pytest.raises(TypeError, match="AuthSource"):
             MultiAuth(HTTPBearerAuth(role_validator), object())  # ty: ignore[invalid-argument-type]
 
-    def test_rejects_nested_multi_auth(self):
         inner = MultiAuth(HTTPBearerAuth(role_validator))
         with pytest.raises(TypeError, match="nested"):
             MultiAuth(inner)  # ty: ignore[invalid-argument-type]
 
-    def test_require_returns_new_multi_auth(self):
-        from fastapi_multiauth.sources import MultiAuth as MultiAuthClass
-
-        bearer = HTTPBearerAuth(role_validator)
-        multi = MultiAuth(bearer)
-        derived = multi.require(role="admin")
-        assert isinstance(derived, MultiAuthClass)
-        assert derived is not multi
-
     def test_require_forwards_kwargs_to_sources(self):
         """multi.require() propagates to all sources that support it."""
-        bearer = HTTPBearerAuth(role_validator)
-        multi = MultiAuth(bearer)
-
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(multi.require(role="admin"))):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get(
-            "/admin", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+        multi = MultiAuth(HTTPBearerAuth(role_validator))
+        response = _client(multi.require(role="admin")).get(
+            "/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
         )
         assert response.status_code == 200
         assert response.json() == {"user": "alice", "role": "admin"}
 
-    def test_require_skips_sources_without_require(self):
-        """Sources without require() are passed through unchanged."""
-        header_auth = _HeaderAuth(secret="s3cr3t")
-        multi = MultiAuth(header_auth)
-        derived = multi.require(role="admin")
-        assert derived._sources[0] is header_auth
-
-    def test_require_does_not_mutate_original(self):
-        bearer = HTTPBearerAuth(role_validator, role="user")
-        multi = MultiAuth(bearer)
-        multi.require(role="admin")
-        assert bearer._kwargs == {"role": "user"}
-
-    def test_require_mixed_sources(self):
+    def test_require_derives_new_sources(self):
         """require() applies to sources with require(), skips those without."""
-        from typing import cast
+        from fastapi_multiauth.sources import MultiAuth as MultiAuthClass
 
-        bearer = HTTPBearerAuth(role_validator)
+        bearer = HTTPBearerAuth(role_validator, role="user")
         header_auth = _HeaderAuth(secret="s3cr3t")
         multi = MultiAuth(bearer, header_auth)
         derived = multi.require(role="admin")
+        assert isinstance(derived, MultiAuthClass)
+        assert derived is not multi
         # bearer got require() applied, header_auth passed through
         assert cast(HTTPBearerAuth, derived._sources[0])._kwargs == {"role": "admin"}
         assert derived._sources[1] is header_auth
+        assert bearer._kwargs == {"role": "user"}
+        assert MultiAuth(header_auth).require(role="admin")._sources[0] is header_auth
 
 
 class TestRequire:
     def test_bearer_require_forwards_kwargs(self):
-        """require() creates a new instance that passes merged kwargs to validator."""
-        bearer = HTTPBearerAuth(role_validator)
+        """require() kwargs are forwarded, and override kwargs set at instantiation."""
+        for bearer in [
+            HTTPBearerAuth(role_validator),
+            HTTPBearerAuth(role_validator, role="user"),
+        ]:
+            response = _client(bearer.require(role="admin")).get(
+                "/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+            )
+            assert response.status_code == 200
+            assert response.json() == {"user": "alice", "role": "admin"}
 
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(bearer.require(role="admin"))):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get(
-            "/admin", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
-        )
-        assert response.status_code == 200
-        assert response.json() == {"user": "alice", "role": "admin"}
-
-    def test_bearer_require_overrides_existing_kwarg(self):
-        """require() kwargs override kwargs set at instantiation."""
-        bearer = HTTPBearerAuth(role_validator, role="user")
-
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(bearer.require(role="admin"))):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get(
-            "/admin", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
-        )
-        assert response.status_code == 200
-        assert response.json()["role"] == "admin"
-
-    def test_bearer_require_preserves_prefix(self):
-        """require() keeps the prefix of the original instance."""
-        bearer = HTTPBearerAuth(role_validator, prefix="user_")
-        derived = bearer.require(role="admin")
-        assert derived._prefix == "user_"
-
-    def test_bearer_require_does_not_mutate_original(self):
+    def test_require_keeps_the_original_settings(self):
         """require() returns a new instance — original kwargs are unchanged."""
-        bearer = HTTPBearerAuth(role_validator, role="user")
-        bearer.require(role="admin")
+        bearer = HTTPBearerAuth(role_validator, prefix="user_", role="user")
+        assert bearer.require(role="admin")._prefix == "user_"
         assert bearer._kwargs == {"role": "user"}
+
+        cookie = APIKeyCookieAuth("session", cookie_validator)
+        assert cookie.require(scope="admin")._name == "session"
 
     def test_cookie_require_forwards_kwargs(self):
         async def scoped_validator(value: str, *, scope: str) -> dict:
@@ -929,21 +505,11 @@ class TestRequire:
             return {"session": value, "scope": scope}
 
         cookie = APIKeyCookieAuth("session", scoped_validator)
-
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(cookie.require(scope="admin"))):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get("/admin", cookies={"session": VALID_COOKIE})
+        response = _client(cookie.require(scope="admin")).get(
+            "/me", cookies={"session": VALID_COOKIE}
+        )
         assert response.status_code == 200
         assert response.json() == {"session": VALID_COOKIE, "scope": "admin"}
-
-    def test_cookie_require_preserves_name(self):
-        cookie = APIKeyCookieAuth("session", cookie_validator)
-        derived = cookie.require(scope="admin")
-        assert derived._name == "session"
 
     def test_bearer_require_in_multi_auth(self):
         """require() instances work seamlessly inside MultiAuth."""
@@ -955,16 +521,8 @@ class TestRequire:
             return {"user": "alice", "role": role}
 
         bearer = HTTPBearerAuth(prefixed_role_validator, prefix="user_")
-        multi = MultiAuth(bearer.require(role="admin"))
-
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(multi)):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get(
-            "/admin", headers={"Authorization": f"Bearer {PREFIXED_TOKEN}"}
+        response = _client(MultiAuth(bearer.require(role="admin"))).get(
+            "/me", headers={"Authorization": f"Bearer {PREFIXED_TOKEN}"}
         )
         assert response.status_code == 200
         assert response.json() == {"user": "alice", "role": "admin"}
@@ -973,26 +531,8 @@ class TestRequire:
 class TestSyncValidators:
     """Sync (non-async) validators — covers the sync path in _call_validator."""
 
-    def test_bearer_sync_validator(self):
-        def sync_validator(credential: str) -> dict:
-            if credential != VALID_TOKEN:
-                raise UnauthorizedError()
-            return {"user": "alice"}
-
-        bearer = HTTPBearerAuth(sync_validator)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(bearer)):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get("/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
-        assert response.status_code == 200
-        assert response.json() == {"user": "alice"}
-
-    def test_sync_validator_via_authenticate(self):
-        """authenticate() with sync validator (MultiAuth path)."""
+    def test_sync_validator(self):
+        """Both the direct dependency and authenticate() (MultiAuth path)."""
 
         def sync_validator(credential: str) -> dict:
             if credential != VALID_TOKEN:
@@ -1000,17 +540,12 @@ class TestSyncValidators:
             return {"user": "alice"}
 
         bearer = HTTPBearerAuth(sync_validator)
-        multi = MultiAuth(bearer)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(multi)):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get("/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
-        assert response.status_code == 200
-        assert response.json() == {"user": "alice"}
+        for auth in [bearer, MultiAuth(bearer)]:
+            response = _client(auth).get(
+                "/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+            )
+            assert response.status_code == 200
+            assert response.json() == {"user": "alice"}
 
 
 class TestCookieAuthSigned:
@@ -1018,8 +553,6 @@ class TestCookieAuthSigned:
 
     def test_valid_signed_cookie_via_set_cookie(self):
         """set_cookie signs the value; the signed cookie is verified on read."""
-        from fastapi import Response
-
         # secure=False for test client which runs over plain HTTP
         auth = APIKeyCookieAuth(
             "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
@@ -1041,58 +574,45 @@ class TestCookieAuthSigned:
         assert response.status_code == 200
         assert response.json() == {"session": VALID_COOKIE}
 
-    def test_set_cookie_has_secure_flag_by_default(self):
-        """set_cookie includes Secure flag when secure=True (the default)."""
-        from starlette.responses import Response as StarletteResponse
+    def test_set_cookie_attributes(self):
+        """Review invariant: cookie defaults are Secure + HttpOnly + SameSite=lax."""
 
-        auth = APIKeyCookieAuth("session", cookie_validator, secret_key=COOKIE_SECRET)
-        response = StarletteResponse()
-        auth.set_cookie(response, "value")
-        assert "secure" in response.headers["set-cookie"].lower()
+        def header(**kwargs) -> str:
+            response = Response()
+            APIKeyCookieAuth("session", cookie_validator, **kwargs).set_cookie(
+                response, "value"
+            )
+            return response.headers["set-cookie"].lower()
 
-    def test_set_cookie_no_secure_flag_when_disabled(self):
-        """set_cookie omits Secure flag when secure=False (local dev)."""
-        from starlette.responses import Response as StarletteResponse
+        default = header(secret_key=COOKIE_SECRET)
+        assert "secure" in default
+        assert "httponly" in default
+        assert "samesite=lax" in default
+        assert "secure" not in header(secret_key=COOKIE_SECRET, secure=False)
 
-        auth = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
-        )
-        response = StarletteResponse()
-        auth.set_cookie(response, "value")
-        assert "secure" not in response.headers["set-cookie"].lower()
-
-    def test_set_cookie_defaults_httponly_samesite_lax(self):
-        """Review invariant: cookie defaults are HttpOnly + SameSite=lax."""
-        from starlette.responses import Response as StarletteResponse
-
-        auth = APIKeyCookieAuth("session", cookie_validator, secret_key=COOKIE_SECRET)
-        response = StarletteResponse()
-        auth.set_cookie(response, "value")
-        header = response.headers["set-cookie"].lower()
-        assert "httponly" in header
-        assert "samesite=lax" in header
-
-    def test_set_cookie_custom_samesite_domain_path(self):
-        from starlette.responses import Response as StarletteResponse
-
-        auth = APIKeyCookieAuth(
-            "session",
-            cookie_validator,
+        custom = header(
             secret_key=COOKIE_SECRET,
             samesite="strict",
             domain="example.com",
             path="/app",
         )
-        response = StarletteResponse()
-        auth.set_cookie(response, "value")
-        header = response.headers["set-cookie"].lower()
-        assert "samesite=strict" in header
-        assert "domain=example.com" in header
-        assert "path=/app" in header
+        assert "samesite=strict" in custom
+        assert "domain=example.com" in custom
+        assert "path=/app" in custom
+
+    def test_without_secret_key_the_value_is_raw(self):
+        auth = APIKeyCookieAuth("session", cookie_validator)
+        response = Response()
+        auth.set_cookie(response, "rawvalue")
+        assert "session=rawvalue" in response.headers["set-cookie"]
+        with pytest.raises(RuntimeError, match="secret_key"):
+            auth._sign("data")
 
     def test_delete_cookie_keeps_cookie_attributes(self):
         """delete_cookie clears the cookie on the same domain/path it was set."""
-        from starlette.responses import Response as StarletteResponse
+        response = Response()
+        APIKeyCookieAuth("session", cookie_validator).delete_cookie(response)
+        assert "session" in response.headers["set-cookie"]
 
         auth = APIKeyCookieAuth(
             "session",
@@ -1101,56 +621,42 @@ class TestCookieAuthSigned:
             domain="example.com",
             path="/app",
         )
-        response = StarletteResponse()
+        response = Response()
         auth.delete_cookie(response)
         header = response.headers["set-cookie"].lower()
         assert "session" in header
         assert "domain=example.com" in header
         assert "path=/app" in header
 
-    def test_tampered_value_returns_401(self):
-        """Altering the signed payload invalidates the signature."""
+    def test_forged_cookies_return_401(self):
         auth = APIKeyCookieAuth(
             "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
         )
-        client = _client(auth)
-        signed = auth._sign(VALID_COOKIE)
-        payload, _, rest = signed.partition(".")
-        tampered = f"forged{payload[6:]}.{rest}"
-        response = client.get("/me", cookies={"session": tampered})
-        assert response.status_code == 401
-
-    def test_truncated_cookie_returns_401(self):
-        auth = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
-        )
-        client = _client(auth)
-        signed = auth._sign(VALID_COOKIE)
-        response = client.get("/me", cookies={"session": signed[:-5]})
-        assert response.status_code == 401
-
-    def test_signature_from_other_key_returns_401(self):
-        """A cookie signed with a different secret is rejected."""
-        other = APIKeyCookieAuth(
+        other_key = APIKeyCookieAuth(
             "session",
             cookie_validator,
             secret_key="another-secret-key-32-bytes-or-more!!",
         )
-        auth = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
+        # Same secret_key, different cookie name → signature must not transfer.
+        other_name = APIKeyCookieAuth(
+            "admin_session", cookie_validator, secret_key=COOKIE_SECRET
         )
+        signed = auth._sign(VALID_COOKIE)
+        payload, _, rest = signed.partition(".")
         client = _client(auth)
-        response = client.get("/me", cookies={"session": other._sign(VALID_COOKIE)})
-        assert response.status_code == 401
+        for forged in [
+            f"forged{payload[6:]}.{rest}",
+            signed[:-5],
+            other_key._sign(VALID_COOKIE),
+            other_name._sign(VALID_COOKIE),
+            VALID_COOKIE,
+        ]:
+            response = client.get("/me", cookies={"session": forged})
+            assert response.status_code == 401, forged
 
-    def test_unsigned_raw_value_returns_401(self):
-        """A bare (unsigned) value is rejected when signing is enabled."""
-        auth = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
-        )
-        client = _client(auth)
-        response = client.get("/me", cookies={"session": VALID_COOKIE})
-        assert response.status_code == 401
+        # A present-but-empty cookie is treated as absent, not validated.
+        assert client.get("/me", headers={"Cookie": "session="}).status_code == 401
+        assert client.get("/me", cookies={"session": signed}).status_code == 200
 
     def test_expired_signed_cookie_returns_401(self):
         """A signed cookie older than ttl is rejected; a fresh one accepted."""
@@ -1166,61 +672,6 @@ class TestCookieAuthSigned:
         with patch("time.time", return_value=time.time() + 61):
             response = client.get("/me", cookies={"session": signed})
         assert response.status_code == 401
-
-    def test_cookie_signed_for_other_name_returns_401(self):
-        """Same secret_key, different cookie name → signature must not transfer."""
-        session_auth = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
-        )
-        admin_auth = APIKeyCookieAuth(
-            "admin_session", cookie_validator, secret_key=COOKIE_SECRET
-        )
-
-        client = _client(session_auth)
-        # A cookie minted by the admin_session instance, replayed under the
-        # session cookie name, must be rejected despite the shared secret.
-        forged = admin_auth._sign(VALID_COOKIE)
-        response = client.get("/me", cookies={"session": forged})
-        assert response.status_code == 401
-
-        # Control: the same value signed by the session instance is accepted.
-        response = client.get(
-            "/me", cookies={"session": session_auth._sign(VALID_COOKIE)}
-        )
-        assert response.status_code == 200
-
-    def test_empty_cookie_value_returns_401(self):
-        """A present-but-empty cookie is treated as absent, not validated."""
-        auth = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
-        )
-        client = _client(auth)
-        response = client.get("/me", headers={"Cookie": "session="})
-        assert response.status_code == 401
-
-    def test_sign_without_secret_key_raises(self):
-        """Calling _sign on an instance without secret_key raises RuntimeError."""
-        auth = APIKeyCookieAuth("session", cookie_validator)
-        with pytest.raises(RuntimeError, match="secret_key"):
-            auth._sign("data")
-
-    def test_set_cookie_without_secret(self):
-        """set_cookie without secret_key writes the raw value."""
-        from starlette.responses import Response as StarletteResponse
-
-        auth = APIKeyCookieAuth("session", cookie_validator)
-        response = StarletteResponse()
-        auth.set_cookie(response, "rawvalue")
-        assert "session=rawvalue" in response.headers["set-cookie"]
-
-    def test_delete_cookie(self):
-        """delete_cookie produces a Set-Cookie header that clears the session."""
-        from starlette.responses import Response as StarletteResponse
-
-        auth = APIKeyCookieAuth("session", cookie_validator)
-        response = StarletteResponse()
-        auth.delete_cookie(response)
-        assert "session" in response.headers["set-cookie"]
 
 
 async def sid_validator(value: str, *, session_id: str) -> dict:
@@ -1263,12 +714,17 @@ class TestCookieSessionId:
             **kwargs,
         )
 
-    def test_sid_reaches_validator_and_value_is_intact(self):
+    def test_sid_round_trip(self):
         with _sid_client(self._auth()) as client:
             minted = client.get("/login").json()["sid"]
             response = client.get("/me")
-        assert response.status_code == 200
-        assert response.json() == {"session": VALID_COOKIE, "sid": minted}
+            assert response.status_code == 200
+            assert response.json() == {"session": VALID_COOKIE, "sid": minted}
+            assert client.get("/whoami").json()["sid"] == minted
+            # the whole point: readable again, so it was not a one-shot
+            assert client.get("/whoami").json()["sid"] == minted
+            assert client.cookies.get("session")
+            assert client.get("/logout").json()["sid"] == minted
 
     def test_value_containing_delimiter_survives_roundtrip(self):
         """The app's payload may contain dots: only the first one splits."""
@@ -1276,206 +732,114 @@ class TestCookieSessionId:
             minted = client.get("/login").json()["sid"]
             assert client.get("/me").json() == {"session": "user.42:v3", "sid": minted}
 
-    def test_each_set_cookie_mints_a_distinct_sid(self):
-        auth = self._auth()
-        first = auth.set_cookie(Response(), VALID_COOKIE)
-        second = auth.set_cookie(Response(), VALID_COOKIE)
-        assert first != second
-
-    def test_cookie_minted_without_session_id_returns_401(self):
-        """The salt differs, so pre-upgrade cookies fail closed instead of parsing."""
-        legacy = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
-        )
-        response = _client(self._auth()).get(
-            "/me", cookies={"session": legacy._sign(VALID_COOKIE)}
-        )
-        assert response.status_code == 401
-
-    def test_returns_the_minted_sid_without_clearing_the_cookie(self):
-        with _sid_client(self._auth()) as client:
-            minted = client.get("/login").json()["sid"]
-            assert client.get("/whoami").json()["sid"] == minted
-            # the whole point: readable again, so it was not a one-shot
-            assert client.get("/whoami").json()["sid"] == minted
-            assert client.cookies.get("session")
-
-    @pytest.mark.parametrize(
-        "cookies",
-        [{}, {"session": "forged"}, {"session": ""}],
-        ids=["absent", "forged", "empty"],
-    )
-    def test_returns_none_for_unusable_cookie(self, cookies):
-        client = _sid_client(self._auth())
-        assert client.get("/whoami", cookies=cookies).json()["sid"] is None
-        assert client.get("/logout", cookies=cookies).json()["sid"] is None
-
-    def test_expired_cookie_reads_as_none(self):
-        with _sid_client(self._auth(ttl=60)) as client:
-            client.get("/login")
-            with patch("time.time", return_value=time.time() + 61):
-                assert client.get("/whoami").json()["sid"] is None
-
-    def test_delete_cookie_returns_sid_for_revocation(self):
-        with _sid_client(self._auth()) as client:
-            minted = client.get("/login").json()["sid"]
-            assert client.get("/logout").json()["sid"] == minted
-
-    def test_delete_cookie_returns_none_without_request(self):
-        assert self._auth().delete_cookie(Response()) is None
-
     def test_rotating_the_cookie_swaps_the_sid_and_keeps_the_session(self):
         """Session-fixation defence: the newest cookie wins on the next request."""
-        with _sid_client(self._auth()) as client:
+        auth = self._auth()
+        assert auth.set_cookie(Response(), VALID_COOKIE) != auth.set_cookie(
+            Response(), VALID_COOKIE
+        )
+        with _sid_client(auth) as client:
             first = client.get("/login").json()["sid"]
             second = client.get("/login").json()["sid"]
             assert second != first
             assert client.get("/me").json() == {"session": VALID_COOKIE, "sid": second}
 
-    @pytest.mark.parametrize(
-        "auth_factory",
-        [
-            lambda: APIKeyCookieAuth(
-                "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
-            ),
-            lambda: APIKeyCookieAuth("session", cookie_validator, secure=False),
-        ],
-        ids=["signed", "unsigned"],
-    )
-    def test_reads_none_when_session_id_disabled(self, auth_factory):
-        """Nothing to read, and the unsigned path must never try to verify."""
-        with _sid_client(auth_factory()) as client:
-            client.get("/login")
-            assert client.get("/whoami").json()["sid"] is None
-            assert client.get("/logout").json()["sid"] is None
+    def test_unusable_cookie_reads_as_none(self):
+        client = _sid_client(self._auth())
+        for cookies in [{}, {"session": "forged"}, {"session": ""}]:
+            assert client.get("/whoami", cookies=cookies).json()["sid"] is None
+            assert client.get("/logout", cookies=cookies).json()["sid"] is None
+        assert self._auth().delete_cookie(Response()) is None
 
-    def test_requires_secret_key(self):
+        # The salt differs, so pre-upgrade cookies fail closed instead of parsing.
+        legacy = APIKeyCookieAuth(
+            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
+        )
+        response = client.get("/me", cookies={"session": legacy._sign(VALID_COOKIE)})
+        assert response.status_code == 401
+
+        with _sid_client(self._auth(ttl=60)) as client:
+            client.get("/login")
+            with patch("time.time", return_value=time.time() + 61):
+                assert client.get("/whoami").json()["sid"] is None
+
+    def test_reads_none_when_session_id_disabled(self):
+        """Nothing to read, and the unsigned path must never try to verify."""
+        signed = APIKeyCookieAuth(
+            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
+        )
+        assert signed.set_cookie(Response(), VALID_COOKIE) is None
+        unsigned = APIKeyCookieAuth("session", cookie_validator, secure=False)
+        for auth in [signed, unsigned]:
+            with _sid_client(auth) as client:
+                client.get("/login")
+                assert client.get("/whoami").json()["sid"] is None
+                assert client.get("/logout").json()["sid"] is None
+
+    def test_misconfiguration_rejected(self):
         with pytest.raises(ValueError, match="session_id requires secret_key"):
             APIKeyCookieAuth("session", sid_validator, session_id=True)
-
-    def test_requires_validator_accepting_session_id(self):
         with pytest.raises(ValueError, match="declaring a 'session_id' parameter"):
             APIKeyCookieAuth(
                 "session", cookie_validator, secret_key=COOKIE_SECRET, session_id=True
             )
-
-    def test_session_id_kwarg_rejected_via_require(self):
-        """'session_id' is injected, so require() cannot override it."""
+        # 'session_id' is injected, so require() cannot override it.
         with pytest.raises(ValueError, match="reserved"):
             self._auth().require(session_id="forged")
 
-    def test_set_cookie_returns_none_when_disabled(self):
-        auth = APIKeyCookieAuth("session", cookie_validator, secret_key=COOKIE_SECRET)
-        assert auth.set_cookie(Response(), VALID_COOKIE) is None
 
-
-class TestCookieAccessors:
-    """name and ttl are readable so callers stop duplicating them."""
+class TestCookieConfig:
+    """Cookie settings: accessors, SR-M5 weak secrets, and name prefix rules."""
 
     def test_name_and_ttl_are_readable(self):
+        """name and ttl are readable so callers stop duplicating them."""
         auth = APIKeyCookieAuth("sess", cookie_validator, ttl=1234)
         assert (auth.name, auth.ttl) == ("sess", 1234)
-
-    def test_ttl_defaults_to_24h(self):
         assert APIKeyCookieAuth("sess", cookie_validator).ttl == 86400
 
+    def test_weak_secret_key_rejected(self):
+        """SR-M5: weak secret_key configurations must fail at startup."""
+        for secret_key, match in [
+            ("", "secret_key"),
+            ("short", "at least 32"),
+            ([], "at least one key"),
+            ([COOKIE_SECRET, "short"], "at least 32"),
+        ]:
+            with pytest.raises(ValueError, match=match):
+                APIKeyCookieAuth("session", cookie_validator, secret_key=secret_key)
+        for ttl in [0, -1]:
+            with pytest.raises(ValueError, match="ttl"):
+                APIKeyCookieAuth(
+                    "session", cookie_validator, secret_key="x" * 32, ttl=ttl
+                )
 
-class TestCookieSecretValidation:
-    """SR-M5: weak secret_key configurations must fail at startup."""
-
-    def test_empty_string_rejected(self):
-        with pytest.raises(ValueError, match="secret_key"):
-            APIKeyCookieAuth("session", cookie_validator, secret_key="")
-
-    def test_short_key_rejected(self):
-        with pytest.raises(ValueError, match="at least 32"):
-            APIKeyCookieAuth("session", cookie_validator, secret_key="short")
-
-    def test_empty_sequence_rejected(self):
-        with pytest.raises(ValueError, match="at least one key"):
-            APIKeyCookieAuth("session", cookie_validator, secret_key=[])
-
-    def test_short_key_in_sequence_rejected(self):
-        good = COOKIE_SECRET
-        with pytest.raises(ValueError, match="at least 32"):
-            APIKeyCookieAuth("session", cookie_validator, secret_key=[good, "short"])
-
-    def test_exactly_32_byte_key_accepted(self):
         APIKeyCookieAuth("session", cookie_validator, secret_key="x" * 32)
-
-    def test_no_secret_key_accepted(self):
         APIKeyCookieAuth("session", cookie_validator)
 
-    @pytest.mark.parametrize("ttl", [0, -1])
-    def test_non_positive_ttl_rejected(self, ttl):
-        with pytest.raises(ValueError, match="ttl"):
-            APIKeyCookieAuth("session", cookie_validator, secret_key="x" * 32, ttl=ttl)
-
-
-class TestCookieNamePrefix:
-    @pytest.mark.parametrize("name", ["__Host-session", "__Secure-session"])
-    def test_prefixed_name_with_defaults_accepted(self, name):
-        APIKeyCookieAuth(name, cookie_validator, secret_key=COOKIE_SECRET)
-
-    def test_secure_prefix_allows_domain_and_path(self):
+    def test_name_prefix_rules(self):
+        for name in ["__Host-session", "__Secure-session"]:
+            APIKeyCookieAuth(name, cookie_validator, secret_key=COOKIE_SECRET)
         APIKeyCookieAuth(
             "__Secure-session", cookie_validator, domain="example.com", path="/app"
         )
-
-    @pytest.mark.parametrize("name", ["__Host-session", "__secure-session"])
-    def test_prefixed_name_without_secure_rejected(self, name):
-        with pytest.raises(ValueError, match="secure=True"):
-            APIKeyCookieAuth(name, cookie_validator, secure=False)
-
-    @pytest.mark.parametrize("kwargs", [{"domain": "example.com"}, {"path": "/app"}])
-    def test_host_prefix_with_domain_or_path_rejected(self, kwargs):
-        with pytest.raises(ValueError, match="__Host-"):
-            APIKeyCookieAuth("__HOST-session", cookie_validator, **kwargs)
-
-    def test_unprefixed_name_unconstrained(self):
         APIKeyCookieAuth(
             "session", cookie_validator, secure=False, domain="example.com", path="/x"
         )
 
+        for name in ["__Host-session", "__secure-session"]:
+            with pytest.raises(ValueError, match="secure=True"):
+                APIKeyCookieAuth(name, cookie_validator, secure=False)
+        host_violations: list[dict[str, Any]] = [
+            {"domain": "example.com"},
+            {"path": "/app"},
+        ]
+        for kwargs in host_violations:
+            with pytest.raises(ValueError, match="__Host-"):
+                APIKeyCookieAuth("__HOST-session", cookie_validator, **kwargs)
+
 
 class TestCookieKeyRotation:
     """secret_key rotation: first key signs, every key verifies."""
-
-    OLD = "old-rotation-secret-key-32-bytes-min!"
-    NEW = "new-rotation-secret-key-32-bytes-min!"
-
-    def test_old_cookie_still_valid_after_rotation(self):
-        old_auth = APIKeyCookieAuth("session", cookie_validator, secret_key=self.OLD)
-        rotated = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=[self.NEW, self.OLD], secure=False
-        )
-        client = _client(rotated)
-        response = client.get("/me", cookies={"session": old_auth._sign(VALID_COOKIE)})
-        assert response.status_code == 200
-
-    def test_new_cookies_signed_with_first_key(self):
-        rotated = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=[self.NEW, self.OLD]
-        )
-        new_only = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=self.NEW, secure=False
-        )
-        client = _client(new_only)
-        response = client.get("/me", cookies={"session": rotated._sign(VALID_COOKIE)})
-        assert response.status_code == 200
-
-    def test_removed_key_rejected(self):
-        old_auth = APIKeyCookieAuth("session", cookie_validator, secret_key=self.OLD)
-        new_only = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=[self.NEW], secure=False
-        )
-        client = _client(new_only)
-        response = client.get("/me", cookies={"session": old_auth._sign(VALID_COOKIE)})
-        assert response.status_code == 401
-
-
-class TestCookieSignerWireFormat:
-    """Cookies stay byte-compatible with a stock signer despite precomputed keys."""
 
     OLD = "old-rotation-secret-key-32-bytes-min!"
     NEW = "new-rotation-secret-key-32-bytes-min!"
@@ -1487,14 +851,30 @@ class TestCookieSignerWireFormat:
             digest_method=hashlib.sha256,
         )
 
-    def test_stock_signer_accepts_our_cookie(self):
+    def test_rotation(self):
+        old_auth = APIKeyCookieAuth("session", cookie_validator, secret_key=self.OLD)
+        rotated = APIKeyCookieAuth(
+            "session", cookie_validator, secret_key=[self.NEW, self.OLD], secure=False
+        )
+        new_only = APIKeyCookieAuth(
+            "session", cookie_validator, secret_key=[self.NEW], secure=False
+        )
+        old_cookie = {"session": old_auth._sign(VALID_COOKIE)}
+        assert _client(rotated).get("/me", cookies=old_cookie).status_code == 200
+        assert _client(new_only).get("/me", cookies=old_cookie).status_code == 401
+        response = _client(new_only).get(
+            "/me", cookies={"session": rotated._sign(VALID_COOKIE)}
+        )
+        assert response.status_code == 200
+
+    def test_wire_format_matches_a_stock_signer(self):
+        """Cookies stay byte-compatible with a stock signer despite precomputed keys."""
         auth = APIKeyCookieAuth("session", cookie_validator, secret_key=self.NEW)
         signed = auth._sign(VALID_COOKIE).encode()
         assert (
             self._stock(self.NEW).unsign(signed, max_age=86400) == VALID_COOKIE.encode()
         )
 
-    def test_we_accept_a_stock_cookie_from_the_rotated_out_key(self):
         auth = APIKeyCookieAuth(
             "session", cookie_validator, secret_key=[self.NEW, self.OLD]
         )
@@ -1516,60 +896,78 @@ class TestCookieSignerWireFormat:
 class TestSecurityScopes:
     """Scopes declared via Security(..., scopes=[...]) are enforced, not ignored."""
 
-    def test_scopes_declared_without_scopes_param_raises(self):
-        """Fail closed: validator can't receive scopes → RuntimeError, not silent authz skip."""
-        bearer = HTTPBearerAuth(simple_validator)
+    def test_scopes_reach_the_validator(self):
+        received: list[tuple[str, list[str]]] = []
 
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(bearer, scopes=["admin"])):
-                return user
+        def recorder(name: str):
+            async def scoped_validator(credential: str, scopes: list[str]) -> dict:
+                received.append((name, scopes))
+                return {"user": "alice"}
 
-        client = TestClient(_app(setup))
-        with pytest.raises(RuntimeError, match="security scopes"):
-            client.get("/admin", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
+            return scoped_validator
 
-    def test_scopes_passed_to_bearer_validator(self):
-        received: list[list[str]] = []
-
-        async def scoped_validator(credential: str, scopes: list[str]) -> dict:
-            if credential != VALID_TOKEN:
-                raise UnauthorizedError()
-            received.append(scopes)
+        def sync_scoped_validator(credential: str, scopes: list[str]) -> dict:
+            received.append(("sync", scopes))
             return {"user": "alice"}
 
-        bearer = HTTPBearerAuth(scoped_validator)
+        async def kw_scoped_validator(credential: str, *, scopes: list[str]) -> dict:
+            received.append(("kw", scopes))
+            return {"user": "alice"}
 
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(bearer, scopes=["admin", "billing"])):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get(
-            "/admin", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+        bearer = HTTPBearerAuth(recorder("bearer"))
+        cookie = APIKeyCookieAuth("session", recorder("cookie"))
+        api_key = APIKeyHeaderAuth("X-API-Key", recorder("api-key"))
+        multi = MultiAuth(
+            HTTPBearerAuth(recorder("multi")),
+            APIKeyCookieAuth("session", recorder("x")),
         )
-        assert response.status_code == 200
-        assert received == [["admin", "billing"]]
-
-    def test_no_scopes_declared_passes_empty_list(self):
-        received: list[list[str]] = []
-
-        async def scoped_validator(credential: str, *, scopes: list[str]) -> dict:
-            received.append(scopes)
-            return {"user": "alice"}
-
-        bearer = HTTPBearerAuth(scoped_validator)
+        sync = HTTPBearerAuth(sync_scoped_validator)
+        unscoped = HTTPBearerAuth(kw_scoped_validator)
 
         def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(bearer)):
+            @app.get("/bearer")
+            async def r1(user=Security(bearer, scopes=["admin", "billing"])):
+                return user
+
+            @app.get("/cookie")
+            async def r2(user=Security(cookie, scopes=["admin"])):
+                return user
+
+            @app.get("/api-key")
+            async def r3(user=Security(api_key, scopes=["admin"])):
+                return user
+
+            @app.get("/multi")
+            async def r4(user=Security(multi, scopes=["admin"])):
+                return user
+
+            @app.get("/sync")
+            async def r5(user=Security(sync, scopes=["admin"])):
+                return user
+
+            @app.get("/unscoped")
+            async def r6(user=Security(unscoped)):
                 return user
 
         client = TestClient(_app(setup))
-        response = client.get("/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
-        assert response.status_code == 200
-        assert received == [[]]
+        bearer_header = {"Authorization": f"Bearer {VALID_TOKEN}"}
+        for path in ["/bearer", "/multi", "/sync", "/unscoped"]:
+            assert client.get(path, headers=bearer_header).status_code == 200
+        assert (
+            client.get("/cookie", cookies={"session": VALID_COOKIE}).status_code == 200
+        )
+        assert (
+            client.get("/api-key", headers={"X-API-Key": VALID_TOKEN}).status_code
+            == 200
+        )
+        assert received == [
+            ("bearer", ["admin", "billing"]),
+            ("multi", ["admin"]),
+            ("sync", ["admin"]),
+            ("kw", []),
+            ("cookie", ["admin"]),
+            ("api-key", ["admin"]),
+        ]
 
     def test_scoped_validator_can_reject(self):
         """A validator enforcing scopes turns missing scopes into a 401."""
@@ -1592,136 +990,49 @@ class TestSecurityScopes:
         )
         assert response.status_code == 401
 
-    def test_scopes_passed_to_cookie_validator(self):
-        received: list[list[str]] = []
+    def test_scopes_declared_without_scopes_param_raises(self):
+        """Fail closed: validator can't receive scopes → RuntimeError, not silent authz skip."""
+        for auth, kwargs in [
+            (
+                HTTPBearerAuth(simple_validator),
+                {"headers": {"Authorization": f"Bearer {VALID_TOKEN}"}},
+            ),
+            (
+                APIKeyCookieAuth("session", cookie_validator),
+                {"cookies": {"session": VALID_COOKIE}},
+            ),
+            (
+                APIKeyHeaderAuth("X-API-Key", simple_validator),
+                {"headers": {"X-API-Key": VALID_TOKEN}},
+            ),
+            (
+                MultiAuth(HTTPBearerAuth(simple_validator)),
+                {"headers": {"Authorization": f"Bearer {VALID_TOKEN}"}},
+            ),
+            # AuthSource.authenticate_scoped default raises when scopes are declared.
+            (_HeaderAuth(secret="s3cr3t"), {"headers": {"X-Token": "s3cr3t"}}),
+        ]:
 
-        async def scoped_validator(value: str, scopes: list[str]) -> dict:
-            received.append(scopes)
-            return {"session": value}
+            def setup(app: FastAPI, auth=auth):
+                @app.get("/admin")
+                async def admin(user=Security(auth, scopes=["admin"])):
+                    return user
 
-        auth = APIKeyCookieAuth("session", scoped_validator)
+            client = TestClient(_app(setup))
+            with pytest.raises(RuntimeError, match="security scopes"):
+                client.get("/admin", **kwargs)
 
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(auth, scopes=["admin"])):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get("/admin", cookies={"session": VALID_COOKIE})
-        assert response.status_code == 200
-        assert received == [["admin"]]
-
-    def test_cookie_scopes_declared_without_scopes_param_raises(self):
-        auth = APIKeyCookieAuth("session", cookie_validator)
-
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(auth, scopes=["admin"])):
-                return user
-
-        client = TestClient(_app(setup))
-        with pytest.raises(RuntimeError, match="security scopes"):
-            client.get("/admin", cookies={"session": VALID_COOKIE})
-
-    def test_scopes_passed_to_api_key_validator(self):
-        received: list[list[str]] = []
-
-        async def scoped_validator(api_key: str, scopes: list[str]) -> dict:
-            received.append(scopes)
-            return {"user": "alice"}
-
-        auth = APIKeyHeaderAuth("X-API-Key", scoped_validator)
-
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(auth, scopes=["admin"])):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get("/admin", headers={"X-API-Key": VALID_TOKEN})
-        assert response.status_code == 200
-        assert received == [["admin"]]
-
-    def test_api_key_scopes_declared_without_scopes_param_raises(self):
-        auth = APIKeyHeaderAuth("X-API-Key", simple_validator)
-
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(auth, scopes=["admin"])):
-                return user
-
-        client = TestClient(_app(setup))
-        with pytest.raises(RuntimeError, match="security scopes"):
-            client.get("/admin", headers={"X-API-Key": VALID_TOKEN})
-
-    def test_multi_auth_forwards_scopes_to_matched_source(self):
-        received: list[list[str]] = []
-
-        async def scoped_validator(credential: str, scopes: list[str]) -> dict:
-            received.append(scopes)
-            return {"user": "alice"}
-
-        bearer = HTTPBearerAuth(scoped_validator)
-        cookie = APIKeyCookieAuth("session", scoped_validator)
-        multi = MultiAuth(bearer, cookie)
-
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(multi, scopes=["admin"])):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get(
-            "/admin", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
-        )
-        assert response.status_code == 200
-        assert received == [["admin"]]
-
-    def test_multi_auth_scopes_fail_closed_on_unscoped_source(self):
-        bearer = HTTPBearerAuth(simple_validator)
-        multi = MultiAuth(bearer)
-
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(multi, scopes=["admin"])):
-                return user
-
-        client = TestClient(_app(setup))
-        with pytest.raises(RuntimeError, match="security scopes"):
-            client.get("/admin", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
-
-    def test_custom_source_default_fails_closed(self):
-        """AuthSource.authenticate_scoped default raises when scopes are declared."""
-        auth = _HeaderAuth(secret="s3cr3t")
-
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(auth, scopes=["admin"])):
-                return user
-
-        client = TestClient(_app(setup))
-        with pytest.raises(RuntimeError, match="security scopes"):
-            client.get("/admin", headers={"X-Token": "s3cr3t"})
-
-    @pytest.mark.parametrize(
-        "factory",
-        [
+    def test_scopes_kwarg_rejected(self):
+        """'scopes' is reserved for route-declared scopes — fail at startup."""
+        for factory in [
             lambda: HTTPBearerAuth(simple_validator, scopes=["admin"]),
             lambda: APIKeyCookieAuth("session", cookie_validator, scopes=["admin"]),
             lambda: APIKeyHeaderAuth("X-API-Key", simple_validator, scopes=["admin"]),
-        ],
-        ids=["bearer", "cookie", "api-key"],
-    )
-    def test_scopes_kwarg_rejected_at_init(self, factory):
-        """'scopes' is reserved for route-declared scopes — fail at startup."""
-        with pytest.raises(ValueError, match="reserved"):
-            factory()
-
-    def test_scopes_kwarg_rejected_via_require(self):
-        """require() goes through __init__, so the same guard applies."""
-        bearer = HTTPBearerAuth(simple_validator)
-        with pytest.raises(ValueError, match="reserved"):
-            bearer.require(scopes=["admin"])
+            # require() goes through __init__, so the same guard applies.
+            lambda: HTTPBearerAuth(simple_validator).require(scopes=["admin"]),
+        ]:
+            with pytest.raises(ValueError, match="reserved"):
+                factory()
 
     def test_accepts_scopes_non_introspectable_callable(self):
         """Callables without an inspectable signature are treated as scope-less."""
@@ -1731,41 +1042,14 @@ class TestSecurityScopes:
         assert _accepts_kwarg(not_introspectable, "scopes") is False
 
     @pytest.mark.anyio
-    async def test_bearer_authenticate_passes_no_scopes(self):
+    async def test_authenticate_passes_no_scopes(self):
         """authenticate() remains the scope-less entry point."""
         bearer = HTTPBearerAuth(simple_validator)
         assert await bearer.authenticate(VALID_TOKEN) == {"user": "alice"}
-
-    @pytest.mark.anyio
-    async def test_cookie_authenticate_passes_no_scopes(self):
         auth = APIKeyCookieAuth("session", cookie_validator)
         assert await auth.authenticate(VALID_COOKIE) == {"session": VALID_COOKIE}
-
-    @pytest.mark.anyio
-    async def test_api_key_authenticate_passes_no_scopes(self):
         auth = APIKeyHeaderAuth("X-API-Key", simple_validator)
         assert await auth.authenticate(VALID_TOKEN) == {"user": "alice"}
-
-    def test_sync_validator_with_scopes(self):
-        received: list[list[str]] = []
-
-        def sync_scoped_validator(credential: str, scopes: list[str]) -> dict:
-            received.append(scopes)
-            return {"user": "alice"}
-
-        bearer = HTTPBearerAuth(sync_scoped_validator)
-
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(bearer, scopes=["admin"])):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get(
-            "/admin", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
-        )
-        assert response.status_code == 200
-        assert received == [["admin"]]
 
 
 # Minimal concrete subclass used only in tests below.
@@ -1836,78 +1120,10 @@ class TestRequestForwarding:
         assert first.json() == {"token": "first"}
         assert second.json() == {"token": "second"}
 
-    def test_jwt_validator_does_not_opt_in(self):
-        """JWTValidator declares no 'request', so JWT-backed bearers are untouched."""
-        bearer = HTTPBearerAuth(JWTValidator(secret="s" * 32))
-        assert bearer._accepts_request is False
-
-    def test_non_introspectable_override_is_taken_at_its_word(self):
-        """A callable with no inspectable signature is assumed current, not stale."""
-        assert _override_accepts_request(cast(Callable[..., Any], object())) is True
-
-    def test_override_predating_the_request_kwarg_still_works(self):
-        """A custom source written before this feature keeps its original call shape."""
-
-        class _StaleAuth(_HeaderAuth):
-            async def authenticate_scoped(  # ty: ignore[invalid-method-override]
-                self, credential: str, scopes: list[str]
-            ) -> dict:
-                return await self.authenticate(credential)
-
-        auth = _StaleAuth("s3cr3t")
-        assert auth._scoped_takes_request is False
-        response = _client(auth).get("/me", headers={"X-Token": "s3cr3t"})
-        assert response.status_code == 200
-        assert response.json() == {"token": "s3cr3t"}
-
-    @pytest.mark.anyio
-    async def test_stale_override_reached_through_authenticate(self):
-        """authenticate() honours the same old call shape dispatch() does."""
-
-        class _StaleBearer(HTTPBearerAuth):
-            async def authenticate_scoped(  # ty: ignore[invalid-method-override]
-                self, credential: str, scopes: list[str]
-            ) -> dict:
-                return {"user": credential}
-
-        auth = _StaleBearer(simple_validator)
-        assert auth._scoped_takes_request is False
-        assert await auth.authenticate(VALID_TOKEN) == {"user": VALID_TOKEN}
-
-    def test_var_keyword_override_receives_the_request(self):
-        """**kwargs is a current signature: the injected request lands in it."""
-        received: list[Any] = []
-
-        class _KwargsAuth(_HeaderAuth):
-            async def authenticate_scoped(
-                self, credential: str, scopes: list[str], **kwargs
-            ) -> dict:
-                received.append(kwargs.get("request"))
-                return await self.authenticate(credential)
-
-        auth = _KwargsAuth("s3cr3t")
-        assert auth._scoped_takes_request is True
-        response = _client(auth).get("/me", headers={"X-Token": "s3cr3t"})
-        assert response.status_code == 200
-        assert response.json() == {"token": "s3cr3t"}
-        assert isinstance(received[0], Request)
-
-    @pytest.mark.anyio
-    async def test_direct_authenticate_passes_none(self):
-        """authenticate() is reachable off a request path, so the Request is optional."""
-        seen: list[Request | None] = []
-
-        async def validator(credential: str, request: Request | None = None) -> dict:
-            seen.append(request)
-            return {"user": "alice"}
-
-        bearer = HTTPBearerAuth(validator)
-        assert await bearer.authenticate(VALID_TOKEN) == {"user": "alice"}
-        assert await bearer.authenticate_scoped(VALID_TOKEN, []) == {"user": "alice"}
-        assert seen == [None, None]
-
     def test_validator_without_the_parameter_is_called_unchanged(self):
         """Opt-in by signature: nothing is injected into a validator that never asked."""
+        # JWTValidator declares no 'request', so JWT-backed bearers are untouched.
+        assert HTTPBearerAuth(JWTValidator(secret="s" * 32))._accepts_request is False
         bearer = HTTPBearerAuth(simple_validator)
         assert bearer._accepts_request is False
         response = _client(bearer).get(
@@ -1915,6 +1131,68 @@ class TestRequestForwarding:
         )
         assert response.status_code == 200
         assert response.json() == {"user": "alice"}
+
+    def test_every_source_forwards_the_request(self):
+        async def basic_validator(
+            username: str, password: str, request: Request | None = None
+        ) -> dict:
+            assert request is not None
+            request.state.who = username
+            return {"u": username, "p": password}
+
+        async def bearer_validator(
+            credential: str, request: Request | None = None
+        ) -> dict:
+            assert request is not None
+            request.state.who = "bearer"
+            return {"user": "alice"}
+
+        def sync_validator(credential: str, request: Request | None = None) -> dict:
+            assert request is not None
+            request.state.who = "sync"
+            return {"user": "alice"}
+
+        async def cookie_validator_(value: str, request: Request | None = None) -> dict:
+            assert request is not None
+            request.state.who = "cookie"
+            return {"session": value}
+
+        basic = HTTPBasicAuth(basic_validator)
+        multi = MultiAuth(
+            HTTPBearerAuth(bearer_validator),
+            APIKeyCookieAuth("session", cookie_validator, secure=False),
+        )
+        sync = HTTPBearerAuth(sync_validator)
+        cookie = APIKeyCookieAuth("session", cookie_validator_, secure=False)
+
+        def setup(app: FastAPI):
+            @app.get("/basic")
+            async def r1(request: Request, user=Security(basic)):
+                return {"user": user, "who": request.state.who}
+
+            @app.get("/multi")
+            async def r2(request: Request, user=Security(multi)):
+                return {"user": user, "who": request.state.who}
+
+            @app.get("/sync")
+            async def r3(request: Request, user=Security(sync)):
+                return {"user": user, "who": request.state.who}
+
+            @app.get("/cookie")
+            async def r4(request: Request, user=Security(cookie)):
+                return {"user": user, "who": request.state.who}
+
+        client = TestClient(_app(setup))
+        blob = base64.b64encode(b"alice:pw").decode()
+        response = client.get("/basic", headers={"Authorization": f"Basic {blob}"})
+        assert response.json() == {"user": {"u": "alice", "p": "pw"}, "who": "alice"}
+        bearer_header = {"Authorization": f"Bearer {VALID_TOKEN}"}
+        response = client.get("/multi", headers=bearer_header)
+        assert response.json() == {"user": {"user": "alice"}, "who": "bearer"}
+        response = client.get("/sync", headers=bearer_header)
+        assert response.json() == {"user": {"user": "alice"}, "who": "sync"}
+        response = client.get("/cookie", cookies={"session": VALID_COOKIE})
+        assert response.json() == {"user": {"session": VALID_COOKIE}, "who": "cookie"}
 
     def test_request_and_scopes_are_injected_together(self):
         received: list[tuple[list[str], bool]] = []
@@ -1939,27 +1217,6 @@ class TestRequestForwarding:
         assert response.status_code == 200
         assert received == [(["admin"], True)]
 
-    def test_basic_auth_forwards_the_request_after_two_positional_args(self):
-        async def validator(
-            username: str, password: str, request: Request | None = None
-        ) -> dict:
-            assert request is not None
-            request.state.who = username
-            return {"u": username, "p": password}
-
-        auth = HTTPBasicAuth(validator)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(request: Request, user=Security(auth)):
-                return {"user": user, "who": request.state.who}
-
-        blob = base64.b64encode(b"alice:pw").decode()
-        client = TestClient(_app(setup))
-        response = client.get("/me", headers={"Authorization": f"Basic {blob}"})
-        assert response.status_code == 200
-        assert response.json() == {"user": {"u": "alice", "p": "pw"}, "who": "alice"}
-
     def test_cookie_forwards_the_request_alongside_the_session_id(self):
         received: list[tuple[str, str, bool]] = []
 
@@ -1982,144 +1239,103 @@ class TestRequestForwarding:
             assert client.get("/me").json() == {"session": VALID_COOKIE, "sid": minted}
         assert received == [(VALID_COOKIE, minted, True)]
 
-    def test_unsigned_cookie_forwards_the_request(self):
-        async def validator(value: str, request: Request | None = None) -> dict:
-            assert request is not None
-            return {"session": value}
+    def test_override_signatures_seen_by_dispatch(self):
+        """A custom source written before this feature keeps its original call shape."""
+        # A callable with no inspectable signature is assumed current, not stale.
+        assert _override_accepts_request(cast(Callable[..., Any], object())) is True
 
-        auth = APIKeyCookieAuth("session", validator, secure=False)
-        response = _client(auth).get("/me", cookies={"session": VALID_COOKIE})
-        assert response.status_code == 200
-        assert response.json() == {"session": VALID_COOKIE}
+        class _StaleAuth(_HeaderAuth):
+            async def authenticate_scoped(  # ty: ignore[invalid-method-override]
+                self, credential: str, scopes: list[str]
+            ) -> dict:
+                return await self.authenticate(credential)
 
-    def test_multi_auth_forwards_the_request(self):
-        async def validator(credential: str, request: Request | None = None) -> dict:
-            assert request is not None
-            request.state.source = "bearer"
-            return {"user": "alice"}
-
-        multi = MultiAuth(
-            HTTPBearerAuth(validator),
-            APIKeyCookieAuth("session", cookie_validator, secure=False),
-        )
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(request: Request, user=Security(multi)):
-                return {"user": user, "source": request.state.source}
-
-        client = TestClient(_app(setup))
-        response = client.get("/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
-        assert response.status_code == 200
-        assert response.json() == {"user": {"user": "alice"}, "source": "bearer"}
-
-    def test_sync_validator_receives_the_request(self):
-        def validator(credential: str, request: Request | None = None) -> dict:
-            assert request is not None
-            request.state.who = "alice"
-            return {"user": "alice"}
-
-        bearer = HTTPBearerAuth(validator)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(request: Request, user=Security(bearer)):
-                return {"who": request.state.who}
-
-        client = TestClient(_app(setup))
-        assert client.get(
-            "/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
-        ).json() == {"who": "alice"}
-
-    @pytest.mark.parametrize(
-        "factory",
-        [
-            lambda: HTTPBearerAuth(simple_validator, request="nope"),
-            lambda: APIKeyCookieAuth("session", cookie_validator, request="nope"),
-            lambda: APIKeyHeaderAuth("X-API-Key", simple_validator, request="nope"),
-        ],
-        ids=["bearer", "cookie", "api-key"],
-    )
-    def test_request_kwarg_rejected_at_init(self, factory):
-        """'request' is reserved for the injected Request — fail at startup."""
-        with pytest.raises(ValueError, match="reserved"):
-            factory()
-
-    def test_request_kwarg_rejected_via_require(self):
-        bearer = HTTPBearerAuth(simple_validator)
-        with pytest.raises(ValueError, match="reserved"):
-            bearer.require(request="nope")
-
-
-class TestAuthSource:
-    def test_cannot_instantiate_abstract_class(self):
-        with pytest.raises(TypeError):
-            AuthSource()  # ty: ignore[call-non-callable]
-
-    def test_builtin_classes_are_auth_sources(self):
-        bearer = HTTPBearerAuth(simple_validator)
-        cookie = APIKeyCookieAuth("session", cookie_validator)
-        api_key = APIKeyHeaderAuth("X-API-Key", simple_validator)
-        assert isinstance(bearer, AuthSource)
-        assert isinstance(cookie, AuthSource)
-        assert isinstance(api_key, AuthSource)
-
-    def test_custom_source_standalone_valid(self):
-        """Default __call__ wires extract + authenticate via Request injection."""
-        auth = _HeaderAuth(secret="s3cr3t")
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get("/me", headers={"X-Token": "s3cr3t"})
+        auth = _StaleAuth("s3cr3t")
+        assert auth._scoped_takes_request is False
+        response = _client(auth).get("/me", headers={"X-Token": "s3cr3t"})
         assert response.status_code == 200
         assert response.json() == {"token": "s3cr3t"}
 
-    def test_custom_source_standalone_missing_credential(self):
+        # **kwargs is a current signature: the injected request lands in it.
+        received: list[Any] = []
+
+        class _KwargsAuth(_HeaderAuth):
+            async def authenticate_scoped(
+                self, credential: str, scopes: list[str], **kwargs
+            ) -> dict:
+                received.append(kwargs.get("request"))
+                return await self.authenticate(credential)
+
+        auth = _KwargsAuth("s3cr3t")
+        assert auth._scoped_takes_request is True
+        response = _client(auth).get("/me", headers={"X-Token": "s3cr3t"})
+        assert response.status_code == 200
+        assert response.json() == {"token": "s3cr3t"}
+        assert isinstance(received[0], Request)
+
+    @pytest.mark.anyio
+    async def test_direct_authenticate(self):
+        """authenticate() is reachable off a request path, so the Request is optional."""
+        seen: list[Request | None] = []
+
+        async def validator(credential: str, request: Request | None = None) -> dict:
+            seen.append(request)
+            return {"user": "alice"}
+
+        bearer = HTTPBearerAuth(validator)
+        assert await bearer.authenticate(VALID_TOKEN) == {"user": "alice"}
+        assert await bearer.authenticate_scoped(VALID_TOKEN, []) == {"user": "alice"}
+        assert seen == [None, None]
+
+        # authenticate() honours the same old call shape dispatch() does.
+        class _StaleBearer(HTTPBearerAuth):
+            async def authenticate_scoped(  # ty: ignore[invalid-method-override]
+                self, credential: str, scopes: list[str]
+            ) -> dict:
+                return {"user": credential}
+
+        auth = _StaleBearer(simple_validator)
+        assert auth._scoped_takes_request is False
+        assert await auth.authenticate(VALID_TOKEN) == {"user": VALID_TOKEN}
+
+    def test_request_kwarg_rejected(self):
+        """'request' is reserved for the injected Request — fail at startup."""
+        for factory in [
+            lambda: HTTPBearerAuth(simple_validator, request="nope"),
+            lambda: APIKeyCookieAuth("session", cookie_validator, request="nope"),
+            lambda: APIKeyHeaderAuth("X-API-Key", simple_validator, request="nope"),
+            lambda: HTTPBearerAuth(simple_validator).require(request="nope"),
+        ]:
+            with pytest.raises(ValueError, match="reserved"):
+                factory()
+
+
+class TestAuthSource:
+    def test_abstract_base(self):
+        with pytest.raises(TypeError):
+            AuthSource()  # ty: ignore[call-non-callable]
+        for auth in [
+            HTTPBearerAuth(simple_validator),
+            APIKeyCookieAuth("session", cookie_validator),
+            APIKeyHeaderAuth("X-API-Key", simple_validator),
+        ]:
+            assert isinstance(auth, AuthSource)
+
+    def test_custom_source(self):
+        """Default __call__ wires extract + authenticate via Request injection."""
         auth = _HeaderAuth(secret="s3cr3t")
+        client = _client(auth)
+        response = client.get("/me", headers={"X-Token": "s3cr3t"})
+        assert response.status_code == 200
+        assert response.json() == {"token": "s3cr3t"}
+        assert client.get("/me").status_code == 401
+        assert client.get("/me", headers={"X-Token": "wrong"}).status_code == 401
 
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get("/me")  # no X-Token header
-        assert response.status_code == 401
-
-    def test_custom_source_standalone_invalid_credential(self):
-        auth = _HeaderAuth(secret="s3cr3t")
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get("/me", headers={"X-Token": "wrong"})
-        assert response.status_code == 401
-
-    def test_custom_source_in_multi_auth(self):
-        """Custom AuthSource works transparently inside MultiAuth."""
-        header_auth = _HeaderAuth(secret="s3cr3t")
-        bearer = HTTPBearerAuth(simple_validator)
-        multi = MultiAuth(bearer, header_auth)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(multi)):
-                return user
-
-        client = TestClient(_app(setup))
-
-        # Bearer matches first
+        # Custom AuthSource works transparently inside MultiAuth.
+        client = _client(MultiAuth(HTTPBearerAuth(simple_validator), auth))
         response = client.get("/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
         assert response.status_code == 200
         assert response.json() == {"user": "alice"}
-
         # No bearer → falls through to custom header source
         response = client.get("/me", headers={"X-Token": "s3cr3t"})
         assert response.status_code == 200
@@ -2127,90 +1343,55 @@ class TestAuthSource:
 
 
 class TestEncodeDecodeOAuthState:
-    def test_encode_returns_base64url_string(self):
-        result = oauth_encode_state("https://example.com/dashboard", "test-state-token")
+    def test_round_trip(self):
+        state_token = "test-state-token"
+        result = oauth_encode_state("https://example.com/dashboard", state_token)
         assert isinstance(result, str)
         assert "+" not in result
         assert "/" not in result
 
-    def test_round_trip(self):
-        url = "/after-login?next=/home"
-        state_token = "test-state-token"
-        assert (
-            oauth_decode_state(
-                oauth_encode_state(url, state_token),
-                expected_state_token=state_token,
-                fallback="/",
-            )
-            == url
-        )
+        for url in ["/after-login?next=/home", "/dashboard/x"]:
+            encoded = oauth_encode_state(url, state_token)
+            for state in [encoded, encoded.rstrip("=")]:
+                assert (
+                    oauth_decode_state(
+                        state, expected_state_token=state_token, fallback="/"
+                    )
+                    == url
+                )
+        assert oauth_generate_state_token() != oauth_generate_state_token()
 
-    @pytest.mark.parametrize("state", [None, "", "null", "!!!notbase64!!!"])
-    def test_decode_missing_or_malformed_state_raises(self, state):
-        with pytest.raises(OAuthStateError):
-            oauth_decode_state(state, expected_state_token="any", fallback="/home")
-
-    def test_decode_deeply_nested_state_raises(self):
-        state = base64.urlsafe_b64encode(b"[" * 100_000).decode()
-        with pytest.raises(OAuthStateError):
-            oauth_decode_state(state, expected_state_token="any", fallback="/home")
-
-    def test_decode_lone_surrogate_token_raises(self):
-        state = _raw_state({"n": "\ud800", "d": "/x"})
-        with pytest.raises(OAuthStateError):
-            oauth_decode_state(state, expected_state_token="any", fallback="/home")
-
-    def test_decode_handles_missing_padding(self):
-        url = "/dashboard/x"
-        state_token = "test-state-token"
-        encoded = oauth_encode_state(url, state_token).rstrip("=")
-        assert (
-            oauth_decode_state(encoded, expected_state_token=state_token, fallback="/")
-            == url
-        )
-
-    def test_decode_wrong_state_token_raises(self):
-        encoded = oauth_encode_state("/dashboard", "correct-token")
-        with pytest.raises(OAuthStateError):
-            oauth_decode_state(
-                encoded, expected_state_token="wrong-token", fallback="/"
-            )
-
-    def test_decode_empty_expected_token_raises(self):
-        """An empty stored token (session miss) must never match an empty "n"."""
-        encoded = oauth_encode_state("/dashboard", "")
-        with pytest.raises(OAuthStateError):
-            oauth_decode_state(encoded, expected_state_token="", fallback="/home")
-
-    def test_state_error_is_an_oauth_error(self):
-        assert issubclass(OAuthStateError, OAuthError)
+    def test_decode_bad_state_raises(self):
+        for state, expected in [
+            (None, "any"),
+            ("", "any"),
+            ("null", "any"),
+            ("!!!notbase64!!!", "any"),
+            (base64.urlsafe_b64encode(b"[" * 100_000).decode(), "any"),
+            (_raw_state({"n": "\ud800", "d": "/x"}), "any"),
+            (oauth_encode_state("/dashboard", "correct-token"), "wrong-token"),
+            # An empty stored token (session miss) must never match an empty "n".
+            (oauth_encode_state("/dashboard", ""), ""),
+        ]:
+            with pytest.raises(OAuthStateError):
+                oauth_decode_state(
+                    state, expected_state_token=expected, fallback="/home"
+                )
 
     def test_error_message_does_not_echo_state(self):
+        assert issubclass(OAuthStateError, OAuthError)
         encoded = oauth_encode_state("/dashboard", "attacker-token")
         with pytest.raises(OAuthStateError) as exc_info:
             oauth_decode_state(encoded, expected_state_token="expected", fallback="/")
         assert encoded not in str(exc_info.value)
         assert "attacker-token" not in str(exc_info.value)
 
-    def test_generate_state_token_is_random(self):
-        assert oauth_generate_state_token() != oauth_generate_state_token()
-
 
 class TestBuildAuthorizationRedirect:
-    def test_returns_redirect_response(self):
+    def test_redirect_location_contains_all_params(self):
+        """303 forces a GET even when the login route was a POST form."""
         from fastapi.responses import RedirectResponse
 
-        response = oauth_build_authorization_redirect(
-            "https://auth.example.com/authorize",
-            client_id="my-client",
-            scopes="openid email",
-            redirect_uri="https://app.example.com/callback",
-            destination="https://app.example.com/dashboard",
-            state_token="test-state-token",
-        )
-        assert isinstance(response, RedirectResponse)
-
-    def test_redirect_location_contains_all_params(self):
         state_token = "test-state-token"
         response = oauth_build_authorization_redirect(
             "https://auth.example.com/authorize",
@@ -2220,6 +1401,8 @@ class TestBuildAuthorizationRedirect:
             destination="https://app.example.com/dashboard",
             state_token=state_token,
         )
+        assert isinstance(response, RedirectResponse)
+        assert response.status_code == 303
         location = response.headers["location"]
         parsed = urlparse(location)
         assert (
@@ -2240,18 +1423,6 @@ class TestBuildAuthorizationRedirect:
             )
             == "https://app.example.com/dashboard"
         )
-
-    def test_redirects_with_303_see_other(self):
-        """303 forces a GET even when the login route was a POST form."""
-        response = oauth_build_authorization_redirect(
-            "https://auth.example.com/authorize",
-            client_id="my-client",
-            scopes="openid",
-            redirect_uri="https://app.example.com/callback",
-            destination="/",
-            state_token="test-state-token",
-        )
-        assert response.status_code == 303
 
     def test_preserves_existing_query_string(self):
         """RFC 6749 §3.1: a query component on the endpoint must be retained."""
@@ -2289,12 +1460,12 @@ def _discovery_doc(*, userinfo=True, **overrides):
 class TestResolveProviderUrls:
     @pytest.mark.anyio
     @respx.mock
-    async def test_returns_required_endpoints(self):
-        respx.get(DISCOVERY_URL).respond(json=_discovery_doc())
+    async def test_returns_endpoints(self):
+        route = respx.get(DISCOVERY_URL)
 
+        route.respond(json=_discovery_doc())
         oauth_resolve_provider_urls.cache_clear()
         endpoints = await oauth_resolve_provider_urls(DISCOVERY_URL)
-
         assert isinstance(endpoints, OIDCEndpoints)
         assert endpoints.authorization_endpoint == "https://auth.example.com/authorize"
         assert endpoints.token_endpoint == "https://auth.example.com/token"
@@ -2303,30 +1474,17 @@ class TestResolveProviderUrls:
         assert endpoints.jwks_uri is None
         assert endpoints.end_session_endpoint is None
 
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_returns_optional_endpoints(self):
-        respx.get(DISCOVERY_URL).respond(
+        route.respond(
             json=_discovery_doc(
+                userinfo=False,
                 jwks_uri="https://auth.example.com/jwks",
                 end_session_endpoint="https://auth.example.com/logout",
             )
         )
-
         oauth_resolve_provider_urls.cache_clear()
         endpoints = await oauth_resolve_provider_urls(DISCOVERY_URL)
-
         assert endpoints.jwks_uri == "https://auth.example.com/jwks"
         assert endpoints.end_session_endpoint == "https://auth.example.com/logout"
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_userinfo_endpoint_none_when_absent(self):
-        respx.get(DISCOVERY_URL).respond(json=_discovery_doc(userinfo=False))
-
-        oauth_resolve_provider_urls.cache_clear()
-        endpoints = await oauth_resolve_provider_urls(DISCOVERY_URL)
-
         assert endpoints.userinfo_endpoint is None
 
     @pytest.mark.anyio
@@ -2342,61 +1500,28 @@ class TestResolveProviderUrls:
 
     @pytest.mark.anyio
     @respx.mock
-    async def test_http_error_raises_discovery_error(self):
-        respx.get(DISCOVERY_URL).respond(500)
-
-        oauth_resolve_provider_urls.cache_clear()
-        with pytest.raises(OAuthDiscoveryError, match="failed to fetch"):
-            await oauth_resolve_provider_urls(DISCOVERY_URL)
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_network_timeout_raises_discovery_error(self):
-        respx.get(DISCOVERY_URL).mock(
-            side_effect=httpx.ConnectTimeout("connection timed out")
-        )
-
-        oauth_resolve_provider_urls.cache_clear()
-        with pytest.raises(OAuthDiscoveryError, match="failed to fetch"):
-            await oauth_resolve_provider_urls(DISCOVERY_URL)
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_invalid_json_raises_discovery_error(self):
-        respx.get(DISCOVERY_URL).respond(content=b"<html>not json</html>")
-
-        oauth_resolve_provider_urls.cache_clear()
-        with pytest.raises(OAuthDiscoveryError, match="not valid JSON"):
-            await oauth_resolve_provider_urls(DISCOVERY_URL)
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_non_object_document_raises_discovery_error(self):
-        respx.get(DISCOVERY_URL).respond(json=["not", "an", "object"])
-
-        oauth_resolve_provider_urls.cache_clear()
-        with pytest.raises(OAuthDiscoveryError, match="not a JSON object"):
-            await oauth_resolve_provider_urls(DISCOVERY_URL)
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_missing_token_endpoint_raises_discovery_error(self):
-        doc = _discovery_doc()
-        del doc["token_endpoint"]
-        respx.get(DISCOVERY_URL).respond(json=doc)
-
-        oauth_resolve_provider_urls.cache_clear()
-        with pytest.raises(OAuthDiscoveryError, match="missing the 'token_endpoint'"):
-            await oauth_resolve_provider_urls(DISCOVERY_URL)
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_non_string_endpoint_raises_discovery_error(self):
-        respx.get(DISCOVERY_URL).respond(json=_discovery_doc(token_endpoint=123))
-
-        oauth_resolve_provider_urls.cache_clear()
-        with pytest.raises(OAuthDiscoveryError, match="must be a string URL"):
-            await oauth_resolve_provider_urls(DISCOVERY_URL)
+    async def test_unusable_document_raises_discovery_error(self):
+        no_token_endpoint = _discovery_doc()
+        del no_token_endpoint["token_endpoint"]
+        route = respx.get(DISCOVERY_URL)
+        for response, match in [
+            (httpx.Response(500), "failed to fetch"),
+            (httpx.ConnectTimeout("connection timed out"), "failed to fetch"),
+            (httpx.Response(200, content=b"<html>not json</html>"), "not valid JSON"),
+            (httpx.Response(200, json=["not", "an", "object"]), "not a JSON object"),
+            (
+                httpx.Response(200, json=no_token_endpoint),
+                "missing the 'token_endpoint'",
+            ),
+            (
+                httpx.Response(200, json=_discovery_doc(token_endpoint=123)),
+                "must be a string URL",
+            ),
+        ]:
+            route.mock(side_effect=[response])
+            oauth_resolve_provider_urls.cache_clear()
+            with pytest.raises(OAuthDiscoveryError, match=match):
+                await oauth_resolve_provider_urls(DISCOVERY_URL)
 
 
 def _authorization_redirect(url="https://auth.example.com/authorize", **kwargs):
@@ -2417,11 +1542,11 @@ class TestOAuthHttpsEnforcement:
     def test_http_authorization_url_rejected(self):
         with pytest.raises(ValueError, match="authorization_url must use https"):
             _authorization_redirect("http://idp.example/authorize")
-
-    @pytest.mark.parametrize("host", ["localhost", "127.0.0.1"])
-    def test_http_loopback_authorization_url_allowed(self, host):
-        response = _authorization_redirect(f"http://{host}:8080/authorize")
-        assert response.headers["location"].startswith(f"http://{host}:8080/authorize?")
+        for host in ["localhost", "127.0.0.1"]:
+            response = _authorization_redirect(f"http://{host}:8080/authorize")
+            assert response.headers["location"].startswith(
+                f"http://{host}:8080/authorize?"
+            )
 
     @pytest.mark.anyio
     @respx.mock
@@ -2437,179 +1562,114 @@ class TestOAuthHttpsEnforcement:
 
     @pytest.mark.anyio
     @respx.mock
-    @pytest.mark.parametrize(
-        "endpoint",
-        [
+    async def test_http_endpoint_in_discovery_document_rejected(self):
+        route = respx.get(DISCOVERY_URL)
+        for endpoint in [
             "authorization_endpoint",
             "token_endpoint",
             "userinfo_endpoint",
             "jwks_uri",
             "end_session_endpoint",
-        ],
-    )
-    async def test_http_endpoint_in_discovery_document_rejected(self, endpoint):
-        respx.get(DISCOVERY_URL).respond(
-            json=_discovery_doc(**{endpoint: "http://attacker.example.com/endpoint"})
-        )
-
-        oauth_resolve_provider_urls.cache_clear()
-        with pytest.raises(OAuthDiscoveryError, match=f"{endpoint} must use https"):
-            await oauth_resolve_provider_urls(DISCOVERY_URL)
+        ]:
+            route.respond(
+                json=_discovery_doc(
+                    **{endpoint: "http://attacker.example.com/endpoint"}
+                )
+            )
+            oauth_resolve_provider_urls.cache_clear()
+            with pytest.raises(OAuthDiscoveryError, match=f"{endpoint} must use https"):
+                await oauth_resolve_provider_urls(DISCOVERY_URL)
 
     @pytest.mark.anyio
     @respx.mock
-    @pytest.mark.parametrize("host", ["localhost", "127.0.0.1"])
-    async def test_http_loopback_discovery_allowed(self, host):
+    async def test_http_loopback_discovery_allowed(self):
         """Local development IdPs over plain HTTP keep working."""
-        respx.get(f"http://{host}:8080/.well-known/openid-configuration").respond(
-            json={
-                "issuer": f"http://{host}:8080",
-                "authorization_endpoint": f"http://{host}:8080/authorize",
-                "token_endpoint": f"http://{host}:8080/token",
-                "userinfo_endpoint": f"http://{host}:8080/userinfo",
-            }
-        )
+        for host in ["localhost", "127.0.0.1"]:
+            respx.get(f"http://{host}:8080/.well-known/openid-configuration").respond(
+                json={
+                    "issuer": f"http://{host}:8080",
+                    "authorization_endpoint": f"http://{host}:8080/authorize",
+                    "token_endpoint": f"http://{host}:8080/token",
+                    "userinfo_endpoint": f"http://{host}:8080/userinfo",
+                }
+            )
 
-        oauth_resolve_provider_urls.cache_clear()
-        endpoints = await oauth_resolve_provider_urls(
-            f"http://{host}:8080/.well-known/openid-configuration"
-        )
+            oauth_resolve_provider_urls.cache_clear()
+            endpoints = await oauth_resolve_provider_urls(
+                f"http://{host}:8080/.well-known/openid-configuration"
+            )
 
-        assert endpoints.authorization_endpoint == f"http://{host}:8080/authorize"
-        assert endpoints.token_endpoint == f"http://{host}:8080/token"
-        assert endpoints.userinfo_endpoint == f"http://{host}:8080/userinfo"
+            assert endpoints.authorization_endpoint == f"http://{host}:8080/authorize"
+            assert endpoints.token_endpoint == f"http://{host}:8080/token"
+            assert endpoints.userinfo_endpoint == f"http://{host}:8080/userinfo"
 
     @pytest.mark.anyio
-    @respx.mock
-    async def test_issuer_mismatch_rejected(self):
+    async def test_foreign_or_missing_issuer_rejected(self):
         """OIDC Discovery §4.3: the document must claim the expected issuer."""
-        respx.get(DISCOVERY_URL).respond(
-            json=_discovery_doc(issuer="https://attacker.example.com")
-        )
-
-        oauth_resolve_provider_urls.cache_clear()
-        with pytest.raises(OAuthDiscoveryError, match="issuer"):
-            await oauth_resolve_provider_urls(DISCOVERY_URL)
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_missing_issuer_rejected(self):
-        doc = _discovery_doc()
-        del doc["issuer"]
-        respx.get(DISCOVERY_URL).respond(json=doc)
-
-        oauth_resolve_provider_urls.cache_clear()
-        with pytest.raises(OAuthDiscoveryError, match="issuer"):
-            await oauth_resolve_provider_urls(DISCOVERY_URL)
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_issuer_trailing_slash_accepted(self):
-        """Auth0-style issuers carry a trailing slash — still the same issuer."""
-        respx.get(DISCOVERY_URL).respond(
-            json=_discovery_doc(issuer="https://auth.example.com/")
-        )
-
-        oauth_resolve_provider_urls.cache_clear()
-        endpoints = await oauth_resolve_provider_urls(DISCOVERY_URL)
-        assert endpoints.token_endpoint == "https://auth.example.com/token"
+        no_issuer = _discovery_doc()
+        del no_issuer["issuer"]
+        attacker = _discovery_doc(issuer="https://attacker.example.com")
+        for url, doc in [
+            (DISCOVERY_URL, attacker),
+            (DISCOVERY_URL, no_issuer),
+            # Query strings and trailing slashes must not skip the issuer check.
+            (f"{DISCOVERY_URL}?p=B2C_1_signin", attacker),  # Azure AD B2C policy
+            (f"{DISCOVERY_URL}/", attacker),
+            # The expectation comes from the whole URL, not a substring of it.
+            (
+                f"https://attacker.example.com/https://auth.example.com{_WELL_KNOWN}",
+                _discovery_doc(),
+            ),
+        ]:
+            with respx.mock:
+                respx.get(url).respond(json=doc)
+                oauth_resolve_provider_urls.cache_clear()
+                with pytest.raises(OAuthDiscoveryError, match="issuer"):
+                    await oauth_resolve_provider_urls(url)
 
     @pytest.mark.anyio
-    @respx.mock
-    async def test_issuer_with_path_accepted(self):
-        """Keycloak/Microsoft-style issuers include a path component."""
+    async def test_issuer_variants_accepted(self):
+        """Auth0-style trailing slash, Keycloak/Microsoft-style path, Azure query."""
         issuer = "https://auth.example.com/realms/myrealm"
-        respx.get(f"{issuer}/.well-known/openid-configuration").respond(
-            json=_discovery_doc(issuer=issuer)
-        )
-
-        oauth_resolve_provider_urls.cache_clear()
-        endpoints = await oauth_resolve_provider_urls(
-            f"{issuer}/.well-known/openid-configuration"
-        )
-        assert endpoints.token_endpoint == "https://auth.example.com/token"
-
-    @pytest.mark.anyio
-    @respx.mock
-    @pytest.mark.parametrize(
-        "url",
-        [
-            f"{DISCOVERY_URL}?p=B2C_1_signin",  # Azure AD B2C policy parameter
-            f"{DISCOVERY_URL}/",  # trailing slash
-        ],
-    )
-    async def test_issuer_checked_whatever_follows_the_wellknown_path(self, url):
-        """Query strings and trailing slashes must not skip the issuer check."""
-        respx.get(url).respond(
-            json=_discovery_doc(issuer="https://attacker.example.com")
-        )
-
-        oauth_resolve_provider_urls.cache_clear()
-        with pytest.raises(OAuthDiscoveryError, match="issuer"):
-            await oauth_resolve_provider_urls(url)
+        for url, doc in [
+            (DISCOVERY_URL, _discovery_doc(issuer="https://auth.example.com/")),
+            (f"{issuer}{_WELL_KNOWN}", _discovery_doc(issuer=issuer)),
+            (f"{DISCOVERY_URL}?p=B2C_1_signin", _discovery_doc()),
+        ]:
+            with respx.mock:
+                respx.get(url).respond(json=doc)
+                oauth_resolve_provider_urls.cache_clear()
+                endpoints = await oauth_resolve_provider_urls(url)
+            assert endpoints.token_endpoint == "https://auth.example.com/token"
+            assert endpoints.issuer == doc["issuer"]
 
     @pytest.mark.anyio
     @respx.mock
-    async def test_issuer_accepted_alongside_a_query_string(self):
-        """The honest Azure-style URL still resolves."""
-        url = f"{DISCOVERY_URL}?p=B2C_1_signin"
-        respx.get(url).respond(json=_discovery_doc())
-
-        oauth_resolve_provider_urls.cache_clear()
-        endpoints = await oauth_resolve_provider_urls(url)
-        assert endpoints.issuer == "https://auth.example.com"
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_nonstandard_discovery_url_rejects_foreign_issuer(self):
+    async def test_nonstandard_discovery_url(self):
         """Nothing exact can be derived, but another host is still refused."""
         url = "https://auth.example.com/custom/discovery.json"
-        respx.get(url).respond(
-            json=_discovery_doc(issuer="https://unrelated.example.com")
-        )
+        route = respx.get(url)
 
+        route.respond(json=_discovery_doc(issuer="https://unrelated.example.com"))
         oauth_resolve_provider_urls.cache_clear()
         with pytest.raises(OAuthDiscoveryError, match="origin"):
             await oauth_resolve_provider_urls(url)
 
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_nonstandard_discovery_url_accepts_same_origin_issuer(self):
-        url = "https://auth.example.com/custom/discovery.json"
-        respx.get(url).respond(
-            json=_discovery_doc(issuer="https://auth.example.com/t1")
-        )
+        no_issuer = _discovery_doc()
+        del no_issuer["issuer"]
+        route.respond(json=no_issuer)
+        oauth_resolve_provider_urls.cache_clear()
+        with pytest.raises(OAuthDiscoveryError, match="issuer"):
+            await oauth_resolve_provider_urls(url)
 
+        route.respond(json=_discovery_doc(issuer="https://auth.example.com/t1"))
         oauth_resolve_provider_urls.cache_clear()
         endpoints = await oauth_resolve_provider_urls(url)
         assert endpoints.issuer == "https://auth.example.com/t1"
 
     @pytest.mark.anyio
     @respx.mock
-    async def test_nonstandard_discovery_url_still_requires_an_issuer(self):
-        url = "https://auth.example.com/custom/discovery.json"
-        doc = _discovery_doc()
-        del doc["issuer"]
-        respx.get(url).respond(json=doc)
-
-        oauth_resolve_provider_urls.cache_clear()
-        with pytest.raises(OAuthDiscoveryError, match="issuer"):
-            await oauth_resolve_provider_urls(url)
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_issuer_embedded_in_an_attacker_url_path_rejected(self):
-        """The expectation comes from the whole URL, not a substring of it."""
-        url = f"https://attacker.example.com/https://auth.example.com{_WELL_KNOWN}"
-        respx.get(url).respond(json=_discovery_doc())
-
-        oauth_resolve_provider_urls.cache_clear()
-        with pytest.raises(OAuthDiscoveryError, match="issuer"):
-            await oauth_resolve_provider_urls(url)
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_exchange_http_token_url_rejected_before_request(self):
+    async def test_http_token_and_userinfo_urls_rejected_before_request(self):
         with pytest.raises(ValueError, match="token_url must use https"):
             await oauth_exchange_code(
                 token_url="http://auth.example.com/token",
@@ -2618,12 +1678,6 @@ class TestOAuthHttpsEnforcement:
                 client_secret="client-secret",
                 redirect_uri="https://app.example.com/callback",
             )
-
-        assert len(respx.calls) == 0
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_userinfo_http_url_rejected_before_request(self):
         with pytest.raises(ValueError, match="userinfo_url must use https"):
             await oauth_fetch_userinfo(
                 userinfo_url="http://auth.example.com/userinfo",
@@ -2667,8 +1721,8 @@ class TestExchangeCode:
 
     @pytest.mark.anyio
     @respx.mock
-    async def test_returns_full_token_payload(self):
-        respx.post(self.TOKEN_URL).respond(
+    async def test_posts_correct_token_request(self):
+        route = respx.post(self.TOKEN_URL).respond(
             json={
                 "access_token": "tok123",
                 "refresh_token": "refresh456",
@@ -2682,6 +1736,18 @@ class TestExchangeCode:
         assert token["access_token"] == "tok123"
         assert token["refresh_token"] == "refresh456"
         assert token["id_token"] == "idtok789"
+        body = parse_qs(route.calls.last.request.content.decode())
+        assert body["grant_type"] == ["authorization_code"]
+        assert body["code"] == ["authcode123"]
+        assert body["client_id"] == ["my-client"]
+        assert body["client_secret"] == ["my-secret"]
+        assert body["redirect_uri"] == ["https://app.example.com/callback"]
+        assert "code_verifier" not in body
+
+        code_verifier, _ = oauth_generate_pkce_pair()
+        await self._exchange(code_verifier=code_verifier)
+        body = parse_qs(route.calls.last.request.content.decode())
+        assert body["code_verifier"] == [code_verifier]
 
     @pytest.mark.anyio
     @respx.mock
@@ -2693,21 +1759,6 @@ class TestExchangeCode:
             assert token["access_token"] == "tok123"
             assert not client.is_closed
         assert route.call_count == 1
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_posts_correct_token_request(self):
-        route = respx.post(self.TOKEN_URL).respond(json={"access_token": "tok123"})
-
-        await self._exchange()
-
-        body = parse_qs(route.calls.last.request.content.decode())
-        assert body["grant_type"] == ["authorization_code"]
-        assert body["code"] == ["authcode123"]
-        assert body["client_id"] == ["my-client"]
-        assert body["client_secret"] == ["my-secret"]
-        assert body["redirect_uri"] == ["https://app.example.com/callback"]
-        assert "code_verifier" not in body
 
     @pytest.mark.anyio
     @respx.mock
@@ -2724,100 +1775,44 @@ class TestExchangeCode:
 
     @pytest.mark.anyio
     @respx.mock
-    async def test_pkce_code_verifier_sent_to_token_endpoint(self):
-        route = respx.post(self.TOKEN_URL).respond(json={"access_token": "tok123"})
+    async def test_token_type(self):
+        route = respx.post(self.TOKEN_URL)
+        route.respond(json={"access_token": "tok123", "token_type": "Bearer"})
+        assert (await self._exchange())["access_token"] == "tok123"
 
-        code_verifier, _ = oauth_generate_pkce_pair()
-        await self._exchange(code_verifier=code_verifier)
-
-        body = parse_qs(route.calls.last.request.content.decode())
-        assert body["code_verifier"] == [code_verifier]
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_raises_on_unsupported_token_type(self):
-        respx.post(self.TOKEN_URL).respond(
-            json={"access_token": "tok123", "token_type": "mac"}
-        )
-
-        with pytest.raises(OAuthExchangeError, match="unsupported token_type"):
-            await self._exchange()
+        for token_type in ["mac", 1]:
+            route.respond(json={"access_token": "tok123", "token_type": token_type})
+            with pytest.raises(OAuthExchangeError, match="unsupported token_type"):
+                await self._exchange()
 
     @pytest.mark.anyio
     @respx.mock
-    async def test_non_string_token_type_raises_exchange_error(self):
-        respx.post(self.TOKEN_URL).respond(
-            json={"access_token": "tok123", "token_type": 1}
-        )
+    async def test_required_scopes(self):
+        route = respx.post(self.TOKEN_URL)
+        route.respond(json={"access_token": "tok123", "scope": "openid email profile"})
+        token = await self._exchange(required_scopes="openid email")
+        assert token["access_token"] == "tok123"
 
-        with pytest.raises(OAuthExchangeError, match="unsupported token_type"):
-            await self._exchange()
+        route.respond(json={"access_token": "tok123", "scope": "openid"})
+        with pytest.raises(OAuthExchangeError, match="required scopes"):
+            await self._exchange(required_scopes="openid email profile")
 
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_non_string_scope_fails_required_scopes_closed(self):
-        respx.post(self.TOKEN_URL).respond(
-            json={"access_token": "tok123", "scope": ["openid"]}
-        )
-
+        route.respond(json={"access_token": "tok123", "scope": ["openid"]})
         with pytest.raises(OAuthExchangeError, match="required scopes"):
             await self._exchange(required_scopes="openid")
 
     @pytest.mark.anyio
     @respx.mock
-    async def test_accepts_bearer_token_type_case_insensitive(self):
-        respx.post(self.TOKEN_URL).respond(
-            json={"access_token": "tok123", "token_type": "Bearer"}
-        )
-
-        token = await self._exchange()
-        assert token["access_token"] == "tok123"
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_raises_when_required_scopes_not_granted(self):
-        respx.post(self.TOKEN_URL).respond(
-            json={"access_token": "tok123", "scope": "openid"}
-        )
-
-        with pytest.raises(OAuthExchangeError, match="required scopes"):
-            await self._exchange(required_scopes="openid email profile")
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_passes_when_all_required_scopes_granted(self):
-        respx.post(self.TOKEN_URL).respond(
-            json={"access_token": "tok123", "scope": "openid email profile"}
-        )
-
-        token = await self._exchange(required_scopes="openid email")
-        assert token["access_token"] == "tok123"
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_provider_error_raises_exchange_error(self):
-        respx.post(self.TOKEN_URL).respond(400, json={"error": "invalid_grant"})
-
-        with pytest.raises(OAuthExchangeError):
-            await self._exchange()
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_malformed_token_response_raises_exchange_error(self):
-        respx.post(self.TOKEN_URL).respond(content=b"<html>not json</html>")
-
-        with pytest.raises(OAuthExchangeError):
-            await self._exchange()
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_timeout_raises_exchange_error(self):
-        respx.post(self.TOKEN_URL).mock(
-            side_effect=httpx.ConnectTimeout("connection timed out")
-        )
-
-        with pytest.raises(OAuthExchangeError):
-            await self._exchange()
+    async def test_failed_exchange_raises_exchange_error(self):
+        route = respx.post(self.TOKEN_URL)
+        for response in [
+            httpx.Response(400, json={"error": "invalid_grant"}),
+            httpx.Response(200, content=b"<html>not json</html>"),
+            httpx.ConnectTimeout("connection timed out"),
+        ]:
+            route.mock(side_effect=[response])
+            with pytest.raises(OAuthExchangeError):
+                await self._exchange()
 
 
 class TestFetchUserinfo:
@@ -2855,39 +1850,22 @@ class TestFetchUserinfo:
 
     @pytest.mark.anyio
     @respx.mock
-    async def test_http_error_raises_userinfo_error(self):
-        respx.get(self.USERINFO_URL).respond(500)
-
-        with pytest.raises(OAuthUserinfoError, match="failed to fetch"):
-            await oauth_fetch_userinfo(
-                userinfo_url=self.USERINFO_URL, access_token="tok123"
-            )
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_timeout_raises_userinfo_error(self):
-        respx.get(self.USERINFO_URL).mock(
-            side_effect=httpx.ReadTimeout("read timed out")
-        )
-
-        with pytest.raises(OAuthUserinfoError):
-            await oauth_fetch_userinfo(
-                userinfo_url=self.USERINFO_URL, access_token="tok123"
-            )
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_invalid_json_raises_userinfo_error(self):
-        respx.get(self.USERINFO_URL).respond(content=b"<html>not json</html>")
-
-        with pytest.raises(OAuthUserinfoError, match="not valid JSON"):
-            await oauth_fetch_userinfo(
-                userinfo_url=self.USERINFO_URL, access_token="tok123"
-            )
+    async def test_failed_fetch_raises_userinfo_error(self):
+        route = respx.get(self.USERINFO_URL)
+        for response, match in [
+            (httpx.Response(500), "failed to fetch"),
+            (httpx.ReadTimeout("read timed out"), None),
+            (httpx.Response(200, content=b"<html>not json</html>"), "not valid JSON"),
+        ]:
+            route.mock(side_effect=[response])
+            with pytest.raises(OAuthUserinfoError, match=match):
+                await oauth_fetch_userinfo(
+                    userinfo_url=self.USERINFO_URL, access_token="tok123"
+                )
 
 
-class TestGeneratePkcePair:
-    def test_challenge_is_s256_of_verifier(self):
+class TestPkce:
+    def test_generate_pkce_pair(self):
         code_verifier, code_challenge = oauth_generate_pkce_pair()
         expected = (
             base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest())
@@ -2895,36 +1873,25 @@ class TestGeneratePkcePair:
             .rstrip("=")
         )
         assert code_challenge == expected
-
-    def test_verifier_length_within_rfc7636_bounds(self):
-        code_verifier, _ = oauth_generate_pkce_pair()
         assert 43 <= len(code_verifier) <= 128
-
-    def test_challenge_is_urlsafe_without_padding(self):
-        _, code_challenge = oauth_generate_pkce_pair()
         assert "=" not in code_challenge
         assert "+" not in code_challenge
         assert "/" not in code_challenge
-
-    def test_pairs_are_random(self):
         assert oauth_generate_pkce_pair() != oauth_generate_pkce_pair()
 
+    def test_authorization_redirect_carries_the_challenge(self):
+        def params(**kwargs):
+            response = _authorization_redirect(**kwargs)
+            return parse_qs(urlparse(response.headers["location"]).query)
 
-class TestAuthorizationRedirectPkce:
-    def _params(self, **kwargs):
-        response = _authorization_redirect(**kwargs)
-        return parse_qs(urlparse(response.headers["location"]).query)
-
-    def test_code_challenge_sent_with_s256_method(self):
         _, code_challenge = oauth_generate_pkce_pair()
-        params = self._params(code_challenge=code_challenge)
-        assert params["code_challenge"] == [code_challenge]
-        assert params["code_challenge_method"] == ["S256"]
+        sent = params(code_challenge=code_challenge)
+        assert sent["code_challenge"] == [code_challenge]
+        assert sent["code_challenge_method"] == ["S256"]
 
-    def test_no_pkce_params_by_default(self):
-        params = self._params()
-        assert "code_challenge" not in params
-        assert "code_challenge_method" not in params
+        sent = params()
+        assert "code_challenge" not in sent
+        assert "code_challenge_method" not in sent
 
 
 def _raw_state(payload) -> str:
@@ -2934,112 +1901,58 @@ def _raw_state(payload) -> str:
 
 class TestDecodeStateOpenRedirectGuard:
     TOKEN = "test-state-token"
+    APP = ("app.example.com",)
 
-    def _decode(self, destination, allowed_hosts):
-        return oauth_decode_state(
-            oauth_encode_state(destination, self.TOKEN),
-            expected_state_token=self.TOKEN,
-            fallback="/fallback",
-            allowed_hosts=allowed_hosts,
+    def _decode(self, destination, *allowed_hosts):
+        """Decode *destination*; with no allowlist argument, the default applies."""
+        return self._decode_state(
+            oauth_encode_state(destination, self.TOKEN), *allowed_hosts
         )
 
-    def test_relative_path_allowed_with_empty_allowlist(self):
+    def _decode_state(self, state, *allowed_hosts):
+        kwargs = {"allowed_hosts": allowed_hosts[0]} if allowed_hosts else {}
+        return oauth_decode_state(
+            state, expected_state_token=self.TOKEN, fallback="/fallback", **kwargs
+        )
+
+    def test_allowed_destinations(self):
         assert self._decode("/dashboard?tab=1", ()) == "/dashboard?tab=1"
-
-    def test_absolute_url_rejected_with_empty_allowlist(self):
-        assert self._decode("https://app.example.com/x", ()) == "/fallback"
-
-    def test_absolute_url_allowed_when_host_in_allowlist(self):
+        assert self._decode("/dashboard") == "/dashboard"
         assert (
-            self._decode("https://app.example.com/x", ("app.example.com",))
+            self._decode("https://app.example.com/x", self.APP)
             == "https://app.example.com/x"
         )
-
-    def test_absolute_url_rejected_when_host_not_in_allowlist(self):
-        assert self._decode("https://evil.example.com/x", ("app.example.com",)) == (
-            "/fallback"
-        )
-
-    def test_scheme_relative_url_rejected(self):
-        assert self._decode("//evil.example.com/x", ("app.example.com",)) == (
-            "/fallback"
-        )
-
-    def test_backslash_path_rejected(self):
-        """Browsers normalize "/\\evil.com" into a scheme-relative redirect."""
-        assert self._decode("/\\evil.example.com", ("app.example.com",)) == "/fallback"
-
-    def test_tab_path_rejected(self):
-        """Browsers strip tabs/newlines, turning "/\\t/evil.com" into "//evil.com"."""
-        assert self._decode("/\t/evil.example.com", ("app.example.com",)) == (
-            "/fallback"
-        )
-
-    def test_newline_path_rejected(self):
-        assert self._decode("/\n/evil.example.com", ("app.example.com",)) == (
-            "/fallback"
-        )
-
-    def test_non_http_scheme_rejected(self):
-        assert self._decode("javascript:alert(1)", ("app.example.com",)) == "/fallback"
-
-    def test_path_without_leading_slash_rejected(self):
-        assert self._decode("dashboard", ("app.example.com",)) == "/fallback"
-
-    def test_explicit_none_disables_guard(self):
-        """allowed_hosts=None opts out: validation is left to the caller."""
+        # allowed_hosts=None opts out: validation is left to the caller.
         assert (
             self._decode("https://anywhere.example.com/x", None)
             == "https://anywhere.example.com/x"
         )
 
-    def test_default_allows_relative_paths(self):
-        state = oauth_encode_state("/dashboard", self.TOKEN)
-        assert (
-            oauth_decode_state(
-                state, expected_state_token=self.TOKEN, fallback="/fallback"
-            )
-            == "/dashboard"
-        )
+    def test_rejected_destinations_fall_back(self):
+        for destination, allowed in [
+            ("https://app.example.com/x", ()),
+            ("https://evil.example.com/x", self.APP),
+            ("//evil.example.com/x", self.APP),
+            # Browsers normalize "/\\evil.com" into a scheme-relative redirect.
+            ("/\\evil.example.com", self.APP),
+            # Browsers strip tabs/newlines, turning "/\\t/evil.com" into "//evil.com".
+            ("/\t/evil.example.com", self.APP),
+            ("/\n/evil.example.com", self.APP),
+            ("javascript:alert(1)", self.APP),
+            ("dashboard", self.APP),
+            ("http://[::1", self.APP),
+        ]:
+            assert self._decode(destination, allowed) == "/fallback", destination
 
-    def test_default_rejects_absolute_urls(self):
-        """Secure by default: absolute destinations need an explicit allowlist."""
-        state = oauth_encode_state("https://anywhere.example.com/x", self.TOKEN)
-        assert (
-            oauth_decode_state(
-                state, expected_state_token=self.TOKEN, fallback="/fallback"
-            )
-            == "/fallback"
-        )
+        # Secure by default: absolute destinations need an explicit allowlist.
+        assert self._decode("https://anywhere.example.com/x") == "/fallback"
+        for payload in [{"n": self.TOKEN, "d": {"url": "/x"}}, {"n": self.TOKEN}]:
+            assert self._decode_state(_raw_state(payload)) == "/fallback"
 
-    def test_non_string_destination_rejected(self):
-        state = _raw_state({"n": self.TOKEN, "d": {"url": "/x"}})
-        assert (
-            oauth_decode_state(
-                state, expected_state_token=self.TOKEN, fallback="/fallback"
-            )
-            == "/fallback"
-        )
-
-    def test_missing_destination_returns_fallback(self):
-        state = _raw_state({"n": self.TOKEN})
-        assert (
-            oauth_decode_state(
-                state, expected_state_token=self.TOKEN, fallback="/fallback"
-            )
-            == "/fallback"
-        )
-
-    def test_unparsable_destination_returns_fallback(self):
-        assert self._decode("http://[::1", ("app.example.com",)) == "/fallback"
-
-    @pytest.mark.parametrize("payload", [{"n": 12345, "d": "/x"}, ["not", "a", "dict"]])
-    def test_bad_payload_raises(self, payload):
-        state = _raw_state(payload)
-        with pytest.raises(OAuthStateError):
-            oauth_decode_state(
-                state, expected_state_token=self.TOKEN, fallback="/fallback"
-            )
+    def test_bad_payload_raises(self):
+        for payload in [{"n": 12345, "d": "/x"}, ["not", "a", "dict"]]:
+            with pytest.raises(OAuthStateError):
+                self._decode_state(_raw_state(payload))
 
 
 class TestRequireExtra:
@@ -3076,9 +1989,9 @@ class TestPathParity:
         )
         return direct_resp, multi_resp
 
-    @pytest.mark.parametrize(
-        "authorization",
-        [
+    def test_bearer_parity(self):
+        bearer = HTTPBearerAuth(simple_validator)
+        for authorization in [
             None,
             f"Bearer {VALID_TOKEN}",
             f"bearer {VALID_TOKEN}",  # SR-M3: scheme case-insensitive
@@ -3087,62 +2000,52 @@ class TestPathParity:
             "Bearer ",  # SR-M4: empty credential
             "Basic dXNlcjpwYXNz",  # different scheme
             f"Token {VALID_TOKEN}",
-        ],
-    )
-    def test_bearer_parity(self, authorization):
-        bearer = HTTPBearerAuth(simple_validator)
-        headers = {"Authorization": authorization} if authorization else None
-        direct_resp, multi_resp = self._statuses(bearer, headers=headers)
-        assert direct_resp.status_code == multi_resp.status_code
-        if direct_resp.status_code == 200:
-            assert direct_resp.json() == multi_resp.json()
+        ]:
+            headers = {"Authorization": authorization} if authorization else None
+            direct_resp, multi_resp = self._statuses(bearer, headers=headers)
+            assert direct_resp.status_code == multi_resp.status_code, authorization
+            if direct_resp.status_code == 200:
+                assert direct_resp.json() == multi_resp.json()
 
-    @pytest.mark.parametrize(
-        "authorization",
-        [
-            "Bearer user_abc",
-            "Bearer user",  # partial prefix
-            "Bearer org_abc",
-        ],
-    )
-    def test_bearer_prefix_parity(self, authorization):
+        # SR-M3 regression: lowercase scheme authenticates (RFC 7235).
+        direct_resp, _ = self._statuses(
+            bearer, headers={"Authorization": f"bearer {VALID_TOKEN}"}
+        )
+        assert direct_resp.status_code == 200
+
+    def test_bearer_prefix_parity(self):
         async def accept_all(credential: str) -> dict:
             return {"token": credential}
 
         bearer = HTTPBearerAuth(accept_all, prefix="user_")
-        direct_resp, multi_resp = self._statuses(
-            bearer, headers={"Authorization": authorization}
-        )
-        assert direct_resp.status_code == multi_resp.status_code
+        for authorization in [
+            "Bearer user_abc",
+            "Bearer user",  # partial prefix
+            "Bearer org_abc",
+        ]:
+            direct_resp, multi_resp = self._statuses(
+                bearer, headers={"Authorization": authorization}
+            )
+            assert direct_resp.status_code == multi_resp.status_code, authorization
 
-    @pytest.mark.parametrize(
-        "cookie_header", [None, "session=", f"session={VALID_COOKIE}"]
-    )
-    def test_cookie_parity(self, cookie_header):
-        auth = APIKeyCookieAuth("session", cookie_validator)
-        headers = {"Cookie": cookie_header} if cookie_header else None
-        direct_resp, multi_resp = self._statuses(auth, headers=headers)
-        assert direct_resp.status_code == multi_resp.status_code
-
-    @pytest.mark.parametrize("api_key", [None, "", "s3cr3t"])
-    def test_api_key_parity(self, api_key):
+    def test_cookie_and_api_key_parity(self):
         async def key_validator(value: str) -> dict:
             if value != "s3cr3t":
                 raise UnauthorizedError()
             return {"key": value}
 
-        auth = APIKeyHeaderAuth("X-API-Key", key_validator)
-        headers = {"X-API-Key": api_key} if api_key is not None else None
-        direct_resp, multi_resp = self._statuses(auth, headers=headers)
-        assert direct_resp.status_code == multi_resp.status_code
-
-    def test_bearer_case_insensitive_scheme_accepted(self):
-        """SR-M3 regression: lowercase scheme authenticates (RFC 7235)."""
-        bearer = HTTPBearerAuth(simple_validator)
-        direct_resp, _ = self._statuses(
-            bearer, headers={"Authorization": f"bearer {VALID_TOKEN}"}
-        )
-        assert direct_resp.status_code == 200
+        cookie = APIKeyCookieAuth("session", cookie_validator)
+        api_key = APIKeyHeaderAuth("X-API-Key", key_validator)
+        for source, headers in [
+            (cookie, None),
+            (cookie, {"Cookie": "session="}),
+            (cookie, {"Cookie": f"session={VALID_COOKIE}"}),
+            (api_key, None),
+            (api_key, {"X-API-Key": ""}),
+            (api_key, {"X-API-Key": "s3cr3t"}),
+        ]:
+            direct_resp, multi_resp = self._statuses(source, headers=headers)
+            assert direct_resp.status_code == multi_resp.status_code, headers
 
     def test_empty_api_key_never_reaches_validator(self):
         """SR-M4 regression: an empty header value is absent, not validated."""
@@ -3162,76 +2065,49 @@ class TestPathParity:
 class TestMalformedAuthorizationHeader:
     """Tampering battery for the Authorization header (single path)."""
 
-    def _get(self, authorization: str):
-        bearer = HTTPBearerAuth(simple_validator)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(bearer)):
-                return user
-
-        return TestClient(_app(setup)).get(
-            "/me", headers={"Authorization": authorization}
-        )
-
-    @pytest.mark.parametrize(
-        "authorization",
-        [
+    def test_malformed_header_returns_401(self):
+        client = _client(HTTPBearerAuth(simple_validator))
+        for authorization in [
             "Bearer",  # scheme only
             "Bearer ",  # empty token
             "Bearer  ",  # whitespace token
             f"Bearer{VALID_TOKEN}",  # no space
             "NotBearer token",
             "",
-        ],
-    )
-    def test_malformed_header_returns_401(self, authorization):
-        assert self._get(authorization).status_code == 401
+        ]:
+            response = client.get("/me", headers={"Authorization": authorization})
+            assert response.status_code == 401, authorization
 
-    def test_extra_whitespace_around_token_tolerated(self):
-        assert self._get(f"Bearer  {VALID_TOKEN} ").status_code == 200
+        response = client.get(
+            "/me", headers={"Authorization": f"Bearer  {VALID_TOKEN} "}
+        )
+        assert response.status_code == 200
 
     def test_duplicate_authorization_headers_use_first(self):
         """Duplicate headers: first one wins on both paths (parity-safe)."""
         bearer = HTTPBearerAuth(simple_validator)
-
-        def direct(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(bearer)):
-                return user
-
-        def multi(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(MultiAuth(bearer))):
-                return user
-
         headers = [
             ("Authorization", f"Bearer {VALID_TOKEN}"),
             ("Authorization", "Bearer wrong"),
         ]
-        direct_status = TestClient(_app(direct)).get("/me", headers=headers).status_code
-        multi_status = TestClient(_app(multi)).get("/me", headers=headers).status_code
+        direct_status = _client(bearer).get("/me", headers=headers).status_code
+        multi_status = (
+            _client(MultiAuth(bearer)).get("/me", headers=headers).status_code
+        )
         assert direct_status == multi_status == 200
 
 
 class TestWWWAuthenticate:
     """SR-L3: 401 responses carry a WWW-Authenticate challenge (RFC 7235 §4.1)."""
 
-    def test_bearer_missing_credentials_has_challenge(self):
-        response = _client(HTTPBearerAuth(simple_validator)).get("/me")
-        assert response.status_code == 401
-        assert response.headers["WWW-Authenticate"] == "Bearer"
+    def test_bearer_challenge(self):
+        client = _client(HTTPBearerAuth(simple_validator))
+        for headers in [{}, {"Authorization": "Bearer wrong"}]:
+            response = client.get("/me", headers=headers)
+            assert response.status_code == 401
+            assert response.headers["WWW-Authenticate"] == "Bearer"
 
-    def test_bearer_invalid_token_has_challenge(self):
-        response = _client(HTTPBearerAuth(simple_validator)).get(
-            "/me", headers={"Authorization": "Bearer wrong"}
-        )
-        assert response.status_code == 401
-        assert response.headers["WWW-Authenticate"] == "Bearer"
-
-    def test_validator_custom_challenge_preserved(self):
-        """A validator-provided WWW-Authenticate is not overwritten."""
-
+        # A validator-provided WWW-Authenticate is not overwritten.
         async def strict_validator(credential: str) -> dict:
             raise UnauthorizedError(
                 headers={"WWW-Authenticate": 'Bearer error="invalid_token"'}
@@ -3243,60 +2119,57 @@ class TestWWWAuthenticate:
         assert response.status_code == 401
         assert response.headers["WWW-Authenticate"] == 'Bearer error="invalid_token"'
 
-    def test_cookie_401_has_no_challenge(self):
-        """No registered HTTP auth scheme exists for cookies."""
-        response = _client(APIKeyCookieAuth("session", cookie_validator)).get("/me")
-        assert response.status_code == 401
-        assert "WWW-Authenticate" not in response.headers
-
     def test_api_key_401_has_no_challenge(self):
-        response = _client(APIKeyHeaderAuth("X-API-Key", simple_validator)).get("/me")
-        assert response.status_code == 401
-        assert "WWW-Authenticate" not in response.headers
-
-    def test_multiauth_emits_bearer_challenge(self):
-        multi = MultiAuth(
-            HTTPBearerAuth(simple_validator),
+        """No registered HTTP auth scheme exists for cookies or API keys."""
+        for auth in [
             APIKeyCookieAuth("session", cookie_validator),
-        )
-        response = _client(multi).get("/me")
-        assert response.status_code == 401
-        assert response.headers["WWW-Authenticate"] == "Bearer"
+            APIKeyHeaderAuth("X-API-Key", simple_validator),
+        ]:
+            response = _client(auth).get("/me")
+            assert response.status_code == 401
+            assert "WWW-Authenticate" not in response.headers
 
-    def test_multiauth_deduplicates_challenges(self):
-        multi = MultiAuth(
-            HTTPBearerAuth(simple_validator, prefix="user_"),
-            HTTPBearerAuth(simple_validator, prefix="org_"),
-        )
-        response = _client(multi).get("/me")
-        assert response.headers["WWW-Authenticate"] == "Bearer"
-
-    def test_multiauth_matched_source_challenge_on_invalid(self):
+    def test_multiauth_challenge(self):
         """A 401 from the matched source carries that source's challenge."""
-        multi = MultiAuth(
-            APIKeyCookieAuth("session", cookie_validator),
-            HTTPBearerAuth(simple_validator),
-        )
-        response = _client(multi).get("/me", headers={"Authorization": "Bearer wrong"})
-        assert response.status_code == 401
-        assert response.headers["WWW-Authenticate"] == "Bearer"
+        for multi, headers in [
+            (
+                MultiAuth(
+                    HTTPBearerAuth(simple_validator),
+                    APIKeyCookieAuth("session", cookie_validator),
+                ),
+                None,
+            ),
+            (
+                MultiAuth(
+                    HTTPBearerAuth(simple_validator, prefix="user_"),
+                    HTTPBearerAuth(simple_validator, prefix="org_"),
+                ),
+                None,
+            ),
+            (
+                MultiAuth(
+                    APIKeyCookieAuth("session", cookie_validator),
+                    HTTPBearerAuth(simple_validator),
+                ),
+                {"Authorization": "Bearer wrong"},
+            ),
+        ]:
+            response = _client(multi).get("/me", headers=headers)
+            assert response.status_code == 401
+            assert response.headers["WWW-Authenticate"] == "Bearer"
 
 
 class TestHttpSemantics:
     """2.3: 401 = absent/invalid credentials, 403 = authenticated but denied."""
 
-    @pytest.mark.parametrize(
-        "auth_factory",
-        [
-            lambda: HTTPBearerAuth(simple_validator),
-            lambda: APIKeyCookieAuth("session", cookie_validator),
-            lambda: APIKeyHeaderAuth("X-API-Key", simple_validator),
-            lambda: MultiAuth(HTTPBearerAuth(simple_validator)),
-        ],
-    )
-    def test_absent_credentials_return_401(self, auth_factory):
-        response = _client(auth_factory()).get("/me")
-        assert response.status_code == 401
+    def test_absent_credentials_return_401(self):
+        for auth in [
+            HTTPBearerAuth(simple_validator),
+            APIKeyCookieAuth("session", cookie_validator),
+            APIKeyHeaderAuth("X-API-Key", simple_validator),
+            MultiAuth(HTTPBearerAuth(simple_validator)),
+        ]:
+            assert _client(auth).get("/me").status_code == 401
 
     def test_forbidden_error_returns_403(self):
         """A validator can signal 'authenticated but not allowed' with 403."""
@@ -3317,76 +2190,77 @@ class TestOpenAPIDocumentation:
     """SR-L5 + Swagger 'Authorize' audit: every scheme is documented."""
 
     def _openapi(self, auth) -> dict:
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
+        return _client(auth).get("/openapi.json").json()
 
-        return TestClient(_app(setup)).get("/openapi.json").json()
+    def _declared(self, spec) -> set[str]:
+        return {
+            name for entry in spec["paths"]["/me"]["get"]["security"] for name in entry
+        }
 
-    def test_bearer_scheme_documented(self):
+    def test_each_scheme_documented(self):
         spec = self._openapi(HTTPBearerAuth(simple_validator))
         schemes = spec["components"]["securitySchemes"]
         assert schemes["HTTPBearer"]["scheme"] == "bearer"
         assert {"HTTPBearer": []} in spec["paths"]["/me"]["get"]["security"]
 
-    def test_cookie_scheme_documented(self):
-        spec = self._openapi(APIKeyCookieAuth("session", cookie_validator))
-        scheme = spec["components"]["securitySchemes"]["APIKeyCookie_session"]
-        assert scheme["type"] == "apiKey"
-        assert scheme["in"] == "cookie"
-        assert scheme["name"] == "session"
-
-    def test_api_key_scheme_documented(self):
-        spec = self._openapi(APIKeyHeaderAuth("X-API-Key", simple_validator))
-        scheme = spec["components"]["securitySchemes"]["APIKeyHeader_X-API-Key"]
-        assert scheme["type"] == "apiKey"
-        assert scheme["in"] == "header"
-        assert scheme["name"] == "X-API-Key"
-
-    def test_query_scheme_documented(self):
-        spec = self._openapi(APIKeyQueryAuth("api_key", simple_validator))
-        scheme = spec["components"]["securitySchemes"]["APIKeyQuery_api_key"]
-        assert scheme["type"] == "apiKey"
-        assert scheme["in"] == "query"
-        assert scheme["name"] == "api_key"
+        for auth, scheme_name, location, name in [
+            (
+                APIKeyCookieAuth("session", cookie_validator),
+                "APIKeyCookie_session",
+                "cookie",
+                "session",
+            ),
+            (
+                APIKeyHeaderAuth("X-API-Key", simple_validator),
+                "APIKeyHeader_X-API-Key",
+                "header",
+                "X-API-Key",
+            ),
+            (
+                APIKeyQueryAuth("api_key", simple_validator),
+                "APIKeyQuery_api_key",
+                "query",
+                "api_key",
+            ),
+        ]:
+            scheme = self._openapi(auth)["components"]["securitySchemes"][scheme_name]
+            assert scheme["type"] == "apiKey"
+            assert scheme["in"] == location
+            assert scheme["name"] == name
 
     def test_multiauth_documents_all_schemes(self):
-        multi = MultiAuth(
-            HTTPBearerAuth(simple_validator),
-            APIKeyCookieAuth("session", cookie_validator),
+        """SR-L5 regression: two sources of the same type keep both schemes."""
+        spec = self._openapi(
+            MultiAuth(
+                HTTPBearerAuth(simple_validator),
+                APIKeyCookieAuth("session", cookie_validator),
+            )
         )
-        spec = self._openapi(multi)
         schemes = spec["components"]["securitySchemes"]
         assert "HTTPBearer" in schemes
         assert "APIKeyCookie_session" in schemes
-        declared = {
-            name for entry in spec["paths"]["/me"]["get"]["security"] for name in entry
-        }
-        assert {"HTTPBearer", "APIKeyCookie_session"} <= declared
+        assert {"HTTPBearer", "APIKeyCookie_session"} <= self._declared(spec)
 
-    def test_multiauth_same_type_documents_both_schemes(self):
-        """SR-L5 regression: two sources of the same type keep both schemes."""
-        multi = MultiAuth(
-            HTTPBearerAuth(simple_validator, prefix="user_", scheme_name="UserToken"),
-            HTTPBearerAuth(simple_validator, prefix="org_", scheme_name="OrgToken"),
+        spec = self._openapi(
+            MultiAuth(
+                HTTPBearerAuth(
+                    simple_validator, prefix="user_", scheme_name="UserToken"
+                ),
+                HTTPBearerAuth(simple_validator, prefix="org_", scheme_name="OrgToken"),
+            )
         )
-        spec = self._openapi(multi)
         schemes = spec["components"]["securitySchemes"]
         assert "UserToken" in schemes
         assert "OrgToken" in schemes
-        declared = {
-            name for entry in spec["paths"]["/me"]["get"]["security"] for name in entry
-        }
-        assert {"UserToken", "OrgToken"} <= declared
+        assert {"UserToken", "OrgToken"} <= self._declared(spec)
 
-    def test_multiauth_two_api_key_headers_documented(self):
-        """Distinct default scheme names: both header schemes documented."""
-        multi = MultiAuth(
-            APIKeyHeaderAuth("X-API-Key", simple_validator),
-            APIKeyHeaderAuth("X-Org-Key", simple_validator),
+        # Distinct default scheme names: both header schemes documented.
+        spec = self._openapi(
+            MultiAuth(
+                APIKeyHeaderAuth("X-API-Key", simple_validator),
+                APIKeyHeaderAuth("X-Org-Key", simple_validator),
+            )
         )
-        spec = self._openapi(multi)
         schemes = spec["components"]["securitySchemes"]
         assert schemes["APIKeyHeader_X-API-Key"]["name"] == "X-API-Key"
         assert schemes["APIKeyHeader_X-Org-Key"]["name"] == "X-Org-Key"
@@ -3440,29 +2314,16 @@ class TestSchemeDescription:
     def _scheme(auth, name: str) -> dict:
         return _client(auth).app.openapi()["components"]["securitySchemes"][name]
 
-    @pytest.mark.parametrize(
-        ("build", "scheme_name"),
-        _DESCRIBED_SOURCES,
-        ids=[name for _, name in _DESCRIBED_SOURCES],
-    )
-    def test_description_is_published(self, build, scheme_name):
-        scheme = self._scheme(build("Who may call this"), scheme_name)
-        assert scheme["description"] == "Who may call this"
-
-    @pytest.mark.parametrize(
-        ("build", "scheme_name"),
-        _DESCRIBED_SOURCES,
-        ids=[name for _, name in _DESCRIBED_SOURCES],
-    )
-    def test_omitted_description_leaves_no_key(self, build, scheme_name):
+    def test_description_is_published(self):
         """A default None must not surface as \"description\": null."""
-        assert "description" not in self._scheme(build(None), scheme_name)
+        for build, scheme_name in _DESCRIBED_SOURCES:
+            scheme = self._scheme(build("Who may call this"), scheme_name)
+            assert scheme["description"] == "Who may call this", scheme_name
+            assert "description" not in self._scheme(build(None), scheme_name)
 
     def test_bearer_format_is_published(self):
         auth = HTTPBearerAuth(simple_validator, bearer_format="JWT")
         assert self._scheme(auth, "HTTPBearer")["bearerFormat"] == "JWT"
-
-    def test_bearer_format_omitted_leaves_no_key(self):
         assert "bearerFormat" not in self._scheme(
             HTTPBearerAuth(simple_validator), "HTTPBearer"
         )
@@ -3471,60 +2332,44 @@ class TestSchemeDescription:
 class TestSchemeIsNotAPerRequestDependency:
     """Doc-only schemes reach OpenAPI without being resolved on every request."""
 
-    @staticmethod
-    def _resolved(auth, monkeypatch) -> list[str]:
+    def test_only_sources_after_the_first_resolve_a_scheme(self, monkeypatch):
+        """The first source's scheme rides on MultiAuth's own dependency."""
         resolved: list[str] = []
 
         async def counting(self, request: Request) -> None:
             resolved.append(self.scheme_name)
 
         monkeypatch.setattr(_DocOnlyScheme, "__call__", counting)
-        response = _client(auth).get(
-            "/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
-        )
-        assert response.status_code == 200
-        return resolved
 
-    def test_single_source_resolves_no_scheme(self, monkeypatch):
-        auth = HTTPBearerAuth(simple_validator)
-        assert self._resolved(auth, monkeypatch) == []
+        def call(auth) -> list[str]:
+            resolved.clear()
+            response = _client(auth).get(
+                "/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+            )
+            assert response.status_code == 200
+            return list(resolved)
 
-    def test_multiauth_resolves_one_scheme_per_source_after_the_first(
-        self, monkeypatch
-    ):
-        """The first source's scheme rides on MultiAuth's own dependency."""
+        assert call(HTTPBearerAuth(simple_validator)) == []
         multi = MultiAuth(
             HTTPBearerAuth(simple_validator),
             APIKeyHeaderAuth("X-API-Key", simple_validator),
             APIKeyCookieAuth("session", cookie_validator),
         )
-        assert self._resolved(multi, monkeypatch) == [
-            "APIKeyHeader_X-API-Key",
-            "APIKeyCookie_session",
-        ]
+        assert call(multi) == ["APIKeyHeader_X-API-Key", "APIKeyCookie_session"]
 
 
 class TestTokenHelpers:
     """2.2: store the hash, never the token."""
 
-    def test_hash_token_is_sha256_hex(self):
+    def test_hash_and_verify(self):
         assert hash_token("user_abc") == hashlib.sha256(b"user_abc").hexdigest()
-
-    def test_hash_includes_prefix(self):
         assert hash_token("user_abc") != hash_token("abc")
-
-    def test_verify_token_hash_accepts_matching(self):
-        token = "user_secret-token"
-        assert verify_token_hash(token, hash_token(token)) is True
-
-    def test_verify_token_hash_rejects_wrong_token(self):
         assert verify_token_hash("user_other", hash_token("user_secret")) is False
 
-    def test_generate_hash_verify_roundtrip(self):
         bearer = HTTPBearerAuth(simple_validator, prefix="user_")
         token = bearer.generate_token()
         stored = hash_token(token)
-        assert verify_token_hash(token, stored)
+        assert verify_token_hash(token, stored) is True
         assert not verify_token_hash(bearer.generate_token(), stored)
 
 
@@ -3539,15 +2384,7 @@ class TestSecurityInvariants:
         raise on malformed credentials regardless of auto_error (HTTPBasic)
         must be inert — extract() is the only authentication path.
         """
-        from starlette.requests import Request
-
-        scope = {
-            "type": "http",
-            "method": "GET",
-            "path": "/",
-            "headers": [(b"authorization", b"Basic !!!not-base64")],
-        }
-        request = Request(scope)
+        request = _request(authorization="Basic !!!not-base64")
         sources = [
             HTTPBearerAuth(simple_validator),
             APIKeyCookieAuth("session", cookie_validator),
@@ -3565,10 +2402,7 @@ class TestSecurityInvariants:
         assert len(tokens) == 32
         for token in tokens:
             assert "+" not in token and "/" not in token and "=" not in token
-
-    def test_state_tokens_are_urlsafe_and_unique(self):
-        tokens = {oauth_generate_state_token() for _ in range(32)}
-        assert len(tokens) == 32
+        assert len({oauth_generate_state_token() for _ in range(32)}) == 32
 
     def test_cookie_expiry_is_inside_signed_payload(self):
         """The timestamp is covered by the signature: it cannot be extended."""
@@ -3637,54 +2471,43 @@ def _forged_token(alg: str, *, kid: str | None = "key1", claims=None) -> str:
 
 
 def _auth_client(validator) -> TestClient:
-    bearer = HTTPBearerAuth(validator)
+    return _client(HTTPBearerAuth(validator))
 
-    def setup(app: FastAPI):
-        @app.get("/me")
-        async def me(user=Security(bearer)):
-            return user
 
-    return TestClient(_app(setup))
+def _status(client: TestClient, token: str, path: str = "/me") -> int:
+    return client.get(path, headers={"Authorization": f"Bearer {token}"}).status_code
 
 
 class TestJWTValidatorConfig:
-    def test_secret_and_jwks_url_rejected(self):
-        with pytest.raises(ValueError, match="exactly one"):
-            JWTValidator(secret=JWT_SECRET, jwks_url="https://idp.example.com/jwks")
+    def test_misconfiguration_rejected(self):
+        cases: list[tuple[dict[str, Any], str]] = [
+            (
+                {"secret": JWT_SECRET, "jwks_url": "https://idp.example.com/jwks"},
+                "exactly one",
+            ),
+            ({}, "exactly one"),
+            ({"secret": "short"}, "at least 32"),
+            ({"jwks_url": "http://idp.example.com/jwks"}, "jwks_url must use https"),
+            # Key-confusion guard: a public key must never act as an HMAC secret.
+            (
+                {
+                    "jwks_url": "https://idp.example.com/jwks",
+                    "algorithms": ["RS256", "HS256"],
+                },
+                "key-confusion",
+            ),
+        ]
+        for kwargs, match in cases:
+            with pytest.raises(ValueError, match=match):
+                JWTValidator(**kwargs)
+        for audience in [None, "", []]:
+            with pytest.raises(ValueError, match="audience is required.*ANY_AUDIENCE"):
+                JWTValidator(jwks_url="https://idp.example.com/jwks", audience=audience)
 
-    def test_neither_secret_nor_jwks_url_rejected(self):
-        with pytest.raises(ValueError, match="exactly one"):
-            JWTValidator()
-
-    def test_short_secret_rejected(self):
-        with pytest.raises(ValueError, match="at least 32"):
-            JWTValidator(secret="short")
-
-    def test_http_jwks_url_rejected(self):
-        with pytest.raises(ValueError, match="jwks_url must use https"):
-            JWTValidator(jwks_url="http://idp.example.com/jwks")
-
-    def test_loopback_http_jwks_url_accepted(self):
+    def test_valid_configuration_accepted(self):
         _jwks_validator("http://localhost:8080/jwks")
-
-    @pytest.mark.parametrize("audience", [None, "", []])
-    def test_jwks_without_audience_rejected(self, audience):
-        with pytest.raises(ValueError, match="audience is required.*ANY_AUDIENCE"):
-            JWTValidator(jwks_url="https://idp.example.com/jwks", audience=audience)
-
-    def test_secret_mode_without_audience_accepted(self):
         JWTValidator(secret=JWT_SECRET)
-
-    def test_any_audience_repr(self):
         assert repr(JWTValidator.ANY_AUDIENCE) == "JWTValidator.ANY_AUDIENCE"
-
-    def test_symmetric_algorithms_with_jwks_rejected(self):
-        """Key-confusion guard: a public key must never act as an HMAC secret."""
-        with pytest.raises(ValueError, match="key-confusion"):
-            JWTValidator(
-                jwks_url="https://idp.example.com/jwks",
-                algorithms=["RS256", "HS256"],
-            )
 
 
 class TestJWTValidatorSymmetric:
@@ -3694,153 +2517,88 @@ class TestJWTValidatorSymmetric:
         assert response.status_code == 200
         assert response.json()["sub"] == "user-1"
 
-    def test_expired_token_rejected(self):
-        token = _hs_token(_claims(exp=int(time.time()) - 10))
+    def test_time_claims(self):
+        expired = _hs_token(_claims(exp=int(time.time()) - 10))
+        no_exp = _hs_token(_claims(exp=None))
         client = _auth_client(JWTValidator(secret=JWT_SECRET))
-        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 401
+        assert _status(client, expired) == 401
+        assert _status(client, _hs_token(_claims(nbf=int(time.time()) + 300))) == 401
+        assert _status(client, no_exp) == 401
 
-    def test_leeway_tolerates_clock_skew(self):
-        token = _hs_token(_claims(exp=int(time.time()) - 10))
-        client = _auth_client(JWTValidator(secret=JWT_SECRET, leeway=30))
-        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 200
-
-    def test_not_yet_valid_token_rejected(self):
-        token = _hs_token(_claims(nbf=int(time.time()) + 300))
-        client = _auth_client(JWTValidator(secret=JWT_SECRET))
-        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 401
-
-    def test_token_without_exp_rejected_by_default(self):
-        token = _hs_token(_claims(exp=None))
-        client = _auth_client(JWTValidator(secret=JWT_SECRET))
-        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 401
-
-    def test_required_claims_configurable(self):
-        token = _hs_token(_claims(exp=None))
-        client = _auth_client(JWTValidator(secret=JWT_SECRET, required_claims=()))
-        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 200
-
-    def test_wrong_signature_rejected(self):
-        token = _hs_token(secret="other-secret-key-32-bytes-minimum!!!")
-        client = _auth_client(JWTValidator(secret=JWT_SECRET))
-        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 401
-
-    def test_garbage_token_rejected(self):
-        client = _auth_client(JWTValidator(secret=JWT_SECRET))
-        response = client.get("/me", headers={"Authorization": "Bearer not.a.jwt"})
-        assert response.status_code == 401
-
-    def test_audience_verified(self):
-        validator = JWTValidator(secret=JWT_SECRET, audience="my-api")
-        client = _auth_client(validator)
-
-        good = _hs_token(_claims(aud="my-api"))
         assert (
-            client.get("/me", headers={"Authorization": f"Bearer {good}"}).status_code
+            _status(_auth_client(JWTValidator(secret=JWT_SECRET, leeway=30)), expired)
             == 200
         )
-        bad = _hs_token(_claims(aud="other-api"))
+        client = _auth_client(JWTValidator(secret=JWT_SECRET, required_claims=()))
+        assert _status(client, no_exp) == 200
+
+    def test_bad_tokens_rejected(self):
+        client = _auth_client(JWTValidator(secret=JWT_SECRET))
         assert (
-            client.get("/me", headers={"Authorization": f"Bearer {bad}"}).status_code
+            _status(client, _hs_token(secret="other-secret-key-32-bytes-minimum!!!"))
             == 401
         )
+        assert _status(client, "not.a.jwt") == 401
 
-    def test_issuer_verified(self):
+        # An allowlisted 'alg' the secret cannot satisfy is a 401, not a 500.
+        validator = JWTValidator(secret=JWT_SECRET, algorithms=["HS256", "ES256"])
+        assert _status(_auth_client(validator), _forged_token("ES256", kid=None)) == 401
+
+    def test_audience_and_issuer_verified(self):
+        client = _auth_client(JWTValidator(secret=JWT_SECRET, audience="my-api"))
+        assert _status(client, _hs_token(_claims(aud="my-api"))) == 200
+        assert _status(client, _hs_token(_claims(aud="other-api"))) == 401
+
         validator = JWTValidator(secret=JWT_SECRET, issuer="https://idp.example.com")
         client = _auth_client(validator)
-
-        good = _hs_token(_claims(iss="https://idp.example.com"))
+        assert _status(client, _hs_token(_claims(iss="https://idp.example.com"))) == 200
         assert (
-            client.get("/me", headers={"Authorization": f"Bearer {good}"}).status_code
-            == 200
-        )
-        bad = _hs_token(_claims(iss="https://evil.example.com"))
-        assert (
-            client.get("/me", headers={"Authorization": f"Bearer {bad}"}).status_code
-            == 401
+            _status(client, _hs_token(_claims(iss="https://evil.example.com"))) == 401
         )
 
-    def test_claims_to_identity_sync_hook(self):
-        validator = JWTValidator(
-            secret=JWT_SECRET,
-            claims_to_identity=lambda claims: {"id": claims["sub"].upper()},
-        )
-        client = _auth_client(validator)
-        response = client.get("/me", headers={"Authorization": f"Bearer {_hs_token()}"})
-        assert response.json() == {"id": "USER-1"}
-
-    def test_claims_to_identity_async_hook(self):
+    def test_claims_to_identity_hook(self):
         async def to_identity(claims: dict) -> dict:
             return {"id": claims["sub"], "via": "async"}
 
-        validator = JWTValidator(secret=JWT_SECRET, claims_to_identity=to_identity)
-        client = _auth_client(validator)
-        response = client.get("/me", headers={"Authorization": f"Bearer {_hs_token()}"})
-        assert response.json() == {"id": "user-1", "via": "async"}
-
-    def test_asymmetric_alg_header_fails_closed(self):
-        """An allowlisted 'alg' the secret cannot satisfy is a 401, not a 500."""
-        validator = JWTValidator(secret=JWT_SECRET, algorithms=["HS256", "ES256"])
-        client = _auth_client(validator)
-        token = _forged_token("ES256", kid=None)
-        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 401
+        for hook, expected in [
+            (lambda claims: {"id": claims["sub"].upper()}, {"id": "USER-1"}),
+            (to_identity, {"id": "user-1", "via": "async"}),
+        ]:
+            client = _auth_client(
+                JWTValidator(secret=JWT_SECRET, claims_to_identity=hook)
+            )
+            response = client.get(
+                "/me", headers={"Authorization": f"Bearer {_hs_token()}"}
+            )
+            assert response.json() == expected
 
 
 class TestJWTValidatorScopes:
-    def _scoped_client(self, validator, scopes: list[str]) -> TestClient:
-        bearer = HTTPBearerAuth(validator)
-
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(bearer, scopes=scopes)):
-                return user
-
-        return TestClient(_app(setup))
-
-    def test_scope_string_claim_grants_access(self):
-        token = _hs_token(_claims(scope="read write admin"))
-        client = self._scoped_client(JWTValidator(secret=JWT_SECRET), ["admin"])
-        response = client.get("/admin", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 200
-
-    def test_missing_scope_returns_403(self):
+    def test_route_scopes_checked_against_the_claim(self):
         """RFC 6750: valid token without the required scope → 403, not 401."""
-        token = _hs_token(_claims(scope="read"))
-        client = self._scoped_client(JWTValidator(secret=JWT_SECRET), ["admin"])
-        response = client.get("/admin", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 403
+        for scopes_claim, claims, expected in [
+            ("scope", {"scope": "read write admin"}, 200),
+            ("scope", {"scope": "read"}, 403),
+            ("scp", {"scp": ["read", "admin"]}, 200),
+            ("roles", {"roles": ["viewer"]}, 403),
+            ("scope", {}, 403),  # no scope claim at all
+        ]:
+            bearer = HTTPBearerAuth(
+                JWTValidator(secret=JWT_SECRET, scopes_claim=scopes_claim)
+            )
 
-    def test_scp_list_claim(self):
-        token = _hs_token(_claims(scp=["read", "admin"]))
-        validator = JWTValidator(secret=JWT_SECRET, scopes_claim="scp")
-        client = self._scoped_client(validator, ["admin"])
-        response = client.get("/admin", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 200
+            def setup(app: FastAPI, bearer=bearer):
+                @app.get("/admin")
+                async def admin(user=Security(bearer, scopes=["admin"])):
+                    return user
 
-    def test_roles_list_claim(self):
-        token = _hs_token(_claims(roles=["viewer"]))
-        validator = JWTValidator(secret=JWT_SECRET, scopes_claim="roles")
-        client = self._scoped_client(validator, ["admin"])
-        response = client.get("/admin", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 403
+            client = TestClient(_app(setup))
+            assert (
+                _status(client, _hs_token(_claims(**claims)), "/admin") == expected
+            ), claims
 
-    def test_absent_scopes_claim_fails_closed(self):
-        token = _hs_token()  # no scope claim at all
-        client = self._scoped_client(JWTValidator(secret=JWT_SECRET), ["admin"])
-        response = client.get("/admin", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 403
-
-    def test_route_without_scopes_skips_check(self):
-        token = _hs_token()
         client = _auth_client(JWTValidator(secret=JWT_SECRET))
-        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 200
+        assert _status(client, _hs_token()) == 200
 
 
 class TestJWTValidatorJWKS:
@@ -3857,35 +2615,21 @@ class TestJWTValidatorJWKS:
     def _validator(self, **kwargs) -> JWTValidator:
         return _jwks_validator(self.JWKS_URL, **kwargs)
 
-    @pytest.mark.parametrize(
-        ("audience", "aud", "expected"),
-        [
+    @respx.mock
+    def test_audience_check(self):
+        respx.get(self.JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
+        for audience, aud, expected in [
             ("my-api", "my-api", 200),
             ("my-api", "other-client", 401),
             ("my-api", None, 401),
             (JWTValidator.ANY_AUDIENCE, "other-client", 200),
-        ],
-    )
-    @respx.mock
-    def test_audience_check(self, audience, aud, expected):
-        respx.get(self.JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
-        client = _auth_client(self._validator(audience=audience))
-        token = self._rs_token(claims=_claims(aud=aud))
-        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == expected
+        ]:
+            client = _auth_client(self._validator(audience=audience))
+            token = self._rs_token(claims=_claims(aud=aud))
+            assert _status(client, token) == expected, (audience, aud)
 
     @respx.mock
-    def test_valid_rs256_token(self):
-        respx.get(self.JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
-        client = _auth_client(self._validator())
-        response = client.get(
-            "/me", headers={"Authorization": f"Bearer {self._rs_token()}"}
-        )
-        assert response.status_code == 200
-        assert response.json()["sub"] == "user-1"
-
-    @respx.mock
-    def test_jwks_cached_between_requests(self):
+    def test_valid_rs256_token_and_jwks_cached_between_requests(self):
         route = respx.get(self.JWKS_URL).respond(
             json={"keys": [_jwk(_RSA_KEY_1, "key1")]}
         )
@@ -3895,6 +2639,7 @@ class TestJWTValidatorJWKS:
                 "/me", headers={"Authorization": f"Bearer {self._rs_token()}"}
             )
             assert response.status_code == 200
+            assert response.json()["sub"] == "user-1"
         assert route.call_count == 1
 
     @respx.mock
@@ -3910,14 +2655,9 @@ class TestJWTValidatorJWKS:
         ]
         client = _auth_client(self._validator(jwks_refresh_cooldown=0))
 
-        first = client.get(
-            "/me", headers={"Authorization": f"Bearer {self._rs_token()}"}
-        )
-        assert first.status_code == 200
-
+        assert _status(client, self._rs_token()) == 200
         rotated = self._rs_token(private_key=_RSA_KEY_2, kid="key2")
-        second = client.get("/me", headers={"Authorization": f"Bearer {rotated}"})
-        assert second.status_code == 200
+        assert _status(client, rotated) == 200
         assert route.call_count == 2
 
     @respx.mock
@@ -3926,144 +2666,77 @@ class TestJWTValidatorJWKS:
         route = respx.get(self.JWKS_URL).respond(
             json={"keys": [_jwk(_RSA_KEY_1, "key1")]}
         )
-        client = _auth_client(self._validator())  # default 30 s cooldown
-
-        valid = self._rs_token()
-        assert (
-            client.get("/me", headers={"Authorization": f"Bearer {valid}"}).status_code
-            == 200
-        )
-
         bogus = self._rs_token(private_key=_RSA_KEY_2, kid="rogue")
+        assert _status(_auth_client(self._validator()), bogus) == 401
+
+        before = route.call_count
+        client = _auth_client(self._validator())  # default 30 s cooldown
+        assert _status(client, self._rs_token()) == 200
         for _ in range(5):
-            response = client.get("/me", headers={"Authorization": f"Bearer {bogus}"})
-            assert response.status_code == 401
+            assert _status(client, bogus) == 401
         # The forced refresh was within the cooldown window every time.
-        assert route.call_count == 1
+        assert route.call_count == before + 1
 
     @respx.mock
-    def test_unknown_kid_after_refresh_rejected(self):
-        respx.get(self.JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
-        client = _auth_client(self._validator())
-        token = self._rs_token(private_key=_RSA_KEY_2, kid="rogue")
-        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 401
-
-    @respx.mock
-    def test_token_without_kid_single_key(self):
-        respx.get(self.JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
-        client = _auth_client(self._validator())
-        token = self._rs_token(kid=None)
-        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 200
-
-    @respx.mock
-    def test_token_without_kid_multiple_keys_rejected(self):
-        """Ambiguous key resolution fails closed."""
-        respx.get(self.JWKS_URL).respond(
-            json={"keys": [_jwk(_RSA_KEY_1, "key1"), _jwk(_RSA_KEY_2, "key2")]}
-        )
-        client = _auth_client(self._validator())
-        token = self._rs_token(kid=None)
-        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 401
-
-    @respx.mock
-    def test_jwks_entry_without_alg_gets_default(self):
-        """Some IdPs omit 'alg' in JWKS entries — inferred from kty."""
-        respx.get(self.JWKS_URL).respond(
-            json={"keys": [_jwk(_RSA_KEY_1, "key1", alg=None)]}
-        )
-        client = _auth_client(self._validator())
-        response = client.get(
-            "/me", headers={"Authorization": f"Bearer {self._rs_token()}"}
-        )
-        assert response.status_code == 200
-
-    @respx.mock
-    def test_encryption_keys_skipped(self):
-        respx.get(self.JWKS_URL).respond(
-            json={
-                "keys": [
-                    _jwk(_RSA_KEY_2, "key1", use="enc"),
-                    _jwk(_RSA_KEY_1, "key1"),
-                ]
-            }
-        )
-        client = _auth_client(self._validator())
-        response = client.get(
-            "/me", headers={"Authorization": f"Bearer {self._rs_token()}"}
-        )
-        assert response.status_code == 200
-
-    @respx.mock
-    def test_hs256_token_rejected_against_jwks(self):
-        """A symmetric token can never satisfy an asymmetric validator."""
-        respx.get(self.JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
-        client = _auth_client(self._validator())
-        token = _hs_token(headers={"kid": "key1"})
-        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 401
+    def test_key_selection(self):
+        """Ambiguous key resolution fails closed; 'alg' is inferred from kty."""
+        route = respx.get(self.JWKS_URL)
+        for keys, token, expected in [
+            ([_jwk(_RSA_KEY_1, "key1")], self._rs_token(kid=None), 200),
+            (
+                [_jwk(_RSA_KEY_1, "key1"), _jwk(_RSA_KEY_2, "key2")],
+                self._rs_token(kid=None),
+                401,
+            ),
+            ([_jwk(_RSA_KEY_1, "key1", alg=None)], self._rs_token(), 200),
+            (
+                [_jwk(_RSA_KEY_2, "key1", use="enc"), _jwk(_RSA_KEY_1, "key1")],
+                self._rs_token(),
+                200,
+            ),
+            # A symmetric token can never satisfy an asymmetric validator.
+            ([_jwk(_RSA_KEY_1, "key1")], _hs_token(headers={"kid": "key1"}), 401),
+        ]:
+            route.respond(json={"keys": keys})
+            assert _status(_auth_client(self._validator()), token) == expected, keys
 
     @pytest.mark.anyio
     @respx.mock
     async def test_jwks_fetch_error_cold_start_returns_503(self):
         """A broken IdP with no cached keys surfaces as 503, not a 401."""
-        respx.get(self.JWKS_URL).respond(500)
-        validator = self._validator()
-        with pytest.raises(HTTPException) as exc_info:
-            await validator(self._rs_token())
-        assert exc_info.value.status_code == 503
+        route = respx.get(self.JWKS_URL)
+        # With nothing cached to fall back on, an unusable 200 is still 503.
+        for response in [httpx.Response(500), httpx.Response(200, json={"keys": []})]:
+            route.mock(side_effect=[response])
+            with pytest.raises(HTTPException) as exc_info:
+                await self._validator()(self._rs_token())
+            assert exc_info.value.status_code == 503
 
     @pytest.mark.anyio
     @respx.mock
     async def test_jwks_fetch_error_falls_back_to_cached_keys(self):
-        """A provider blip after cache expiry must not break validation."""
+        """A provider blip after cache expiry must not break validation.
+
+        A 200 carrying no usable key is a broken provider, like a 500 is.
+        """
         route = respx.get(self.JWKS_URL)
-        route.side_effect = [
-            httpx.Response(200, json={"keys": [_jwk(_RSA_KEY_1, "key1")]}),
+        for broken in [
             httpx.Response(500),
-        ]
-        validator = self._validator(jwks_cache_ttl=0, jwks_refresh_cooldown=0)
-        token = self._rs_token()
-        assert (await validator(token))["sub"] == "user-1"
-        # Cache is stale (ttl=0): the refetch fails, the cached keys serve.
-        assert (await validator(token))["sub"] == "user-1"
-        assert route.call_count == 2
-
-    @pytest.mark.anyio
-    @respx.mock
-    @pytest.mark.parametrize(
-        "document",
-        [
-            {"keys": []},
-            {"keys": [_jwk(_RSA_KEY_1, "key1", use="enc")]},
-            {"keys": [{"kty": "RSA", "kid": "key1"}]},
-        ],
-        ids=["empty", "encryption-only", "unparseable"],
-    )
-    async def test_unusable_jwks_falls_back_to_cached_keys(self, document):
-        """A 200 carrying no usable key is a broken provider, like a 500 is."""
-        route = respx.get(self.JWKS_URL)
-        route.side_effect = [
-            httpx.Response(200, json={"keys": [_jwk(_RSA_KEY_1, "key1")]}),
-            httpx.Response(200, json=document),
-        ]
-        validator = self._validator(jwks_cache_ttl=0, jwks_refresh_cooldown=0)
-        token = self._rs_token()
-        assert (await validator(token))["sub"] == "user-1"
-        assert (await validator(token))["sub"] == "user-1"
-        assert route.call_count == 2
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_unusable_jwks_cold_start_returns_503(self):
-        """With nothing cached to fall back on, it is still 503, not 401."""
-        respx.get(self.JWKS_URL).respond(json={"keys": []})
-        validator = self._validator()
-        with pytest.raises(HTTPException) as exc_info:
-            await validator(self._rs_token())
-        assert exc_info.value.status_code == 503
+            httpx.Response(200, json={"keys": []}),
+            httpx.Response(200, json={"keys": [_jwk(_RSA_KEY_1, "key1", use="enc")]}),
+            httpx.Response(200, json={"keys": [{"kty": "RSA", "kid": "key1"}]}),
+        ]:
+            route.reset()
+            route.side_effect = [
+                httpx.Response(200, json={"keys": [_jwk(_RSA_KEY_1, "key1")]}),
+                broken,
+            ]
+            validator = self._validator(jwks_cache_ttl=0, jwks_refresh_cooldown=0)
+            token = self._rs_token()
+            assert (await validator(token))["sub"] == "user-1"
+            # Cache is stale (ttl=0): the refetch fails, the cached keys serve.
+            assert (await validator(token))["sub"] == "user-1"
+            assert route.call_count == 2
 
     @pytest.mark.anyio
     @respx.mock
@@ -4089,94 +2762,68 @@ class TestBasicAuth:
             raise UnauthorizedError()
         return {"user": username}
 
-    def test_valid_credentials(self):
+    def test_authenticates_the_credentials(self):
         client = _client(HTTPBasicAuth(self._validator))
         response = client.get("/me", headers=self._header("alice", "wonderland"))
         assert response.status_code == 200
         assert response.json() == {"user": "alice"}
 
-    def test_wrong_password_returns_401(self):
-        client = _client(HTTPBasicAuth(self._validator))
-        response = client.get("/me", headers=self._header("alice", "nope"))
-        assert response.status_code == 401
-
-    def test_missing_header_401_with_challenge(self):
-        client = _client(HTTPBasicAuth(self._validator))
-        response = client.get("/me")
-        assert response.status_code == 401
-        assert response.headers["WWW-Authenticate"] == "Basic"
-
-    def test_realm_in_challenge(self):
-        client = _client(HTTPBasicAuth(self._validator, realm="api"))
-        response = client.get("/me")
-        assert response.headers["WWW-Authenticate"] == 'Basic realm="api"'
-
-    def test_realm_quotes_and_backslashes_escaped(self):
-        """RFC 7230 §3.2.6: the realm is a quoted-string, so it must be escaped."""
-        client = _client(HTTPBasicAuth(self._validator, realm=r'ev"il\path'))
-        response = client.get("/me")
-        assert response.headers["WWW-Authenticate"] == r'Basic realm="ev\"il\\path"'
-
-    def test_realm_cannot_smuggle_a_second_challenge(self):
-        """An unescaped quote would end the quoted-string and start new params."""
-        realm = 'a", charset="UTF-8'
-        client = _client(HTTPBasicAuth(self._validator, realm=realm))
-        challenge = client.get("/me").headers["WWW-Authenticate"]
-        assert challenge == r'Basic realm="a\", charset=\"UTF-8"'
-        assert "charset" not in challenge.split('"')[0]
-
-    @pytest.mark.parametrize(
-        "realm",
-        ["x\r\nX-Injected: yes", "x\ny", "a\x00b", "a\x7fb", "a\tb", "caf\u00e9"],
-        ids=["crlf", "lf", "nul", "del", "tab", "non-ascii"],
-    )
-    def test_unsendable_realm_rejected_at_construction(self, realm):
-        """h11 refuses control characters; non-ASCII cannot survive a header."""
-        with pytest.raises(ValueError, match="printable US-ASCII"):
-            HTTPBasicAuth(self._validator, realm=realm)
-
-    def test_scheme_case_insensitive(self):
-        client = _client(HTTPBasicAuth(self._validator))
         blob = base64.b64encode(b"alice:wonderland").decode()
         response = client.get("/me", headers={"Authorization": f"basic {blob}"})
         assert response.status_code == 200
 
-    def test_invalid_base64_returns_401(self):
-        client = _client(HTTPBasicAuth(self._validator))
-        response = client.get("/me", headers={"Authorization": "Basic !!!"})
+        response = client.get("/me")
         assert response.status_code == 401
+        assert response.headers["WWW-Authenticate"] == "Basic"
 
-    def test_missing_colon_returns_401(self):
-        client = _client(HTTPBasicAuth(self._validator))
-        blob = base64.b64encode(b"alicewonderland").decode()
-        response = client.get("/me", headers={"Authorization": f"Basic {blob}"})
-        assert response.status_code == 401
+        for headers in [
+            self._header("alice", "nope"),
+            {"Authorization": "Basic !!!"},
+            {"Authorization": f"Basic {base64.b64encode(b'alicewonderland').decode()}"},
+            {"Authorization": "Bearer token"},
+        ]:
+            assert client.get("/me", headers=headers).status_code == 401, headers
 
-    def test_empty_password_reaches_validator(self):
+    def test_credential_edge_cases_reach_the_validator(self):
         received: list[tuple[str, str]] = []
 
         async def capturing(username: str, password: str) -> dict:
             received.append((username, password))
-            return {"user": username}
+            return {"user": username, "pw": password}
 
         client = _client(HTTPBasicAuth(capturing))
         response = client.get("/me", headers=self._header("alice", ""))
         assert response.status_code == 200
-        assert received == [("alice", "")]
-
-    def test_utf8_credentials(self):
-        async def utf8_validator(username: str, password: str) -> dict:
-            return {"user": username, "pw": password}
-
-        client = _client(HTTPBasicAuth(utf8_validator))
         response = client.get("/me", headers=self._header("aliçé", "pässwörd"))
         assert response.status_code == 200
         assert response.json() == {"user": "aliçé", "pw": "pässwörd"}
+        assert received == [("alice", ""), ("aliçé", "pässwörd")]
 
-    def test_wrong_scheme_returns_401(self):
-        client = _client(HTTPBasicAuth(self._validator))
-        response = client.get("/me", headers={"Authorization": "Bearer token"})
-        assert response.status_code == 401
+    def test_realm_in_challenge(self):
+        """RFC 7230 §3.2.6: the realm is a quoted-string, so it must be escaped."""
+        for realm, expected in [
+            ("api", 'Basic realm="api"'),
+            (r'ev"il\path', r'Basic realm="ev\"il\\path"'),
+            # An unescaped quote would end the quoted-string and start new params.
+            ('a", charset="UTF-8', r'Basic realm="a\", charset=\"UTF-8"'),
+        ]:
+            client = _client(HTTPBasicAuth(self._validator, realm=realm))
+            challenge = client.get("/me").headers["WWW-Authenticate"]
+            assert challenge == expected
+            assert "charset" not in challenge.split('"')[0]
+
+    def test_unsendable_realm_rejected_at_construction(self):
+        """h11 refuses control characters; non-ASCII cannot survive a header."""
+        for realm in [
+            "x\r\nX-Injected: yes",
+            "x\ny",
+            "a\x00b",
+            "a\x7fb",
+            "a\tb",
+            "café",
+        ]:
+            with pytest.raises(ValueError, match="printable US-ASCII"):
+                HTTPBasicAuth(self._validator, realm=realm)
 
     def test_parity_with_multiauth(self):
         auth = HTTPBasicAuth(self._validator)
@@ -4191,20 +2838,12 @@ class TestBasicAuth:
             multi = _client(MultiAuth(auth)).get("/me", headers=headers)
             assert direct.status_code == multi.status_code
 
-    def test_openapi_scheme_documented(self):
-        auth = HTTPBasicAuth(self._validator)
-
-        def setup(app: FastAPI):
-            @app.get("/me")
-            async def me(user=Security(auth)):
-                return user
-
-        spec = TestClient(_app(setup)).get("/openapi.json").json()
+        spec = _client(auth).get("/openapi.json").json()
         scheme = spec["components"]["securitySchemes"]["HTTPBasic"]
         assert scheme["type"] == "http"
         assert scheme["scheme"] == "basic"
 
-    def test_scopes_forwarded_to_validator(self):
+    def test_scopes_and_require_reach_the_validator(self):
         received: list[list[str]] = []
 
         async def scoped(username: str, password: str, scopes: list[str]) -> dict:
@@ -4223,54 +2862,27 @@ class TestBasicAuth:
         assert response.status_code == 200
         assert received == [["admin"]]
 
-    def test_require_returns_new_instance(self):
         async def role_basic(username: str, password: str, *, role: str) -> dict:
             return {"user": username, "role": role}
 
         auth = HTTPBasicAuth(role_basic)
         derived = auth.require(role="admin")
         assert derived is not auth
-        client = _client(derived)
-        response = client.get("/me", headers=self._header("alice", "x"))
+        response = _client(derived).get("/me", headers=self._header("alice", "x"))
         assert response.json() == {"user": "alice", "role": "admin"}
+
+    @pytest.mark.anyio
+    async def test_authenticate_unscoped(self):
+        async def v(username: str, password: str) -> dict:
+            return {"u": username, "p": password}
+
+        auth = HTTPBasicAuth(v)
+        blob = base64.b64encode(b"alice:pw").decode()
+        assert await auth.authenticate(blob) == {"u": "alice", "p": "pw"}
 
 
 class TestScopesConsolidation:
     """3.1: scope enforcement follows the same path in both call modes."""
-
-    def test_multiauth_forwards_scopes_to_validator(self):
-        received: list[list[str]] = []
-
-        async def scoped_validator(credential: str, scopes: list[str]) -> dict:
-            received.append(scopes)
-            return {"user": "alice"}
-
-        multi = MultiAuth(HTTPBearerAuth(scoped_validator))
-
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(multi, scopes=["admin", "billing"])):
-                return user
-
-        client = TestClient(_app(setup))
-        response = client.get(
-            "/admin", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
-        )
-        assert response.status_code == 200
-        assert received == [["admin", "billing"]]
-
-    def test_multiauth_fails_closed_without_scopes_support(self):
-        """SR-H1 regression, MultiAuth flavor: never silently skip scopes."""
-        multi = MultiAuth(HTTPBearerAuth(simple_validator))
-
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(multi, scopes=["admin"])):
-                return user
-
-        client = TestClient(_app(setup))
-        with pytest.raises(RuntimeError, match="security scopes"):
-            client.get("/admin", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
 
     def test_scoped_parity_direct_vs_multiauth(self):
         received: list[tuple[str, list[str]]] = []
@@ -4283,54 +2895,52 @@ class TestScopesConsolidation:
 
         def direct(app: FastAPI):
             @app.get("/admin")
-            async def admin(user=Security(bearer, scopes=["admin"])):
+            async def admin(user=Security(bearer, scopes=["admin", "billing"])):
                 return user
 
         def multi(app: FastAPI):
             @app.get("/admin")
-            async def admin(user=Security(MultiAuth(bearer), scopes=["admin"])):
+            async def admin(
+                user=Security(MultiAuth(bearer), scopes=["admin", "billing"]),
+            ):
                 return user
 
         headers = {"Authorization": f"Bearer {VALID_TOKEN}"}
         direct_resp = TestClient(_app(direct)).get("/admin", headers=headers)
         multi_resp = TestClient(_app(multi)).get("/admin", headers=headers)
         assert direct_resp.status_code == multi_resp.status_code == 200
-        assert received == [("call", ["admin"]), ("call", ["admin"])]
+        assert received == [("call", ["admin", "billing"])] * 2
 
 
 class TestCallableInstanceValidator:
     """_ensure_async regression: callable instances with async __call__."""
 
-    def test_async_callable_instance(self):
-        class Validator:
+    def test_callable_shapes(self):
+        """A sync wrapper returning a coroutine is awaited transparently."""
+
+        class AsyncValidator:
             async def __call__(self, token: str) -> dict:
                 if token != VALID_TOKEN:
                     raise UnauthorizedError()
                 return {"via": "async-instance"}
 
-        client = _auth_client(Validator())
-        response = client.get("/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
-        assert response.status_code == 200
-        assert response.json() == {"via": "async-instance"}
-
-    def test_sync_callable_instance(self):
-        class Validator:
+        class SyncValidator:
             def __call__(self, token: str) -> dict:
                 return {"via": "sync-instance"}
-
-        client = _auth_client(Validator())
-        response = client.get("/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
-        assert response.json() == {"via": "sync-instance"}
-
-    def test_sync_callable_returning_awaitable(self):
-        """A sync wrapper returning a coroutine is awaited transparently."""
 
         def factory_validator(token: str):
             return simple_validator(token)  # returns a coroutine
 
-        client = _auth_client(factory_validator)
-        response = client.get("/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
-        assert response.status_code == 200
+        for validator, expected in [
+            (AsyncValidator(), {"via": "async-instance"}),
+            (SyncValidator(), {"via": "sync-instance"}),
+            (factory_validator, {"user": "alice"}),
+        ]:
+            response = _auth_client(validator).get(
+                "/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+            )
+            assert response.status_code == 200
+            assert response.json() == expected
 
     @pytest.mark.anyio
     async def test_sync_validator_runs_in_worker_thread(self):
@@ -4361,19 +2971,18 @@ class TestJWTValidatorJWKSRobustness:
         assert _default_alg({}) is None
 
     @respx.mock
-    def test_garbage_token_rejected_before_jwks_lookup(self):
-        respx.get(self.JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
-        client = _auth_client(_jwks_validator(self.JWKS_URL))
-        response = client.get("/me", headers={"Authorization": "Bearer not.a.jwt"})
-        assert response.status_code == 401
-        assert len(respx.calls) == 0
+    def test_unusable_jwks_entries_never_break_valid_keys(self):
+        """Broken or exotic entries in the JWKS never break valid keys.
 
-    @respx.mock
-    def test_malformed_jwks_entries_skipped(self):
-        """Broken or exotic entries in the JWKS never break valid keys."""
-        respx.get(self.JWKS_URL).respond(
-            json={
-                "keys": [
+        A kid-less token still finds the one key the validator can use.
+        """
+        route = respx.get(self.JWKS_URL)
+        with_kid = pyjwt.encode(
+            _claims(), _RSA_KEY_1, algorithm="RS256", headers={"kid": "key1"}
+        )
+        for keys, token in [
+            (
+                [
                     {"kty": "RSA", "alg": "RS256", "kid": "broken"},  # missing n/e
                     {"kty": "OKP", "kid": "exotic"},  # no alg, none inferable
                     "garbage",  # not even an object
@@ -4383,78 +2992,51 @@ class TestJWTValidatorJWKSRobustness:
                     {"kty": "EC", "alg": "ES256", "crv": "P-256", "x": 1, "y": 2},
                     {"kty": "oct", "alg": "none", "k": "AA"},
                     _jwk(_RSA_KEY_1, "key1"),
-                ]
-            }
-        )
-        client = _auth_client(_jwks_validator(self.JWKS_URL))
-        token = pyjwt.encode(
-            _claims(), _RSA_KEY_1, algorithm="RS256", headers={"kid": "key1"}
-        )
-        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 200
+                ],
+                with_kid,
+            ),
+            (
+                [_jwk(_RSA_KEY_1, None), _jwk(_RSA_KEY_2, None, alg="PS256")],
+                pyjwt.encode(_claims(), _RSA_KEY_1, algorithm="RS256"),
+            ),
+        ]:
+            route.respond(json={"keys": keys})
+            client = _auth_client(_jwks_validator(self.JWKS_URL))
+            assert _status(client, token) == 200
 
     @respx.mock
-    def test_alg_header_not_matching_jwks_key_rejected(self):
-        """A cross-family 'alg' header against an RSA JWKS key is a 401, not a 500."""
+    def test_alg_header_must_match_the_jwks_key(self):
+        """A cross-family 'alg' header against an RSA JWKS key is a 401, not a 500.
+
+        An allowlisted alg other than the key's own is refused (PS256 vs RS256).
+        """
         respx.get(self.JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
         client = _auth_client(_jwks_validator(self.JWKS_URL))
-        response = client.get(
-            "/me", headers={"Authorization": f"Bearer {_forged_token('ES256')}"}
-        )
-        assert response.status_code == 401
+        assert _status(client, "not.a.jwt") == 401
+        # A garbage token is rejected before any JWKS lookup.
+        assert len(respx.calls) == 0
+        assert _status(client, _forged_token("ES256")) == 401
 
-    @respx.mock
-    def test_keys_outside_the_allowlist_are_not_cached(self):
-        """A kid-less token still finds the one key the validator can use."""
-        respx.get(self.JWKS_URL).respond(
-            json={
-                "keys": [
-                    _jwk(_RSA_KEY_1, None),
-                    _jwk(_RSA_KEY_2, None, alg="PS256"),
-                ]
-            }
-        )
-        client = _auth_client(_jwks_validator(self.JWKS_URL))
-        token = pyjwt.encode(_claims(), _RSA_KEY_1, algorithm="RS256")
-        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 200
-
-    @respx.mock
-    def test_header_alg_must_match_the_jwks_key_alg(self):
-        """An allowlisted alg other than the key's own is refused (PS256 vs RS256)."""
-        respx.get(self.JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
         client = _auth_client(
             _jwks_validator(self.JWKS_URL, algorithms=["RS256", "PS256"])
         )
         token = pyjwt.encode(
             _claims(), _RSA_KEY_1, algorithm="PS256", headers={"kid": "key1"}
         )
-        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
-        assert response.status_code == 401
+        assert _status(client, token) == 401
 
     @pytest.mark.anyio
-    @pytest.mark.parametrize("document", [["not", "an", "object"], {"keys": "nope"}])
     @respx.mock
-    async def test_unusable_jwks_document_returns_503(self, document):
-        respx.get(self.JWKS_URL).respond(json=document)
-        validator = _jwks_validator(self.JWKS_URL)
+    async def test_unusable_jwks_document_returns_503(self):
+        route = respx.get(self.JWKS_URL)
         token = pyjwt.encode(
             _claims(), _RSA_KEY_1, algorithm="RS256", headers={"kid": "key1"}
         )
-        with pytest.raises(HTTPException) as exc_info:
-            await validator(token)
-        assert exc_info.value.status_code == 503
-
-
-class TestBasicAuthDirect:
-    @pytest.mark.anyio
-    async def test_authenticate_unscoped(self):
-        async def v(username: str, password: str) -> dict:
-            return {"u": username, "p": password}
-
-        auth = HTTPBasicAuth(v)
-        blob = base64.b64encode(b"alice:pw").decode()
-        assert await auth.authenticate(blob) == {"u": "alice", "p": "pw"}
+        for document in [["not", "an", "object"], {"keys": "nope"}]:
+            route.respond(json=document)
+            with pytest.raises(HTTPException) as exc_info:
+                await _jwks_validator(self.JWKS_URL)(token)
+            assert exc_info.value.status_code == 503
 
 
 class TestJWKSRefreshCoalescing:
@@ -4463,31 +3045,10 @@ class TestJWKSRefreshCoalescing:
     @pytest.mark.anyio
     @respx.mock
     async def test_concurrent_stale_refreshes_coalesce(self):
-        """Two requests hitting a stale cache produce a single JWKS fetch."""
-        import asyncio
+        """Two requests hitting a stale cache produce a single JWKS fetch.
 
-        fetches = 0
-
-        async def slow_jwks(request):
-            nonlocal fetches
-            fetches += 1
-            await asyncio.sleep(0.05)
-            return httpx.Response(200, json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
-
-        respx.get(self.JWKS_URL).mock(side_effect=slow_jwks)
-        validator = _jwks_validator(self.JWKS_URL)
-        token = pyjwt.encode(
-            _claims(), _RSA_KEY_1, algorithm="RS256", headers={"kid": "key1"}
-        )
-
-        first, second = await asyncio.gather(validator(token), validator(token))
-        assert first["sub"] == second["sub"] == "user-1"
-        assert fetches == 1
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_a_waiter_without_cooldown_reuses_the_fresh_keys(self):
-        """With no cooldown, the waiter still skips the fetch it waited behind."""
+        With no cooldown, the waiter still skips the fetch it waited behind.
+        """
         import asyncio
 
         async def slow_jwks(request):
@@ -4495,13 +3056,15 @@ class TestJWKSRefreshCoalescing:
             return httpx.Response(200, json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
 
         route = respx.get(self.JWKS_URL).mock(side_effect=slow_jwks)
-        validator = _jwks_validator(self.JWKS_URL, jwks_refresh_cooldown=0)
         token = pyjwt.encode(
             _claims(), _RSA_KEY_1, algorithm="RS256", headers={"kid": "key1"}
         )
-
-        await asyncio.gather(validator(token), validator(token))
-        assert route.call_count == 1
+        for kwargs in [{}, {"jwks_refresh_cooldown": 0}]:
+            route.reset()
+            validator = _jwks_validator(self.JWKS_URL, **kwargs)
+            first, second = await asyncio.gather(validator(token), validator(token))
+            assert first["sub"] == second["sub"] == "user-1"
+            assert route.call_count == 1
 
 
 def test_multiauth_scopes_fail_closed_on_every_credential():
@@ -4584,40 +3147,21 @@ class TestOptionalAuth:
 
         return setup
 
-    def test_absent_credential_yields_none(self):
-        auth = HTTPBearerAuth(simple_validator)
-        client = TestClient(_app(self._routes(auth)))
+    def test_optional_bearer(self):
+        app = _app(self._routes(HTTPBearerAuth(simple_validator)))
+        client = TestClient(app)
 
         assert client.get("/maybe").json() == {"user": None}
-
-    def test_invalid_credential_still_raises(self):
-        auth = HTTPBearerAuth(simple_validator)
-        client = TestClient(_app(self._routes(auth)))
-
         assert (
             client.get("/maybe", headers={"Authorization": "Bearer wrong"}).status_code
             == 401
         )
-
-    def test_valid_credential_returns_the_identity(self):
-        auth = HTTPBearerAuth(simple_validator)
-        client = TestClient(_app(self._routes(auth)))
-
         response = client.get(
             "/maybe", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
         )
         assert response.json() == {"user": {"user": "alice"}}
-
-    def test_the_original_source_stays_strict(self):
-        auth = HTTPBearerAuth(simple_validator)
-        client = TestClient(_app(self._routes(auth)))
-
+        # The original source stays strict.
         assert client.get("/strict").status_code == 401
-        assert client.get("/maybe").json() == {"user": None}
-
-    def test_openapi_still_declares_the_scheme(self):
-        auth = HTTPBearerAuth(simple_validator)
-        app = _app(self._routes(auth))
 
         schema = app.openapi()["paths"]["/maybe"]["get"]
         assert schema["security"] == [{"HTTPBearer": []}]
@@ -4641,42 +3185,39 @@ class TestOptionalAuth:
         def scoped(credential: str, scopes: list[str]) -> dict:
             return {"user": "alice"}
 
-        auth = HTTPBearerAuth(scoped)
+        bearer = HTTPBearerAuth(scoped)
+        # MultiAuth refuses the combination before any source is tried.
+        multi = MultiAuth(HTTPBearerAuth(scoped), APIKeyHeaderAuth("X-API-Key", scoped))
+
+        # Scopes reach a nested optional() source via SecurityScopes, not the top edge.
+        def repository(user=Security(bearer.optional())):
+            return {"repo": user}
 
         def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(auth.optional(), scopes=["admin"])):
+            @app.get("/bearer")
+            async def r1(user=Security(bearer.optional(), scopes=["admin"])):
                 return user
 
-        client = TestClient(_app(setup))
-
-        with pytest.raises(RuntimeError, match="security scopes"):
-            client.get("/admin")
-        with pytest.raises(RuntimeError, match="security scopes"):
-            client.get("/admin", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
-
-    def test_scoped_optional_multiauth_route_fails_for_every_caller(self):
-        """MultiAuth refuses the combination before any source is tried."""
-
-        def scoped(credential: str, scopes: list[str]) -> dict:
-            return {"user": "alice"}
-
-        auth = MultiAuth(
-            HTTPBearerAuth(scoped),
-            APIKeyHeaderAuth("X-API-Key", scoped),
-        )
-
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(user=Security(auth.optional(), scopes=["admin"])):
+            @app.get("/multi")
+            async def r2(user=Security(multi.optional(), scopes=["admin"])):
                 return user
 
-        client = TestClient(_app(setup))
+            @app.get("/nested")
+            async def r3(repo=Security(repository, scopes=["admin"])):
+                return repo
 
-        with pytest.raises(RuntimeError, match=r"optional\(\) but this route"):
-            client.get("/admin")
-        with pytest.raises(RuntimeError, match=r"optional\(\) but this route"):
-            client.get("/admin", headers={"X-API-Key": VALID_TOKEN})
+        client = TestClient(_app(setup))
+        bearer_header = {"Authorization": f"Bearer {VALID_TOKEN}"}
+        for path, headers, match in [
+            ("/bearer", None, "security scopes"),
+            ("/bearer", bearer_header, "security scopes"),
+            ("/multi", None, r"optional\(\) but this route"),
+            ("/multi", {"X-API-Key": VALID_TOKEN}, r"optional\(\) but this route"),
+            ("/nested", bearer_header, "security scopes"),
+            ("/nested", None, "security scopes"),
+        ]:
+            with pytest.raises(RuntimeError, match=match):
+                client.get(path, headers=headers)
 
     def test_optional_survives_require_in_either_order(self):
         """require() rebuilds a MultiAuth, which must not silently drop optional()."""
@@ -4693,28 +3234,6 @@ class TestOptionalAuth:
                     return {"user": user}
 
             assert TestClient(_app(setup)).get("/maybe").json() == {"user": None}
-
-    def test_scopes_inherited_from_an_ancestor_edge_still_refuse(self):
-        """Scopes reach a nested optional() source via SecurityScopes, not the top edge."""
-
-        def scoped(credential: str, scopes: list[str]) -> dict:
-            return {"user": "alice"}
-
-        auth = HTTPBearerAuth(scoped)
-
-        def repository(user=Security(auth.optional())):
-            return {"repo": user}
-
-        def setup(app: FastAPI):
-            @app.get("/admin")
-            async def admin(repo=Security(repository, scopes=["admin"])):
-                return repo
-
-        client = TestClient(_app(setup))
-        with pytest.raises(RuntimeError, match="security scopes"):
-            client.get("/admin", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
-        with pytest.raises(RuntimeError, match="security scopes"):
-            client.get("/admin")
 
     def test_require_and_optional_compose_in_either_order(self):
         """Anonymous is allowed, but a credential that is sent must still qualify."""
@@ -4764,33 +3283,19 @@ class TestOptionalAuth:
 class TestAuthenticatedAtHook:
     """The instant a source reports for fresh(), read directly."""
 
-    def test_a_signed_cookie_reports_its_mint_time(self):
+    def test_authenticated_at(self):
         auth = APIKeyCookieAuth(
             "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
         )
         instant = auth.authenticated_at(auth._sign(VALID_COOKIE))
-
         assert instant is not None
         assert abs(instant - time.time()) < 5
 
-    @pytest.mark.parametrize(
-        ("auth", "credential"),
-        [
-            pytest.param(
-                APIKeyCookieAuth("session", cookie_validator),
-                VALID_COOKIE,
-                id="unsigned-cookie",
-            ),
-            pytest.param(
-                APIKeyCookieAuth("session", cookie_validator, secret_key=COOKIE_SECRET),
-                "forged",
-                id="forged-signed-cookie",
-            ),
-            pytest.param(_HeaderAuth(secret="s3cr3t"), "s3cr3t", id="default-source"),
-        ],
-    )
-    def test_a_source_that_cannot_date_reports_no_instant(self, auth, credential):
-        assert auth.authenticated_at(credential) is None
+        # A source that cannot date the credential reports no instant.
+        assert auth.authenticated_at("forged") is None
+        unsigned = APIKeyCookieAuth("session", cookie_validator)
+        assert unsigned.authenticated_at(VALID_COOKIE) is None
+        assert _HeaderAuth(secret="s3cr3t").authenticated_at("s3cr3t") is None
 
 
 class TestFreshness:
@@ -4855,35 +3360,40 @@ class TestFreshness:
         """Move the clock past the 300s window."""
         return patch("time.time", return_value=time.time() + seconds)
 
-    def test_a_freshly_minted_cookie_passes(self):
-        auth = self._cookie()
-        response = self._client(auth).get(
-            "/sensitive", cookies={"session": auth._sign(VALID_COOKIE)}
-        )
-        assert response.status_code == 200
-        assert response.json() == {"user": {"session": VALID_COOKIE}}
+    def test_cookie_freshness(self):
+        """The apiKey scheme has none to carry, so the body holds the signal.
 
-    def test_an_aged_cookie_is_refused_with_a_401_and_no_challenge(self):
-        """The apiKey scheme has none to carry, so the body holds the signal."""
+        Freshness gates the sensitive route, it does not end the session.
+        """
         auth = self._cookie()
         client = self._client(auth)
         signed = auth._sign(VALID_COOKIE)
 
+        response = client.get("/sensitive", cookies={"session": signed})
+        assert response.status_code == 200
+        assert response.json() == {"user": {"session": VALID_COOKIE}}
+
         with self._later():
             response = client.get("/sensitive", cookies={"session": signed})
+            assert client.get("/me", cookies={"session": signed}).status_code == 200
 
         assert response.status_code == 401
         assert response.json()["detail"] == "Insufficient user authentication"
         assert "WWW-Authenticate" not in response.headers
 
-    def test_the_same_session_still_serves_the_unguarded_route(self):
-        """Freshness gates the sensitive route, it does not end the session."""
-        auth = self._cookie()
+        # The sid payload layout does not hide the timestamp.
+        auth = APIKeyCookieAuth(
+            "session",
+            sid_validator,
+            secret_key=COOKIE_SECRET,
+            session_id=True,
+            secure=False,
+        )
         client = self._client(auth)
-        signed = auth._sign(VALID_COOKIE)
+        signed = auth._sign(f"sid123.{VALID_COOKIE}")
 
+        assert client.get("/sensitive", cookies={"session": signed}).status_code == 200
         with self._later():
-            assert client.get("/me", cookies={"session": signed}).status_code == 200
             assert (
                 client.get("/sensitive", cookies={"session": signed}).status_code == 401
             )
@@ -4910,32 +3420,19 @@ class TestFreshness:
             assert client.post("/re-auth").status_code == 200
             assert client.get("/sensitive").status_code == 200
 
-    def test_a_session_id_cookie_dates_the_same_way(self):
-        """The sid payload layout does not hide the timestamp."""
-        auth = APIKeyCookieAuth(
-            "session",
-            sid_validator,
-            secret_key=COOKIE_SECRET,
-            session_id=True,
-            secure=False,
-        )
-        client = self._client(auth)
-        signed = auth._sign(f"sid123.{VALID_COOKIE}")
-
-        assert client.get("/sensitive", cookies={"session": signed}).status_code == 200
-        with self._later():
-            assert (
-                client.get("/sensitive", cookies={"session": signed}).status_code == 401
-            )
-
-    def test_a_forged_cookie_is_invalid_rather_than_stale(self):
+    def test_an_invalid_credential_is_not_reported_as_stale(self):
         """A credential that does not validate is refused as invalid: re-auth
         would not help it."""
         client = self._client(self._cookie())
-
         response = client.get("/sensitive", cookies={"session": "forged"})
         assert response.status_code == 401
         assert response.json()["detail"] == "Unauthorized"
+
+        client = self._probe_client(time.time() - 600)
+        response = client.get("/sensitive", headers={"Authorization": "Bearer wrong"})
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Unauthorized"
+        assert response.headers["WWW-Authenticate"] == "Bearer"
 
     def test_a_stale_bearer_gets_the_step_up_challenge(self):
         response = self._get(self._probe_client(time.time() - 600))
@@ -4944,171 +3441,113 @@ class TestFreshness:
         assert response.json()["detail"] == "Insufficient user authentication"
         assert response.headers["WWW-Authenticate"] == self.STEP_UP
 
-    @pytest.mark.parametrize(
-        ("realm", "expected_prefix"),
-        [
-            pytest.param("api", 'Basic realm="api", ', id="plain-realm"),
-            pytest.param(
-                'api", max_age="99999',
-                'Basic realm="api\\", max_age=\\"99999", ',
-                id="realm-cannot-inject-parameters",
-            ),
-        ],
-    )
-    def test_a_realm_stays_inside_its_quoted_string(self, realm, expected_prefix):
+    def test_a_realm_stays_inside_its_quoted_string(self):
         """RFC 7235: further auth-params follow a comma, and RFC 7230 §3.2.6:
         the escaped realm cannot terminate the quoted-string."""
 
         async def validate(username: str, password: str) -> dict:
             return {"user": username, "proven_at": time.time() - 600}
 
-        basic = HTTPBasicAuth(validate, realm=realm)
-        client = self._client(
-            basic, authenticated_at=lambda identity: identity["proven_at"]
-        )
-        challenge = client.get(
-            "/sensitive", headers=TestBasicAuth._header("alice", "pw")
-        ).headers["WWW-Authenticate"]
-        assert challenge.startswith(expected_prefix)
-        assert challenge.endswith('max_age="300"')
+        for realm, expected_prefix in [
+            ("api", 'Basic realm="api", '),
+            ('api", max_age="99999', 'Basic realm="api\\", max_age=\\"99999", '),
+        ]:
+            basic = HTTPBasicAuth(validate, realm=realm)
+            client = self._client(
+                basic, authenticated_at=lambda identity: identity["proven_at"]
+            )
+            challenge = client.get(
+                "/sensitive", headers=TestBasicAuth._header("alice", "pw")
+            ).headers["WWW-Authenticate"]
+            assert challenge.startswith(expected_prefix)
+            assert challenge.endswith('max_age="300"')
 
-    def test_an_invalid_token_is_not_reported_as_stale(self):
-        client = self._probe_client(time.time() - 600)
+    def test_a_probe_may_report_any_instant_shape(self):
+        for shape in [
+            lambda at: at,
+            int,
+            lambda at: datetime.fromtimestamp(at, UTC),
+            # A naive datetime is read as UTC.
+            lambda at: datetime.fromtimestamp(at, UTC).replace(tzinfo=None),
+        ]:
+            for age, status in [(0, 200), (600, 401)]:
+                instant = shape(time.time() - age)
+                assert self._get(self._probe_client(instant)).status_code == status
 
-        response = client.get("/sensitive", headers={"Authorization": "Bearer wrong"})
-        assert response.status_code == 401
-        assert response.json()["detail"] == "Unauthorized"
-        assert response.headers["WWW-Authenticate"] == "Bearer"
-
-    @pytest.mark.parametrize(
-        "shape",
-        [
-            pytest.param(lambda at: at, id="epoch-float"),
-            pytest.param(int, id="epoch-int"),
-            pytest.param(
-                lambda at: datetime.fromtimestamp(at, UTC),
-                id="aware-datetime",
-            ),
-            pytest.param(
-                lambda at: datetime.fromtimestamp(at, UTC).replace(tzinfo=None),
-                id="naive-datetime-read-as-utc",
-            ),
-        ],
-    )
-    @pytest.mark.parametrize(
-        ("age", "status"), [(0, 200), (600, 401)], ids=["fresh", "aged"]
-    )
-    def test_a_probe_may_report_any_instant_shape(self, shape, age, status):
-        instant = shape(time.time() - age)
-        assert self._get(self._probe_client(instant)).status_code == status
-
-    @pytest.mark.parametrize(
-        "instant",
-        [None, "yesterday", True, math.nan, math.inf, 10**400],
-        ids=["none", "string", "bool", "nan", "inf", "overflowing-int"],
-    )
-    def test_an_unusable_instant_fails_closed(self, instant):
-        """No instant means not fresh, never 'assume fresh'."""
-        assert self._get(self._probe_client(instant)).status_code == 401
-
-    def test_an_async_probe_is_awaited(self):
         bearer = self._dated_bearer(time.time())
 
         async def proven_at(identity) -> float:
             return identity["proven_at"]
 
         client = self._client(bearer, authenticated_at=proven_at)
-
         assert self._get(client).status_code == 200
 
-    @pytest.mark.parametrize(
-        ("offset", "leeway", "status"),
-        [
-            pytest.param(-310, 0, 401, id="past-window"),
-            pytest.param(-310, 30, 200, id="past-window-within-leeway"),
-            pytest.param(20, 0, 401, id="future"),
-            pytest.param(20, 30, 200, id="future-within-leeway"),
-            pytest.param(365 * 86400, 30, 401, id="far-future"),
-        ],
-    )
-    def test_leeway_tolerates_clock_skew_either_way(self, offset, leeway, status):
-        """A skewed clock cannot keep a credential fresh indefinitely."""
-        client = self._probe_client(time.time() + offset, leeway=leeway)
-        assert self._get(client).status_code == status
+    def test_an_unusable_instant_fails_closed(self):
+        """No instant means not fresh, never 'assume fresh'."""
+        for instant in [None, "yesterday", True, math.nan, math.inf, 10**400]:
+            assert self._get(self._probe_client(instant)).status_code == 401, instant
 
-    @pytest.mark.parametrize(
-        "auth",
-        [
-            pytest.param(HTTPBearerAuth(simple_validator), id="bearer"),
-            pytest.param(
-                APIKeyCookieAuth("session", cookie_validator), id="unsigned-cookie"
-            ),
-        ],
-    )
-    def test_a_source_that_cannot_date_a_credential_refuses_fresh(self, auth):
-        with pytest.raises(ValueError, match="cannot date a credential"):
+    def test_leeway_tolerates_clock_skew_either_way(self):
+        """A skewed clock cannot keep a credential fresh indefinitely."""
+        for offset, leeway, status in [
+            (-310, 0, 401),
+            (-310, 30, 200),
+            (20, 0, 401),
+            (20, 30, 200),
+            (365 * 86400, 30, 401),
+        ]:
+            client = self._probe_client(time.time() + offset, leeway=leeway)
+            assert self._get(client).status_code == status, (offset, leeway)
+
+    def test_a_source_that_cannot_date_a_credential_refuses_fresh(self):
+        for auth in [
+            HTTPBearerAuth(simple_validator),
+            APIKeyCookieAuth("session", cookie_validator),
+        ]:
+            with pytest.raises(ValueError, match="cannot date a credential"):
+                auth.fresh(300)
+
+        # A source that cannot be dated would be the way around the window.
+        auth = MultiAuth(self._cookie(), HTTPBearerAuth(simple_validator))
+        with pytest.raises(ValueError, match="HTTPBearerAuth cannot date"):
             auth.fresh(300)
 
-    @pytest.mark.parametrize(
-        ("kwargs", "message"),
-        [
-            pytest.param({"max_age": 0}, "max_age must be a positive", id="max_age"),
-            pytest.param(
-                {"max_age": math.nan}, "max_age must be a positive", id="max_age-nan"
-            ),
-            pytest.param(
-                {"max_age": math.inf}, "max_age must be a positive", id="max_age-inf"
-            ),
-            pytest.param(
-                {"max_age": 300, "leeway": -1},
-                "leeway must be a finite, non-negative",
-                id="leeway",
-            ),
-            pytest.param(
+    def test_the_window_is_validated(self):
+        cases: list[tuple[dict[str, Any], str]] = [
+            ({"max_age": 0}, "max_age must be a positive"),
+            ({"max_age": math.nan}, "max_age must be a positive"),
+            ({"max_age": math.inf}, "max_age must be a positive"),
+            ({"max_age": 300, "leeway": -1}, "leeway must be a finite, non-negative"),
+            (
                 {"max_age": 300, "leeway": math.nan},
                 "leeway must be a finite, non-negative",
-                id="leeway-nan",
             ),
-            pytest.param(
+            (
                 {"max_age": 300, "leeway": math.inf},
                 "leeway must be a finite, non-negative",
-                id="leeway-inf",
             ),
-        ],
-    )
-    def test_the_window_is_validated(self, kwargs, message):
-        with pytest.raises(ValueError, match=message):
-            self._cookie().fresh(**kwargs)
+        ]
+        for kwargs, message in cases:
+            with pytest.raises(ValueError, match=message):
+                self._cookie().fresh(**kwargs)
 
-    @pytest.mark.parametrize(
-        "make",
-        [
-            pytest.param(lambda cookie: cookie, id="source"),
-            pytest.param(MultiAuth, id="multiauth"),
-        ],
-    )
-    def test_fresh_and_optional_are_refused_in_either_order(self, make):
-        auth = make(self._cookie())
+        with pytest.raises(ValueError, match="already has a freshness window"):
+            self._cookie().fresh(60).fresh(300)
 
-        with pytest.raises(ValueError, match="cannot be both optional"):
-            auth.fresh(300).optional()
-        with pytest.raises(ValueError, match="cannot be both optional"):
-            auth.optional().fresh(300)
+        auth = MultiAuth(self._cookie().fresh(60), self._dated_bearer(time.time()))
+        with pytest.raises(
+            ValueError, match="APIKeyCookieAuth already has a freshness window"
+        ):
+            auth.fresh(300, authenticated_at=lambda identity: identity["proven_at"])
 
-    @pytest.mark.parametrize(
-        "compose",
-        [
-            pytest.param(
-                lambda auth: auth.fresh(300).require(role="admin"),
-                id="fresh-then-require",
-            ),
-            pytest.param(
-                lambda auth: auth.require(role="admin").fresh(300),
-                id="require-then-fresh",
-            ),
-        ],
-    )
-    def test_fresh_and_require_compose_in_either_order(self, compose):
+    def test_fresh_and_optional_are_refused_in_either_order(self):
+        for auth in [self._cookie(), MultiAuth(self._cookie())]:
+            with pytest.raises(ValueError, match="cannot be both optional"):
+                auth.fresh(300).optional()
+            with pytest.raises(ValueError, match="cannot be both optional"):
+                auth.optional().fresh(300)
+
+    def test_fresh_and_require_compose_in_either_order(self):
         def validate(value: str, *, role: str) -> dict:
             return {"session": value, "role": role}
 
@@ -5116,14 +3555,18 @@ class TestFreshness:
             "session", validate, secret_key=COOKIE_SECRET, secure=False
         )
         signed = auth._sign(VALID_COOKIE)
-        client = TestClient(_app(self._routes(auth, compose(auth))))
-
-        response = client.get("/sensitive", cookies={"session": signed})
-        assert response.json() == {"user": {"session": VALID_COOKIE, "role": "admin"}}
-        with self._later():
-            assert (
-                client.get("/sensitive", cookies={"session": signed}).status_code == 401
-            )
+        for composed in [
+            auth.fresh(300).require(role="admin"),
+            auth.require(role="admin").fresh(300),
+        ]:
+            client = TestClient(_app(self._routes(auth, composed)))
+            response = client.get("/sensitive", cookies={"session": signed})
+            assert response.json() == {
+                "user": {"session": VALID_COOKIE, "role": "admin"}
+            }
+            with self._later():
+                response = client.get("/sensitive", cookies={"session": signed})
+                assert response.status_code == 401
 
     def test_openapi_still_declares_the_scheme(self):
         auth = self._cookie()
@@ -5133,14 +3576,15 @@ class TestFreshness:
             {"APIKeyCookie_session": []}
         ]
 
-    def test_stale_credential_error_is_an_unauthorized_error(self):
-        """Existing 401 handling keeps catching it."""
+    def test_the_window_reaches_an_exception_handler(self):
+        """A handler rendering its own body reads max_age instead of the message.
+
+        Existing 401 handling keeps catching it.
+        """
         assert issubclass(StaleCredentialError, UnauthorizedError)
         assert StaleCredentialError().status_code == 401
         assert StaleCredentialError().max_age is None
 
-    def test_the_window_reaches_an_exception_handler(self):
-        """A handler rendering its own body reads max_age instead of the message."""
         auth = self._cookie()
         app = _app(self._routes(auth, auth.fresh(300)))
 
@@ -5170,31 +3614,11 @@ class TestFreshness:
                 client.get("/sensitive", cookies={"session": signed}).status_code == 401
             )
 
-    def test_multiauth_refuses_fresh_when_a_source_cannot_be_dated(self):
-        """A source that cannot be dated would be the way around the window."""
-        auth = MultiAuth(self._cookie(), HTTPBearerAuth(simple_validator))
-
-        with pytest.raises(ValueError, match="HTTPBearerAuth cannot date"):
-            auth.fresh(300)
-
-    def test_a_window_is_set_once(self):
-        with pytest.raises(ValueError, match="already has a freshness window"):
-            self._cookie().fresh(60).fresh(300)
-
-    def test_multiauth_fresh_cannot_widen_a_source_window(self):
-        auth = MultiAuth(self._cookie().fresh(60), self._dated_bearer(time.time()))
-
-        with pytest.raises(
-            ValueError, match="APIKeyCookieAuth already has a freshness window"
-        ):
-            auth.fresh(300, authenticated_at=lambda identity: identity["proven_at"])
-
-    def test_multiauth_fresh_accepts_a_probe_for_every_source(self):
+        # A probe can date every source, so fresh() accepts the mix.
         auth = MultiAuth(self._dated_bearer(time.time() - 600), self._cookie())
         client = self._client(
             auth, authenticated_at=lambda identity: identity.get("proven_at")
         )
-
         response = self._get(client)
         assert response.status_code == 401
         assert response.headers["WWW-Authenticate"] == self.STEP_UP
@@ -5203,33 +3627,22 @@ class TestFreshness:
 class TestFreshnessWithJWT:
     """The OIDC auth_time claim is the instant for a JWT, not iat."""
 
-    @staticmethod
-    def _client() -> TestClient:
-        return _client(
+    def test_auth_time_dates_the_login(self):
+        """iat is not a substitute: it dates the token, not the login."""
+        client = _client(
             HTTPBearerAuth(JWTValidator(secret=JWT_SECRET)).fresh(
                 300, authenticated_at=lambda claims: claims.get("auth_time")
             )
         )
+        recent = _hs_token(_claims(auth_time=int(time.time()) - 10))
+        assert _status(client, recent) == 200
+        assert _status(client, _hs_token(_claims(iat=int(time.time())))) == 401
 
-    def _get(self, client: TestClient, token: str):
-        return client.get("/me", headers={"Authorization": f"Bearer {token}"})
-
-    def test_a_recent_auth_time_passes(self):
-        token = _hs_token(_claims(auth_time=int(time.time()) - 10))
-        assert self._get(self._client(), token).status_code == 200
-
-    def test_an_old_auth_time_is_refused(self):
-        token = _hs_token(_claims(auth_time=int(time.time()) - 600))
-        response = self._get(self._client(), token)
-
+        old = _hs_token(_claims(auth_time=int(time.time()) - 600))
+        response = client.get("/me", headers={"Authorization": f"Bearer {old}"})
         assert response.status_code == 401
         assert response.json()["detail"] == "Insufficient user authentication"
         assert response.headers["WWW-Authenticate"] == TestFreshness.STEP_UP
-
-    def test_a_missing_auth_time_fails_closed(self):
-        """iat is not a substitute: it dates the token, not the login."""
-        token = _hs_token(_claims(iat=int(time.time())))
-        assert self._get(self._client(), token).status_code == 401
 
 
 class TestOAuth2Sources:
@@ -5245,7 +3658,7 @@ class TestOAuth2Sources:
             validator or simple_validator, token_url="/token", scopes=self.SCOPES
         )
 
-    def test_password_bearer_validates_the_token(self):
+    def test_password_bearer(self):
         client = _client(self._password())
         assert client.get(
             "/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
@@ -5256,16 +3669,13 @@ class TestOAuth2Sources:
         )
         assert client.get("/me").status_code == 401
 
-    def test_password_bearer_publishes_the_scope_catalogue(self):
-        schemes = _client(self._password()).app.openapi()["components"][
-            "securitySchemes"
-        ]
+        schemes = client.app.openapi()["components"]["securitySchemes"]
         assert schemes["OAuth2PasswordBearer"] == {
             "type": "oauth2",
             "flows": {"password": {"scopes": self.SCOPES, "tokenUrl": "/token"}},
         }
 
-    def test_authorization_code_bearer_publishes_its_flow(self):
+    def test_authorization_code_and_openid_connect_publish_their_flows(self):
         auth = OAuth2AuthorizationCodeBearerAuth(
             simple_validator,
             authorization_url="https://idp.example/authorize",
@@ -5289,7 +3699,6 @@ class TestOAuth2Sources:
             "/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
         ).json() == {"user": "alice"}
 
-    def test_openid_connect_publishes_its_discovery_url_and_extracts_the_token(self):
         auth = OpenIdConnectAuth(
             simple_validator,
             openid_connect_url="https://idp.example/.well-known/openid-configuration",
@@ -5355,7 +3764,10 @@ class TestOAuth2Sources:
         ).json() == {"user": {"user": "alice"}}
 
     def test_route_scope_outside_the_catalogue_is_refused(self):
-        """A published catalogue is a claim: a typo must not reach the validator."""
+        """A published catalogue is a claim: a typo must not reach the validator.
+
+        The misconfiguration must surface for anonymous callers too.
+        """
         seen: list[list[str]] = []
 
         def scoped(credential: str, scopes: list[str]) -> dict:
@@ -5363,6 +3775,7 @@ class TestOAuth2Sources:
             return {"user": "alice"}
 
         auth = self._password(scoped)
+        multi = MultiAuth(self._password(), APIKeyHeaderAuth("X-Key", simple_validator))
 
         def setup(app: FastAPI):
             @app.get("/typo")
@@ -5373,27 +3786,24 @@ class TestOAuth2Sources:
             async def known(user=Security(auth, scopes=["admin", "billing"])):
                 return user
 
+            @app.get("/multi-typo")
+            async def multi_typo(user=Security(multi, scopes=["admni"])):
+                return user
+
         client = TestClient(_app(setup))
         header = {"Authorization": f"Bearer {VALID_TOKEN}"}
 
+        for headers in [header, None]:
+            with pytest.raises(
+                RuntimeError, match="does not publish the security scopes"
+            ):
+                client.get("/typo", headers=headers)
         with pytest.raises(RuntimeError, match="does not publish the security scopes"):
-            client.get("/typo", headers=header)
+            client.get("/multi-typo", headers={"X-Key": VALID_TOKEN})
         assert seen == [], "the validator must never see an undeclared scope"
 
         assert client.get("/known", headers=header).status_code == 200
         assert seen == [["admin", "billing"]]
-
-    def test_undeclared_scopes_are_refused_before_any_credential_is_read(self):
-        """The misconfiguration must surface for anonymous callers too."""
-        auth = self._password()
-
-        def setup(app: FastAPI):
-            @app.get("/typo")
-            async def typo(user=Security(auth, scopes=["nope"])):
-                return user
-
-        with pytest.raises(RuntimeError, match="does not publish the security scopes"):
-            TestClient(_app(setup)).get("/typo")
 
     def test_a_source_without_a_catalogue_accepts_any_scope(self):
         """No catalogue is no claim: the other sources keep working unchanged."""
@@ -5419,17 +3829,6 @@ class TestOAuth2Sources:
             )
             assert response.json() == {"scopes": ["whatever"]}
 
-    def test_multiauth_refuses_a_scope_no_member_publishes(self):
-        auth = MultiAuth(self._password(), APIKeyHeaderAuth("X-Key", simple_validator))
-
-        def setup(app: FastAPI):
-            @app.get("/typo")
-            async def typo(user=Security(auth, scopes=["admni"])):
-                return user
-
-        with pytest.raises(RuntimeError, match="does not publish the security scopes"):
-            TestClient(_app(setup)).get("/typo", headers={"X-Key": VALID_TOKEN})
-
 
 class TestWebSocket:
     """Sources guard WebSocket routes: the handshake is the request."""
@@ -5454,7 +3853,7 @@ class TestWebSocket:
             pass
         return exc_info.value
 
-    def test_a_valid_credential_opens_the_socket(self):
+    def test_the_handshake_is_authenticated(self):
         client = self._client(HTTPBearerAuth(simple_validator))
 
         with client.websocket_connect(
@@ -5462,22 +3861,11 @@ class TestWebSocket:
         ) as websocket:
             assert websocket.receive_json() == {"user": {"user": "alice"}}
 
-    def test_an_absent_credential_denies_the_handshake_with_the_challenge(self):
-        denial = self._denial(self._client(HTTPBearerAuth(simple_validator)))
+        for headers in [{}, {"Authorization": "Bearer wrong"}]:
+            denial = self._denial(client, headers=headers)
+            assert denial.status_code == 401
+            assert denial.headers["WWW-Authenticate"] == "Bearer"
 
-        assert denial.status_code == 401
-        assert denial.headers["WWW-Authenticate"] == "Bearer"
-
-    def test_an_invalid_credential_denies_the_handshake(self):
-        denial = self._denial(
-            self._client(HTTPBearerAuth(simple_validator)),
-            headers={"Authorization": "Bearer wrong"},
-        )
-
-        assert denial.status_code == 401
-        assert denial.headers["WWW-Authenticate"] == "Bearer"
-
-    def test_a_forbidden_identity_denies_the_handshake_with_403(self):
         async def validator(credential: str) -> dict:
             raise ForbiddenError()
 
@@ -5485,46 +3873,41 @@ class TestWebSocket:
             self._client(HTTPBearerAuth(validator)),
             headers={"Authorization": f"Bearer {VALID_TOKEN}"},
         )
-
         assert denial.status_code == 403
 
-    def test_multiauth_falls_through_to_a_later_source(self):
+    def test_multiauth(self):
         auth = MultiAuth(
             HTTPBearerAuth(simple_validator),
             APIKeyQueryAuth("api_key", simple_validator),
         )
-
         with self._client(auth).websocket_connect(
             f"/ws?api_key={VALID_TOKEN}"
         ) as websocket:
             assert websocket.receive_json() == {"user": {"user": "alice"}}
 
-    def test_multiauth_denies_with_the_combined_challenge(self):
         auth = MultiAuth(
             HTTPBearerAuth(simple_validator), HTTPBasicAuth(simple_validator)
         )
-
         denial = self._denial(self._client(auth))
-
         assert denial.status_code == 401
         assert denial.headers["WWW-Authenticate"] == "Bearer, Basic"
 
-    def test_optional_yields_none_without_a_credential(self):
+    def test_optional_and_cookie_sources(self):
         client = self._client(HTTPBearerAuth(simple_validator).optional())
-
         with client.websocket_connect("/ws") as websocket:
             assert websocket.receive_json() == {"user": None}
 
-    def test_a_cookie_authenticates_the_handshake(self):
         client = self._client(APIKeyCookieAuth("session", cookie_validator))
-
         with client.websocket_connect(
             "/ws", headers={"Cookie": f"session={VALID_COOKIE}"}
         ) as websocket:
             assert websocket.receive_json() == {"user": {"session": VALID_COOKIE}}
 
-    def test_route_scopes_reach_the_validator(self):
-        async def validator(credential: str, scopes: list[str]) -> dict:
+    def test_scopes_and_the_websocket_reach_the_validator(self):
+        seen: list[object] = []
+
+        async def validator(credential: str, scopes: list[str], request=None) -> dict:
+            seen.append(request)
             return {"scopes": scopes}
 
         bearer = HTTPBearerAuth(validator)
@@ -5541,19 +3924,6 @@ class TestWebSocket:
             "/ws", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
         ) as websocket:
             assert websocket.receive_json() == {"scopes": ["chat"]}
-
-    def test_a_validator_declaring_request_is_handed_the_websocket(self):
-        seen: list[object] = []
-
-        async def validator(credential: str, request=None) -> dict:
-            seen.append(request)
-            return {"user": "alice"}
-
-        client = self._client(HTTPBearerAuth(validator))
-        with client.websocket_connect(
-            "/ws", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
-        ) as websocket:
-            websocket.receive_json()
 
         assert len(seen) == 1
         assert isinstance(seen[0], WebSocket)
@@ -5590,6 +3960,9 @@ class TestAuthSurface:
         assert route.alternatives == ()
         assert route.scopes == ()
         assert route.methods == ("GET",)
+
+        paths = [route.path for route in auth_surface(_app())]
+        assert paths == [], f"only endpoint routes belong in the surface: {paths}"
 
     def test_a_route_hidden_from_the_schema_is_still_reported(self):
         """The OpenAPI document omits it, which is why the walk uses app.routes."""
@@ -5732,7 +4105,7 @@ class TestAuthSurface:
         both = self._find(app, "/maybe-and-key")
         assert both.unguarded is False, "the API key is still required"
 
-    def test_scopes_reach_dependencies_declared_on_the_router(self):
+    def test_dependencies_on_routers_and_behind_depends_are_found(self):
         auth = self._oauth()
 
         def setup(app: FastAPI):
@@ -5751,7 +4124,6 @@ class TestAuthSurface:
         assert route.scopes == ("billing",)
         assert route.alternatives[0][0].scopes == ("billing",)
 
-    def test_a_security_dependency_nested_behind_depends_is_found(self):
         auth = HTTPBearerAuth(self._scoped)
 
         def current_user(user=Security(auth)):
@@ -5766,7 +4138,7 @@ class TestAuthSurface:
         assert route.unguarded is False
         assert route.alternatives[0][0].scheme_name == "HTTPBearer"
 
-    def test_a_websocket_route_is_reported_with_no_methods(self):
+    def test_a_websocket_route_is_reported_with_no_methods_and_its_guards(self):
         def setup(app: FastAPI):
             @app.websocket("/ws")
             async def ws(websocket: Request):
@@ -5777,7 +4149,6 @@ class TestAuthSurface:
         assert route.unguarded is True
         assert route.include_in_schema is False
 
-    def test_a_websocket_route_in_nested_routers_keeps_its_prefixes_and_guards(self):
         inner_guard = HTTPBearerAuth(simple_validator, scheme_name="Inner")
         router_guard = HTTPBearerAuth(simple_validator, scheme_name="Router")
         inner = APIRouter()
@@ -5864,15 +4235,14 @@ class TestAuthSurface:
     def _shape(route) -> list[list[tuple[str, tuple[str, ...]]]]:
         return [[(req.source, req.scopes) for req in alt] for alt in route.alternatives]
 
-    def test_the_same_source_layered_twice_is_not_counted_twice(self):
+    def test_a_source_layered_twice_is_counted_once_with_unioned_scopes(self):
         """FastAPI builds one dependant per path, so a layered source repeats."""
         auth = self._multi()
 
         route = self._find(_app(self._layered(auth, auth)), "/layered")
         assert len(route.alternatives) == 2, "one alternative per source, not 2**2"
 
-    def test_a_source_layered_with_different_scopes_unions_them(self):
-        """Both positions run, so one credential has to satisfy all of them."""
+        # Both positions run, so one credential has to satisfy all of them.
         auth = self._multi()
         setup = self._layered(auth, auth, ["billing"], ["admin"])
 
@@ -5882,7 +4252,7 @@ class TestAuthSurface:
             [("APIKeyHeaderAuth", ("billing", "admin"))],
         ], "no bearer-here-api-key-there alternative can ever be satisfied"
 
-    def test_equivalent_sources_layered_separately_still_fold(self):
+    def test_layered_sources_fold_only_when_equivalent(self):
         """Two MultiAuth over the same members in order resolve identically."""
         bearer = HTTPBearerAuth(self._scoped)
         api_key = APIKeyHeaderAuth("X-Key", self._scoped)
@@ -5899,8 +4269,7 @@ class TestAuthSurface:
             [("APIKeyHeaderAuth", ("billing", "admin"))],
         ], "reusing one object or building two must report the same surface"
 
-    def test_sources_in_a_different_order_are_not_folded(self):
-        """Order decides which member wins, so these resolve differently."""
+        # Order decides which member wins, so these resolve differently.
         bearer = HTTPBearerAuth(self._scoped)
         api_key = APIKeyHeaderAuth("X-Key", self._scoped)
         setup = self._layered(
@@ -5910,7 +4279,7 @@ class TestAuthSurface:
         route = self._find(_app(setup), "/layered")
         assert len(route.alternatives) == 4, "both positions pick independently"
 
-    def test_a_scheme_that_cannot_be_introspected_is_not_assumed_sound(self):
+    def test_foreign_schemes_are_read_by_their_own_optionality(self):
         """A foreign SecurityBase need not spell its optionality as auto_error."""
 
         class _OpaqueScheme(SecurityBase):
@@ -5933,9 +4302,7 @@ class TestAuthSurface:
         assert route.alternatives[0][0].optional is None, "nothing declares it"
         assert route.unguarded is True, "an unreadable guard must not pass the gate"
 
-    def test_a_stock_scheme_with_auto_error_off_leaves_the_route_unguarded(self):
-        """Plain fastapi.security schemes carry auto_error, not our flag."""
-
+        # Plain fastapi.security schemes carry auto_error, not our flag.
         def setup(app: FastAPI):
             @app.get("/soft")
             async def soft(credentials=Security(HTTPBearer(auto_error=False))):
@@ -5947,10 +4314,6 @@ class TestAuthSurface:
         route = self._find(app, "/soft")
         assert route.unguarded is True, "an anonymous caller reaches the endpoint"
         assert route.alternatives[0][0].optional is True
-
-    def test_routes_without_a_dependency_tree_are_skipped(self):
-        paths = [route.path for route in auth_surface(_app())]
-        assert paths == [], f"only endpoint routes belong in the surface: {paths}"
 
 
 ISSUER = "https://idp.example.com"
@@ -6005,24 +4368,24 @@ class TestValidateIDToken:
     @pytest.mark.anyio
     @respx.mock
     async def test_valid_token_returns_its_claims(self):
-        self._jwks()
-        claims = await self._validate(_id_token())
-        assert claims["sub"] == "user-1"
-        assert claims["aud"] == CLIENT_ID
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_keys_are_cached_across_callbacks(self):
         route = self._jwks()
         for _ in range(3):
-            await self._validate(_id_token())
+            claims = await self._validate(_id_token())
+            assert claims["sub"] == "user-1"
+            assert claims["aud"] == CLIENT_ID
+        # Keys are cached across callbacks.
         assert route.call_count == 1
 
     @pytest.mark.anyio
     @respx.mock
     async def test_bad_signature(self):
+        await self._refused("not-a-jwt", "malformed")
         self._jwks()
         await self._refused(_id_token(key=_RSA_KEY_2), "failed validation")
+        token = pyjwt.encode(
+            _id_claims(), JWT_SECRET, algorithm="HS256", headers={"kid": "key1"}
+        )
+        await self._refused(token, "failed validation")
 
     @pytest.mark.anyio
     @respx.mock
@@ -6048,9 +4411,9 @@ class TestValidateIDToken:
 
     @pytest.mark.anyio
     @respx.mock
-    @pytest.mark.parametrize(
-        ("claims", "match"),
-        [
+    async def test_claims_checks(self):
+        self._jwks()
+        for claims, match in [
             (_id_claims(aud="other-client"), "failed validation"),
             (_id_claims(aud=["other-client", "third"]), "failed validation"),
             (_id_claims(iss="https://evil.example.com"), "failed validation"),
@@ -6059,81 +4422,53 @@ class TestValidateIDToken:
             (_id_claims(sub=None), "failed validation"),
             (_id_claims(iat=None), "failed validation"),
             (_id_claims(azp="other-client"), "another client"),
-        ],
-        ids=[
-            "wrong-aud",
-            "wrong-aud-list",
-            "wrong-iss",
-            "expired",
-            "issued-in-future",
-            "no-sub",
-            "no-iat",
-            "wrong-azp",
-        ],
-    )
-    async def test_claims_checks(self, claims, match):
-        self._jwks()
-        await self._refused(_id_token(claims), match)
+        ]:
+            await self._refused(_id_token(claims), match)
 
     @pytest.mark.anyio
     @respx.mock
-    async def test_client_among_several_audiences_with_matching_azp(self):
+    async def test_accepted_claims(self):
         self._jwks()
         token = _id_token(_id_claims(aud=[CLIENT_ID, "api"], azp=CLIENT_ID))
         assert (await self._validate(token))["azp"] == CLIENT_ID
 
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_leeway_tolerates_skew(self):
-        self._jwks()
         token = _id_token(_id_claims(exp=int(time.time()) - 5))
         assert (await self._validate(token, leeway=30))["sub"] == "user-1"
 
     @pytest.mark.anyio
     @respx.mock
-    async def test_matching_nonce(self):
+    async def test_nonce(self):
         self._jwks()
         token = _id_token(_id_claims(nonce="n-123"))
         assert (await self._validate(token, nonce="n-123"))["nonce"] == "n-123"
 
-    @pytest.mark.anyio
-    @respx.mock
-    @pytest.mark.parametrize(
-        ("claims", "expected"),
-        [
+        # The nonce is not checked unless asked.
+        token = _id_token(_id_claims(nonce="anything"))
+        assert (await self._validate(token))["sub"] == "user-1"
+
+        for claims, expected in [
             (_id_claims(nonce="other"), "n-123"),
             (_id_claims(), "n-123"),
             (_id_claims(nonce=123), "n-123"),
             (_id_claims(nonce=""), ""),
-        ],
-        ids=["mismatch", "missing", "not-a-string", "nothing-stored"],
-    )
-    async def test_nonce_refused(self, claims, expected):
-        self._jwks()
-        await self._refused(_id_token(claims), "nonce", nonce=expected)
+        ]:
+            await self._refused(_id_token(claims), "nonce", nonce=expected)
 
     @pytest.mark.anyio
     @respx.mock
-    async def test_nonce_is_not_checked_unless_asked(self):
-        self._jwks()
-        token = _id_token(_id_claims(nonce="anything"))
-        assert (await self._validate(token))["sub"] == "user-1"
-
-    @pytest.mark.anyio
-    @respx.mock
-    @pytest.mark.parametrize(
-        ("alg", "digest"),
-        [
+    async def test_at_hash_uses_the_header_alg(self):
+        route = respx.get(ID_JWKS_URL)
+        for alg, digest in [
             ("RS256", hashlib.sha256),
             ("RS384", hashlib.sha384),
             ("RS512", hashlib.sha512),
-        ],
-    )
-    async def test_at_hash_uses_the_header_alg(self, alg, digest):
-        self._jwks(_jwk(_RSA_KEY_1, "key1", alg=alg))
-        token = _id_token(_id_claims(at_hash=_at_hash("at-1", digest)), algorithm=alg)
-        claims = await self._validate(token, access_token="at-1", algorithms=[alg])
-        assert claims["sub"] == "user-1"
+        ]:
+            route.respond(json={"keys": [_jwk(_RSA_KEY_1, "key1", alg=alg)]})
+            token = _id_token(
+                _id_claims(at_hash=_at_hash("at-1", digest)), algorithm=alg
+            )
+            claims = await self._validate(token, access_token="at-1", algorithms=[alg])
+            assert claims["sub"] == "user-1"
 
     @pytest.mark.anyio
     @respx.mock
@@ -6155,45 +4490,19 @@ class TestValidateIDToken:
 
     @pytest.mark.anyio
     @respx.mock
-    async def test_at_hash_mismatch(self):
-        self._jwks()
-        token = _id_token(_id_claims(at_hash=_at_hash("at-1")))
-        await self._refused(token, "at_hash does not match", access_token="at-2")
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_at_hash_with_the_wrong_hash_function(self):
+    async def test_at_hash_refused(self):
         """A SHA-512 at_hash under an RS256 header does not pass."""
         self._jwks()
-        token = _id_token(_id_claims(at_hash=_at_hash("at-1", hashlib.sha512)))
-        await self._refused(token, "at_hash does not match", access_token="at-1")
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_at_hash_missing_when_access_token_given(self):
-        self._jwks()
+        for at_hash, access_token in [
+            (_at_hash("at-1"), "at-2"),
+            (_at_hash("at-1", hashlib.sha512), "at-1"),
+            (_at_hash("at-1"), "at-é"),
+        ]:
+            token = _id_token(_id_claims(at_hash=at_hash))
+            await self._refused(
+                token, "at_hash does not match", access_token=access_token
+            )
         await self._refused(_id_token(), "no at_hash", access_token="at-1")
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_non_ascii_access_token_does_not_match(self):
-        self._jwks()
-        token = _id_token(_id_claims(at_hash=_at_hash("at-1")))
-        await self._refused(token, "at_hash does not match", access_token="at-é")
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_malformed_token(self):
-        await self._refused("not-a-jwt", "malformed")
-
-    @pytest.mark.anyio
-    @respx.mock
-    async def test_hs256_token_against_the_jwks(self):
-        self._jwks()
-        token = pyjwt.encode(
-            _id_claims(), JWT_SECRET, algorithm="HS256", headers={"kid": "key1"}
-        )
-        await self._refused(token, "failed validation")
 
     @pytest.mark.anyio
     @respx.mock
@@ -6202,22 +4511,17 @@ class TestValidateIDToken:
         await self._refused(_id_token(), "cannot be fetched")
 
     @pytest.mark.anyio
-    @pytest.mark.parametrize(
-        ("kwargs", "match"),
-        [
+    async def test_misconfiguration_raises_value_error(self):
+        assert issubclass(OAuthIDTokenError, OAuthError)
+        for kwargs, match in [
             ({"jwks_uri": "http://idp.example.com/jwks"}, "https"),
             ({"algorithms": ["HS256"]}, "symmetric"),
             ({"algorithms": []}, "at least one"),
             ({"issuer": ""}, "issuer"),
             ({"client_id": ""}, "client_id"),
-        ],
-    )
-    async def test_misconfiguration_raises_value_error(self, kwargs, match):
-        with pytest.raises(ValueError, match=match):
-            await self._validate(_id_token(), **kwargs)
-
-    def test_error_is_an_oauth_error(self):
-        assert issubclass(OAuthIDTokenError, OAuthError)
+        ]:
+            with pytest.raises(ValueError, match=match):
+                await self._validate(_id_token(), **kwargs)
 
 
 class TestNonce:
@@ -6232,7 +4536,6 @@ class TestNonce:
         params = parse_qs(urlparse(response.headers["location"]).query)
         assert params["nonce"] == ["n-123"]
 
-    def test_redirect_omits_the_nonce_by_default(self):
         response = _authorization_redirect()
         assert "nonce" not in parse_qs(urlparse(response.headers["location"]).query)
 
@@ -6242,21 +4545,22 @@ class TestChecksumTokens:
 
     ALPHANUMERIC: ClassVar[str] = string.ascii_letters + string.digits
 
-    @pytest.mark.parametrize("nbytes", [1, 16, 32, 64])
-    def test_round_trip_and_entropy(self, nbytes):
-        token = checksum_token_generator(nbytes)
-        assert verify_token_checksum(token)
-        body = token[:-6]
-        assert len(body) == math.ceil(nbytes * 8 / math.log2(62))
-        assert len(body) * math.log2(62) >= nbytes * 8
+    def test_round_trip_and_entropy(self):
+        for nbytes in [1, 16, 32, 64]:
+            token = checksum_token_generator(nbytes)
+            assert verify_token_checksum(token)
+            body = token[:-6]
+            assert len(body) == math.ceil(nbytes * 8 / math.log2(62))
+            assert len(body) * math.log2(62) >= nbytes * 8
 
-    def test_default_is_256_bits(self):
+        # The default is 256 bits.
         assert len(checksum_token_generator()) == 43 + 6
-
-    def test_tokens_are_alphanumeric_and_distinct(self):
         tokens = {checksum_token_generator() for _ in range(50)}
         assert len(tokens) == 50
         assert all(set(token) <= set(self.ALPHANUMERIC) for token in tokens)
+
+        with pytest.raises(ValueError, match="positive"):
+            checksum_token_generator(0)
 
     def test_every_single_char_corruption_is_rejected(self):
         token = checksum_token_generator()
@@ -6265,9 +4569,6 @@ class TestChecksumTokens:
                 if replacement != char:
                     corrupted = token[:i] + replacement + token[i + 1 :]
                     assert not verify_token_checksum(corrupted), (i, replacement)
-
-    def test_truncation_and_extension_are_rejected(self):
-        token = checksum_token_generator()
         assert not verify_token_checksum(token[:-1])
         assert not verify_token_checksum(token + "0")
 
@@ -6277,17 +4578,17 @@ class TestChecksumTokens:
         assert not verify_token_checksum(token)
         assert not verify_token_checksum(token, prefix="org_")
 
-    @pytest.mark.parametrize(
-        "token",
-        ["", "abc", "abcdef", "a" * 49, "a b" * 20, "é" * 49, f"{'a' * 42}-123456"],
-        ids=["empty", "short", "checksum-only", "junk", "space", "non-ascii", "dash"],
-    )
-    def test_junk_is_rejected(self, token):
-        assert not verify_token_checksum(token)
-
-    def test_nbytes_must_be_positive(self):
-        with pytest.raises(ValueError, match="positive"):
-            checksum_token_generator(0)
+    def test_junk_is_rejected(self):
+        for token in [
+            "",
+            "abc",
+            "abcdef",  # checksum only
+            "a" * 49,
+            "a b" * 20,
+            "é" * 49,
+            f"{'a' * 42}-123456",
+        ]:
+            assert not verify_token_checksum(token), token
 
     def test_plugs_into_http_bearer_auth(self):
         lookups: list[str] = []
@@ -6329,12 +4630,10 @@ class TestAuthenticationMethodReference:
         "wia",
     }  # fmt: skip
 
-    def test_values_match_the_registry(self):
+    def test_values_match_the_registry_and_compare_as_strings(self):
         assert {member.value for member in AuthenticationMethodReference} == (
             self.IANA_REGISTRY
         )
-
-    def test_members_compare_equal_to_claim_strings(self):
         claims = {"amr": ["pwd", "otp"]}
         assert AuthenticationMethodReference.PASSWORD in claims["amr"]
         assert AuthenticationMethodReference.ONE_TIME_PASSWORD == "otp"
@@ -6342,9 +4641,8 @@ class TestAuthenticationMethodReference:
 
 
 class TestStepUpChallenge:
-    @pytest.mark.parametrize(
-        ("kwargs", "expected"),
-        [
+    def test_formatting(self):
+        cases: list[tuple[dict[str, Any], str]] = [
             ({"max_age": 300}, 'max_age="300"'),
             ({"acr_values": ("gold",)}, 'acr_values="gold"'),
             ({"acr_values": ("gold", "urn:silver")}, 'acr_values="gold urn:silver"'),
@@ -6352,26 +4650,23 @@ class TestStepUpChallenge:
                 {"acr_values": ("gold", "silver"), "max_age": 60},
                 'acr_values="gold silver", max_age="60"',
             ),
-        ],
-        ids=["max-age", "one-acr", "two-acr", "both"],
-    )
-    def test_formatting(self, kwargs, expected):
-        headers = step_up_challenge("Bearer", "Why", **kwargs)
-        assert headers == {
-            "WWW-Authenticate": (
-                'Bearer error="insufficient_user_authentication", '
-                f'error_description="Why", {expected}'
-            )
-        }
+        ]
+        for kwargs, expected in cases:
+            headers = step_up_challenge("Bearer", "Why", **kwargs)
+            assert headers == {
+                "WWW-Authenticate": (
+                    'Bearer error="insufficient_user_authentication", '
+                    f'error_description="Why", {expected}'
+                )
+            }
 
-    def test_a_challenge_with_params_gets_a_comma(self):
+    def test_the_base_challenge(self):
+        """A challenge with params gets a comma; no challenge, no header."""
         headers = step_up_challenge('Basic realm="api"', "Why", acr_values=("gold",))
         assert headers is not None
         assert headers["WWW-Authenticate"].startswith(
             'Basic realm="api", error="insufficient_user_authentication"'
         )
-
-    def test_no_challenge_no_header(self):
         assert step_up_challenge(None, "Why", acr_values=("gold",)) is None
 
 
@@ -6407,30 +4702,29 @@ class TestSteppedUp:
     def _get(self, dep):
         return _client(dep).get("/me", headers=self.BEARER)
 
-    @pytest.mark.parametrize("acr", ["gold", "silver"])
-    def test_an_accepted_level_passes(self, acr):
-        assert self._get(self._gold(self._bearer(acr))).status_code == 200
+    def test_an_accepted_level_passes(self):
+        for acr in ["gold", "silver"]:
+            assert self._get(self._gold(self._bearer(acr))).status_code == 200
 
-    @pytest.mark.parametrize("acr", ["bronze", None, 7, ["gold"]])
-    def test_any_other_level_gets_the_challenge(self, acr):
-        response = self._get(self._gold(self._bearer(acr)))
-        assert response.status_code == 401
-        assert response.json() == {"detail": "Insufficient user authentication"}
-        assert response.headers["www-authenticate"] == self.ACR_CHALLENGE
-
-    def test_an_async_reader(self):
         async def acr(user):
             return user["acr"]
 
         dep = self._bearer("gold").stepped_up(["gold"], acr=acr)
         assert self._get(dep).status_code == 200
 
-    def test_an_enum_level_matches_its_string(self):
+        # An enum level matches its string.
         class Level(StrEnum):
             GOLD = "gold"
 
         dep = self._bearer(Level.GOLD).stepped_up(["gold"], acr=lambda u: u["acr"])
         assert self._get(dep).status_code == 200
+
+    def test_any_other_level_gets_the_challenge(self):
+        for acr in ["bronze", None, 7, ["gold"]]:
+            response = self._get(self._gold(self._bearer(acr)))
+            assert response.status_code == 401, acr
+            assert response.json() == {"detail": "Insufficient user authentication"}
+            assert response.headers["www-authenticate"] == self.ACR_CHALLENGE
 
     @pytest.mark.anyio
     async def test_the_error_carries_the_requirement(self):
@@ -6440,6 +4734,16 @@ class TestSteppedUp:
         assert not isinstance(exc_info.value, StaleCredentialError)
         assert exc_info.value.acr_values == ("gold", "silver")
         assert exc_info.value.max_age is None
+
+        # A stale error carries both requirements.
+        dep = self._fresh(self._gold(self._bearer("gold", proven_at=0)))
+        with pytest.raises(StaleCredentialError) as exc_info:
+            await dep.dispatch(Request(_bearer_scope(VALID_TOKEN)), [])
+        assert isinstance(exc_info.value, InsufficientAuthenticationError)
+        assert (exc_info.value.max_age, exc_info.value.acr_values) == (
+            300,
+            ("gold", "silver"),
+        )
 
     def test_an_invalid_credential_is_refused_as_invalid(self):
         dep = self._gold(self._bearer("bronze"))
@@ -6462,21 +4766,16 @@ class TestSteppedUp:
         assert response.json() == {"detail": "Insufficient user authentication"}
         assert "www-authenticate" not in response.headers
 
-    @pytest.mark.parametrize("order", ["fresh-first", "stepped-up-first"])
-    def test_composes_with_fresh_into_one_challenge(self, order):
+    def test_composes_with_fresh_into_one_challenge(self):
         source = self._bearer("bronze")
-        dep = (
-            self._gold(self._fresh(source))
-            if order == "fresh-first"
-            else self._fresh(self._gold(source))
-        )
-        response = self._get(dep)
-        assert response.status_code == 401
-        assert response.headers["www-authenticate"] == (
-            f'{self.ACR_CHALLENGE}, max_age="300"'
-        )
+        for dep in [self._gold(self._fresh(source)), self._fresh(self._gold(source))]:
+            response = self._get(dep)
+            assert response.status_code == 401
+            assert response.headers["www-authenticate"] == (
+                f'{self.ACR_CHALLENGE}, max_age="300"'
+            )
 
-    def test_a_stale_credential_on_a_stepped_up_route(self):
+        # A stale credential on a stepped-up route.
         dep = self._fresh(self._gold(self._bearer("gold", proven_at=0)))
         response = self._get(dep)
         assert response.status_code == 401
@@ -6484,17 +4783,6 @@ class TestSteppedUp:
             'Bearer error="insufficient_user_authentication", '
             'error_description="More recent authentication is required", '
             'acr_values="gold silver", max_age="300"'
-        )
-
-    @pytest.mark.anyio
-    async def test_stale_error_carries_both_requirements(self):
-        dep = self._fresh(self._gold(self._bearer("gold", proven_at=0)))
-        with pytest.raises(StaleCredentialError) as exc_info:
-            await dep.dispatch(Request(_bearer_scope(VALID_TOKEN)), [])
-        assert isinstance(exc_info.value, InsufficientAuthenticationError)
-        assert (exc_info.value.max_age, exc_info.value.acr_values) == (
-            300,
-            ("gold", "silver"),
         )
 
     def test_one_handler_catches_both_refusals(self):
@@ -6527,33 +4815,38 @@ class TestSteppedUp:
             "acr_values": None,
         }
 
-    def test_the_original_source_stays_unguarded(self):
+    def test_derived_sources(self):
+        """The original source stays unguarded; require() keeps the levels."""
         source = self._bearer("bronze")
         self._gold(source)
         assert self._get(source).status_code == 200
 
-    def test_require_keeps_the_levels(self):
         async def validate(token: str, *, role: str) -> dict:
             return {"role": role, "acr": "bronze"}
 
         dep = self._gold(HTTPBearerAuth(validate)).require(role="admin")
         assert self._get(dep).status_code == 401
 
-    def test_refuses_optional_both_ways(self):
+    def test_misuse_is_refused(self):
         source = self._bearer()
         with pytest.raises(ValueError, match=r"optional\(\) and stepped_up\(\)"):
             self._gold(source).optional()
         with pytest.raises(ValueError, match=r"optional\(\) and stepped_up\(\)"):
             self._gold(source.optional())
-
-    def test_levels_are_set_once(self):
         with pytest.raises(ValueError, match="already has acr_values"):
             self._gold(self._gold(self._bearer()))
 
-    @pytest.mark.parametrize(
-        ("acr_values", "error"),
-        [
-            ("gold", TypeError),
+        auth = MultiAuth(self._bearer())
+        with pytest.raises(ValueError, match=r"stepped_up\(\)"):
+            self._gold(auth).optional()
+        with pytest.raises(ValueError, match=r"stepped_up\(\)"):
+            self._gold(auth.optional())
+        with pytest.raises(ValueError, match="HTTPBearerAuth already has acr_values"):
+            self._gold(MultiAuth(self._gold(self._bearer())))
+
+    def test_acr_values_must_fit_the_challenge(self):
+        cases: list[tuple[Any, type[Exception]]] = [
+            ("gold", TypeError),  # a bare string
             ([], ValueError),
             ([""], ValueError),
             (["gold silver"], ValueError),
@@ -6562,22 +4855,10 @@ class TestSteppedUp:
             (["gold\t"], ValueError),
             (["oré"], ValueError),
             ([7], ValueError),
-        ],
-        ids=[
-            "bare-string",
-            "empty",
-            "empty-value",
-            "space",
-            "quote",
-            "backslash",
-            "tab",
-            "non-ascii",
-            "not-a-string",
-        ],
-    )
-    def test_acr_values_must_fit_the_challenge(self, acr_values, error):
-        with pytest.raises(error):
-            self._bearer().stepped_up(acr_values, acr=lambda user: user["acr"])
+        ]
+        for acr_values, error in cases:
+            with pytest.raises(error):
+                self._bearer().stepped_up(acr_values, acr=lambda user: user["acr"])
 
     def test_multiauth_applies_the_levels_to_every_source(self):
         async def cookie_validate(value: str) -> dict:
@@ -6591,17 +4872,6 @@ class TestSteppedUp:
         assert client.get("/me", headers=self.BEARER).status_code == 200
         response = client.get("/me", cookies={"session": cookie._sign(VALID_COOKIE)})
         assert response.status_code == 401
-
-    def test_multiauth_refuses_optional_both_ways(self):
-        auth = MultiAuth(self._bearer())
-        with pytest.raises(ValueError, match=r"stepped_up\(\)"):
-            self._gold(auth).optional()
-        with pytest.raises(ValueError, match=r"stepped_up\(\)"):
-            self._gold(auth.optional())
-
-    def test_multiauth_names_a_source_already_stepped_up(self):
-        with pytest.raises(ValueError, match="HTTPBearerAuth already has acr_values"):
-            self._gold(MultiAuth(self._gold(self._bearer())))
 
     def test_reads_acr_off_jwt_claims(self):
         validator = JWTValidator(secret=JWT_SECRET)
@@ -6663,7 +4933,7 @@ class TestSecurityLogging:
         handlers = logging.getLogger("fastapi_multiauth").handlers
         assert any(isinstance(h, logging.NullHandler) for h in handlers)
 
-    def test_success_is_logged_at_debug(self):
+    def test_success_and_anonymous_are_logged_at_debug(self):
         async def validate(token: str) -> dict:
             return {"email": "alice@example.com"}
 
@@ -6675,6 +4945,11 @@ class TestSecurityLogging:
         assert record.auth_scheme == "HTTPBearer"
         self._assert_no_leak("alice@example.com")
 
+        self.caplog.clear()
+        _client(HTTPBearerAuth(simple_validator).optional()).get("/me")
+        record = self._only()
+        assert (record.levelno, record.auth_reason) == (logging.DEBUG, "anonymous")
+
     def test_success_builds_no_record_when_debug_is_off(self):
         self.caplog.set_level(logging.WARNING, logger="fastapi_multiauth")
         bearer_logger = logging.getLogger("fastapi_multiauth.sources.bearer")
@@ -6683,11 +4958,6 @@ class TestSecurityLogging:
                 "/me", headers=self._bearer_header(VALID_TOKEN)
             )
         log.assert_not_called()
-
-    def test_anonymous_is_logged_at_debug(self):
-        _client(HTTPBearerAuth(simple_validator).optional()).get("/me")
-        record = self._only()
-        assert (record.levelno, record.auth_reason) == (logging.DEBUG, "anonymous")
 
     def test_a_missing_credential_is_logged_at_info(self):
         _client(HTTPBearerAuth(simple_validator)).get("/me")
@@ -6699,23 +4969,29 @@ class TestSecurityLogging:
             level=logging.INFO,
         )
 
-    @pytest.mark.parametrize(
-        ("status_code", "reason"),
-        [(401, "rejected"), (403, "forbidden"), (429, "error")],
-    )
-    def test_validator_refusals(self, status_code, reason):
-        async def validate(token: str) -> dict:
-            raise HTTPException(status_code=status_code, detail="alice@example.com")
+    def test_validator_refusals(self):
+        for status_code, reason in [
+            (401, "rejected"),
+            (403, "forbidden"),
+            (429, "error"),
+        ]:
 
-        _client(HTTPBearerAuth(validate)).get("/me", headers=self._bearer_header())
-        self._assert_refusal(
-            "fastapi_multiauth.sources.bearer", "HTTPBearerAuth", reason, status_code
-        )
-        self._assert_no_leak("alice@example.com")
+            async def validate(token: str, status_code=status_code) -> dict:
+                raise HTTPException(status_code=status_code, detail="alice@example.com")
 
-    def test_a_forged_cookie(self):
+            self.caplog.clear()
+            _client(HTTPBearerAuth(validate)).get("/me", headers=self._bearer_header())
+            self._assert_refusal(
+                "fastapi_multiauth.sources.bearer",
+                "HTTPBearerAuth",
+                reason,
+                status_code,
+            )
+            self._assert_no_leak("alice@example.com")
+
+    def test_cookie_refusals(self):
         auth = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
+            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False, ttl=60
         )
         _client(auth).get("/me", cookies={"session": SECRET_CREDENTIAL})
         record = self._assert_refusal(
@@ -6726,10 +5002,7 @@ class TestSecurityLogging:
         )
         assert record.auth_scheme == "APIKeyCookie_session"
 
-    def test_an_expired_cookie(self):
-        auth = APIKeyCookieAuth(
-            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False, ttl=60
-        )
+        self.caplog.clear()
         cookie = auth._sign(VALID_COOKIE)
         with patch("time.time", return_value=time.time() + 120):
             _client(auth).get("/me", cookies={"session": cookie})
@@ -6738,23 +5011,19 @@ class TestSecurityLogging:
         )
         self._assert_no_leak(cookie, VALID_COOKIE)
 
-    @pytest.mark.parametrize(
-        "blob",
-        ["!!!", base64.b64encode(SECRET_CREDENTIAL.encode()).decode()],
-        ids=["not-base64", "no-colon"],
-    )
-    def test_a_malformed_basic_blob(self, blob):
-        _client(HTTPBasicAuth(simple_validator)).get(
-            "/me", headers={"Authorization": f"Basic {blob}"}
-        )
-        self._assert_refusal(
-            "fastapi_multiauth.sources.basic", "HTTPBasicAuth", "malformed", 401
-        )
-        self._assert_no_leak(blob)
+    def test_a_malformed_basic_blob(self):
+        for blob in ["!!!", base64.b64encode(SECRET_CREDENTIAL.encode()).decode()]:
+            self.caplog.clear()
+            _client(HTTPBasicAuth(simple_validator)).get(
+                "/me", headers={"Authorization": f"Basic {blob}"}
+            )
+            self._assert_refusal(
+                "fastapi_multiauth.sources.basic", "HTTPBasicAuth", "malformed", 401
+            )
+            self._assert_no_leak(blob)
 
-    @pytest.mark.parametrize(
-        ("source", "logger_name"),
-        [
+    def test_each_module_logs_under_its_own_name(self):
+        for source, logger_name in [
             (APIKeyHeaderAuth("X-Key", simple_validator), "sources.header"),
             (APIKeyQueryAuth("key", simple_validator), "sources.query"),
             (
@@ -6762,46 +5031,49 @@ class TestSecurityLogging:
                 "sources.oauth2",
             ),
             (_HeaderAuth(VALID_TOKEN), "abc"),
-        ],
-        ids=["header", "query", "oauth2", "custom"],
-    )
-    def test_each_module_logs_under_its_own_name(self, source, logger_name):
-        _client(source).get(
-            f"/me?key={SECRET_CREDENTIAL}",
-            headers={
-                "X-Key": SECRET_CREDENTIAL,
-                "X-Token": SECRET_CREDENTIAL,
-                **self._bearer_header(),
-            },
-        )
-        record = self._only()
-        assert record.name == f"fastapi_multiauth.{logger_name}"
-        assert record.auth_reason == "rejected"
-        self._assert_no_leak()
+        ]:
+            self.caplog.clear()
+            _client(source).get(
+                f"/me?key={SECRET_CREDENTIAL}",
+                headers={
+                    "X-Key": SECRET_CREDENTIAL,
+                    "X-Token": SECRET_CREDENTIAL,
+                    **self._bearer_header(),
+                },
+            )
+            record = self._only()
+            assert record.name == f"fastapi_multiauth.{logger_name}"
+            assert record.auth_reason == "rejected"
+            self._assert_no_leak()
 
-    def test_a_stale_credential(self):
-        dep = HTTPBearerAuth(simple_validator).fresh(300, authenticated_at=lambda _: 0)
-        _client(dep).get("/me", headers=self._bearer_header(VALID_TOKEN))
-        self._assert_refusal(
-            "fastapi_multiauth.sources.bearer", "HTTPBearerAuth", "stale", 401
-        )
+    def test_step_up_refusals(self):
+        for dep, reason in [
+            (
+                HTTPBearerAuth(simple_validator).fresh(
+                    300, authenticated_at=lambda _: 0
+                ),
+                "stale",
+            ),
+            (
+                HTTPBearerAuth(simple_validator).stepped_up(
+                    ["gold"], acr=lambda _: "x"
+                ),
+                "insufficient_acr",
+            ),
+        ]:
+            self.caplog.clear()
+            _client(dep).get("/me", headers=self._bearer_header(VALID_TOKEN))
+            self._assert_refusal(
+                "fastapi_multiauth.sources.bearer", "HTTPBearerAuth", reason, 401
+            )
 
-    def test_an_insufficient_acr(self):
-        dep = HTTPBearerAuth(simple_validator).stepped_up(["gold"], acr=lambda _: "x")
-        _client(dep).get("/me", headers=self._bearer_header(VALID_TOKEN))
-        self._assert_refusal(
-            "fastapi_multiauth.sources.bearer",
-            "HTTPBearerAuth",
-            "insufficient_acr",
-            401,
-        )
-
-    def test_multiauth_exhausting_its_sources(self):
+    def test_multiauth(self):
         auth = MultiAuth(
             HTTPBearerAuth(simple_validator),
             APIKeyHeaderAuth("X-Key", simple_validator),
         )
-        _client(auth).get("/me")
+        client = _client(auth)
+        client.get("/me")
         record = self._assert_refusal(
             "fastapi_multiauth.sources.multi",
             "MultiAuth",
@@ -6811,19 +5083,17 @@ class TestSecurityLogging:
         )
         assert record.auth_scheme is None
 
-    def test_multiauth_logs_once_as_the_matched_source(self):
-        auth = MultiAuth(
-            HTTPBearerAuth(simple_validator),
-            APIKeyHeaderAuth("X-Key", simple_validator),
-        )
-        _client(auth).get("/me", headers={"X-Key": SECRET_CREDENTIAL})
+        # It logs once, as the matched source.
+        self.caplog.clear()
+        client.get("/me", headers={"X-Key": SECRET_CREDENTIAL})
         self._assert_refusal(
             "fastapi_multiauth.sources.header", "APIKeyHeaderAuth", "rejected", 401
         )
 
-    @pytest.mark.parametrize(
-        ("token", "reason"),
-        [
+    def test_jwt_refusals_carry_the_pyjwt_reason(self):
+        validator = JWTValidator(secret=JWT_SECRET, audience=CLIENT_ID, issuer=ISSUER)
+        client = _client(HTTPBearerAuth(validator))
+        for token, reason in [
             (_hs_token(_id_claims(exp=int(time.time()) - 60)), "expired"),
             (_hs_token(_id_claims(nbf=int(time.time()) + 3600)), "not_yet_valid"),
             (_hs_token(_id_claims(aud="other")), "invalid_audience"),
@@ -6834,18 +5104,13 @@ class TestSecurityLogging:
                 "invalid_signature",
             ),
             (SECRET_CREDENTIAL, "invalid_token"),
-        ],
-        ids=["expired", "nbf", "aud", "iss", "no-exp", "signature", "garbage"],
-    )
-    def test_jwt_refusals_carry_the_pyjwt_reason(self, token, reason):
-        validator = JWTValidator(secret=JWT_SECRET, audience=CLIENT_ID, issuer=ISSUER)
-        _client(HTTPBearerAuth(validator)).get(
-            "/me", headers=self._bearer_header(token)
-        )
-        self._assert_refusal(
-            "fastapi_multiauth.sources.bearer", "HTTPBearerAuth", reason, 401
-        )
-        self._assert_no_leak(token)
+        ]:
+            self.caplog.clear()
+            client.get("/me", headers=self._bearer_header(token))
+            self._assert_refusal(
+                "fastapi_multiauth.sources.bearer", "HTTPBearerAuth", reason, 401
+            )
+            self._assert_no_leak(token)
 
     def test_jwt_insufficient_scope(self):
         validator = JWTValidator(secret=JWT_SECRET)
@@ -6866,22 +5131,23 @@ class TestSecurityLogging:
         )
 
     @respx.mock
-    @pytest.mark.parametrize(
-        ("token", "reason"),
-        [("not.a-jwt", "malformed"), (_id_token(kid="nope"), "unknown_key")],
-        ids=["malformed", "unknown-key"],
-    )
-    def test_jwks_refusals(self, token, reason):
-        respx.get(ID_JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
-        _auth_client(_jwks_validator(ID_JWKS_URL)).get(
-            "/me", headers=self._bearer_header(token)
+    def test_jwks_refusals(self):
+        route = respx.get(ID_JWKS_URL).respond(
+            json={"keys": [_jwk(_RSA_KEY_1, "key1")]}
         )
-        assert self._only().auth_reason == reason
-        self._assert_no_leak(token)
+        for token, reason in [
+            ("not.a-jwt", "malformed"),
+            (_id_token(kid="nope"), "unknown_key"),
+        ]:
+            self.caplog.clear()
+            _auth_client(_jwks_validator(ID_JWKS_URL)).get(
+                "/me", headers=self._bearer_header(token)
+            )
+            assert self._only().auth_reason == reason
+            self._assert_no_leak(token)
 
-    @respx.mock
-    def test_jwks_unavailable(self):
-        respx.get(ID_JWKS_URL).respond(500)
+        self.caplog.clear()
+        route.respond(500)
         token = _id_token()
         _auth_client(_jwks_validator(ID_JWKS_URL)).get(
             "/me", headers=self._bearer_header(token)
