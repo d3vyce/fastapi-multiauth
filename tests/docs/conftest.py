@@ -10,6 +10,7 @@ os.environ.setdefault("METRICS_PASSWORD", "scraper-password")
 os.environ.setdefault("GITHUB_WEBHOOK_SECRET", "docs-test-webhook-secret")
 os.environ.setdefault("STRIPE_WEBHOOK_SECRET", "whsec_docs-test-stripe-secret")
 os.environ.setdefault("SLACK_SIGNING_SECRET", "docs-test-slack-signing-secret")
+os.environ.setdefault("INTROSPECTION_CLIENT_SECRET", "introspection-secret")
 
 from . import idp
 

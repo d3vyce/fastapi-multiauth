@@ -175,6 +175,17 @@ def test_jwt_jwks(provider):
     assert client.get("/me", headers=_bearer(other)).status_code == 401
 
 
+def test_jwt_introspection(provider):
+    route = provider.post(idp.INTROSPECTION_URL)
+    route.respond(json={"active": True, "sub": "42", "aud": "my-api"})
+    client = _client("jwt.introspection")
+    assert client.get("/me", headers=_bearer("opaque")).json() == {"sub": "42"}
+    assert client.get("/me", headers=_bearer("opaque")).json() == {"sub": "42"}
+    assert route.call_count == 1
+    route.respond(json={"active": False})
+    assert client.get("/me", headers=_bearer("revoked")).status_code == 401
+
+
 def test_jwt_oauth2_source(provider):
     client = _client("jwt.oauth2_source")
     scheme = client.get("/openapi.json").json()["components"]["securitySchemes"]

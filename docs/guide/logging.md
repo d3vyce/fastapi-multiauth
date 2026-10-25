@@ -44,6 +44,8 @@ Records never contain the credential, its hash, or the identity. Correlate with 
 | `insufficient_scope` | a valid JWT missing a route scope (403) |
 | `unknown_key` | a JWT signed with a key the provider does not publish |
 | `jwks_unavailable` | the provider's keys cannot be fetched (503) |
+| `inactive` | the introspection endpoint says the token is not active |
+| `introspection_unavailable` | the introspection endpoint cannot be reached, or answers unusably (503) |
 | `rejected`, `forbidden`, `error` | your validator raised a 401, a 403, or another error |
 
-`JWTValidator` also reports `not_yet_valid`, `invalid_audience`, `invalid_issuer`, `missing_claim`, `invalid_algorithm` and `invalid_token`.
+`JWTValidator` also reports `not_yet_valid`, `invalid_audience`, `invalid_issuer`, `missing_claim`, `invalid_algorithm` and `invalid_token`, and `IntrospectionValidator` the ones that apply to its answers.

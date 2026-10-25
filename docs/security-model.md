@@ -30,6 +30,7 @@ What the library takes care of, and what stays with you. To report a vulnerabili
 - **Signed is not encrypted.** Anyone holding a cookie or a JWT can read its content. Never put a secret in it.
 - **Signed cookies are not revocable on their own.** A stolen cookie stays valid until it expires. Turn on [`session_id=True`](guide/cookie-sessions.md#revocable-sessions) when you need to end a session.
 - **ID tokens are untrusted until validated** with `oauth_validate_id_token`.
+- **Introspection answers are cached.** A token revoked at the provider keeps working until its cached answer expires, `cache_ttl` seconds at most.
 - **The discovery URL is configuration.** Never build it from request input.
 
 ## Status codes
@@ -39,4 +40,4 @@ What the library takes care of, and what stays with you. To report a vulnerabili
 | 401 | no credential, or an invalid one; carries a `WWW-Authenticate` challenge where the scheme has one |
 | 401 `insufficient_user_authentication` | valid, but authenticated too long ago or too weakly ([step-up](guide/step-up.md)) |
 | 403 | authenticated, but not allowed, or sent from another origin ([`csrf=True`](guide/cookie-sessions.md#csrf)) |
-| 503 | a provider's keys cannot be fetched and none are cached; clients should retry |
+| 503 | a provider's keys cannot be fetched and none are cached, or its introspection endpoint is down; clients should retry |

@@ -17,8 +17,10 @@ from typing import Any, TypeVar
 from urllib.parse import urlsplit
 
 import anyio.to_thread
-from fastapi import HTTPException
+from fastapi import HTTPException, status
 from fastapi.requests import HTTPConnection
+
+from .exceptions import ForbiddenError
 
 
 def b64url_encode(data: bytes) -> str:
@@ -258,6 +260,40 @@ def ensure_async(fn: Callable[..., Any]) -> Callable[..., Any]:
         return result
 
     return wrapper
+
+
+def granted_scopes(claims: dict[str, Any], claim: str) -> set[str]:
+    """Read the scopes `claim`: a space-separated string or a list."""
+    value = claims.get(claim)
+    if isinstance(value, str):
+        return set(value.split())
+    if isinstance(value, (list, tuple)):
+        return {str(item) for item in value}
+    return set()
+
+
+def finite_number(value: Any) -> float | None:
+    """`value` as a finite number, `None` when it is not one (booleans included)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def require_scopes(claims: dict[str, Any], claim: str, scopes: list[str]) -> None:
+    """Refuse claims whose scopes `claim` lacks one of `scopes`, with a 403."""
+    if set(scopes) - granted_scopes(claims, claim):
+        raise refusal(ForbiddenError("Insufficient scope"), "insufficient_scope")
+
+
+def service_unavailable(reason: str) -> HTTPException:
+    """The 503 for a provider that cannot be reached, tagged with `reason`."""
+    return refusal(
+        HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication temporarily unavailable",
+        ),
+        reason,
+    )
 
 
 def challenge_headers(challenge: str | None) -> dict[str, str] | None:

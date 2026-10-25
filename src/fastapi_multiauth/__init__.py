@@ -19,6 +19,7 @@ from .exceptions import (
     StaleCredentialError,
     UnauthorizedError,
 )
+from .introspection import IntrospectionValidator
 from .jwt import JWTValidator
 from .sources import (
     APIKeyCookieAuth,
@@ -55,6 +56,7 @@ __all__ = [
     "HTTPBasicAuth",
     "HTTPBearerAuth",
     "InsufficientAuthenticationError",
+    "IntrospectionValidator",
     "JWTValidator",
     "MultiAuth",
     "OAuth2AuthorizationCodeBearerAuth",

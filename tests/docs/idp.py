@@ -13,6 +13,7 @@ REALM = f"{ISSUER}/realms/main"
 REALM_JWKS_URL = f"{REALM}/protocol/openid-connect/certs"
 OIDC_JWKS_URL = f"{ISSUER}/jwks"
 TOKEN_URL = f"{ISSUER}/token"
+INTROSPECTION_URL = f"{REALM}/protocol/openid-connect/token/introspect"
 
 _KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 

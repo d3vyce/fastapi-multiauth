@@ -7,12 +7,11 @@ from collections.abc import Callable, Sequence
 from typing import Any, ClassVar
 
 import anyio
-from fastapi import HTTPException, status
 
 from ._http import DEFAULT_TIMEOUT, _get_json, _require_https
 from ._imports import require_extra
-from .exceptions import ForbiddenError, UnauthorizedError
-from .utils import ensure_async, refusal
+from .exceptions import UnauthorizedError
+from .utils import ensure_async, refusal, require_scopes, service_unavailable
 
 logger = logging.getLogger(__name__)
 
@@ -343,11 +342,7 @@ class JWTValidator:
         except (self._jwt.exceptions.PyJWTError, TypeError, ValueError) as exc:
             raise refusal(UnauthorizedError(), self._decode_reason(exc)) from None
         if scopes:
-            missing = set(scopes) - self._granted_scopes(claims)
-            if missing:
-                raise refusal(
-                    ForbiddenError("Insufficient scope"), "insufficient_scope"
-                )
+            require_scopes(claims, self._scopes_claim, scopes)
         if self._claims_to_identity is not None:
             return await self._claims_to_identity(claims)
         return claims
@@ -359,15 +354,6 @@ class JWTValidator:
                 return reason
         return "invalid_token"
 
-    def _granted_scopes(self, claims: dict[str, Any]) -> set[str]:
-        """Read the configured scopes claim: space-separated string or list."""
-        value = claims.get(self._scopes_claim)
-        if isinstance(value, str):
-            return set(value.split())
-        if isinstance(value, (list, tuple)):
-            return {str(item) for item in value}
-        return set()
-
     @staticmethod
     async def _resolve_jwks_key(key_set: _JWKSKeySet, token: str) -> Any:
         """Resolve the verification key for `token` from the cached JWKS."""
@@ -378,10 +364,4 @@ class JWTValidator:
         except _UnknownKey:
             raise refusal(UnauthorizedError(), "unknown_key") from None
         except _JWKSUnavailable as exc:
-            raise refusal(
-                HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Authentication temporarily unavailable",
-                ),
-                "jwks_unavailable",
-            ) from exc
+            raise service_unavailable("jwks_unavailable") from exc
