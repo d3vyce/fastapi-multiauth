@@ -30,6 +30,7 @@ The library never stores anything and never looks at your user model. Deciding w
 | [`APIKeyQueryAuth`][fastapi_multiauth.APIKeyQueryAuth] | a query parameter | [API keys and Basic](api-keys-and-basic.md) |
 | [`HTTPBasicAuth`][fastapi_multiauth.HTTPBasicAuth] | `Authorization: Basic ...` | [API keys and Basic](api-keys-and-basic.md) |
 | `OAuth2...BearerAuth`, `OpenIdConnectAuth` | a token from your identity provider | [JWT and OAuth 2.0](jwt-and-oauth2.md) |
+| [`HMACSignatureAuth`][fastapi_multiauth.HMACSignatureAuth] | a signed request body, from a webhook sender | [Signed webhooks](webhooks.md) |
 
 Need something else? Write a [custom source](custom-sources.md).
 

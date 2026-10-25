@@ -11,7 +11,7 @@ import secrets
 import string
 import time
 import zlib
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any, TypeVar
 from urllib.parse import urlsplit
@@ -33,6 +33,38 @@ def b64url_decode(text: str) -> bytes:
         ValueError: If `text` is not base64url.
     """
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def normalize_secret_keys(
+    secret_key: str | Sequence[str], *, min_bytes: int
+) -> list[str]:
+    """Validate `secret_key`, one key or a list to rotate, into a list of keys.
+
+    Raises:
+        ValueError: If the list is empty or a key is shorter than `min_bytes`.
+    """
+    keys = [secret_key] if isinstance(secret_key, str) else list(secret_key)
+    if not keys:
+        raise ValueError("secret_key must contain at least one key")
+    for key in keys:
+        if len(key.encode()) < min_bytes:
+            raise ValueError(
+                f"each secret_key must be at least {min_bytes} bytes of "
+                "high-entropy material (e.g. secrets.token_urlsafe(32))"
+            )
+    return keys
+
+
+def require_positive_seconds(value: float, name: str) -> None:
+    """Refuse a duration that is not a positive, finite number of seconds."""
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a positive, finite number of seconds")
+
+
+def require_nonnegative_seconds(value: float, name: str) -> None:
+    """Refuse a duration that is not a finite, non-negative number of seconds."""
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} must be a finite, non-negative number of seconds")
 
 
 def normalize_origin(origin: str, label: str) -> str:

@@ -15,30 +15,19 @@ from itsdangerous import BadSignature, SignatureExpired, TimestampSigner
 from fastapi_multiauth.exceptions import ForbiddenError, UnauthorizedError
 
 from ..abc import ValidatedAuthSource, _accepts_kwarg, _is_header_token
-from ..utils import b64url_decode, b64url_encode, normalize_origin, refusal
+from ..utils import (
+    b64url_decode,
+    b64url_encode,
+    normalize_origin,
+    normalize_secret_keys,
+    refusal,
+)
 
 _MIN_SECRET_KEY_BYTES = 32
 _SALT_PREFIX = "fastapi-multiauth.cookie."
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 SameSite = Literal["lax", "strict", "none"]
-
-
-def _normalize_secret_keys(secret_key: str | Sequence[str] | None) -> list[str]:
-    """Validate and normalize `secret_key` into a list of keys."""
-    if secret_key is None:
-        return []
-    keys = [secret_key] if isinstance(secret_key, str) else list(secret_key)
-    if not keys:
-        raise ValueError("secret_key must contain at least one key")
-    for key in keys:
-        if len(key.encode()) < _MIN_SECRET_KEY_BYTES:
-            raise ValueError(
-                f"each secret_key must be at least {_MIN_SECRET_KEY_BYTES} "
-                "bytes of high-entropy material (e.g. secrets.token_urlsafe(32)); "
-                "an empty or short key would weaken cookie signing"
-            )
-    return keys
 
 
 def _check_name_prefix(
@@ -176,7 +165,11 @@ class APIKeyCookieAuth(ValidatedAuthSource):
             raise ValueError("ttl must be a positive number of seconds")
         _check_name_prefix(name, secure=secure, domain=domain, path=path)
         self._name = name
-        self._secret_keys = _normalize_secret_keys(secret_key)
+        self._secret_keys = (
+            []
+            if secret_key is None
+            else normalize_secret_keys(secret_key, min_bytes=_MIN_SECRET_KEY_BYTES)
+        )
         if session_id:
             if not self._secret_keys:
                 raise ValueError(

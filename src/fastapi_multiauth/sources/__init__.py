@@ -11,11 +11,13 @@ from .oauth2 import (
     OpenIdConnectAuth,
 )
 from .query import APIKeyQueryAuth
+from .signature import HMACSignatureAuth
 
 __all__ = [
     "APIKeyCookieAuth",
     "APIKeyHeaderAuth",
     "APIKeyQueryAuth",
+    "HMACSignatureAuth",
     "HTTPBasicAuth",
     "HTTPBearerAuth",
     "MultiAuth",

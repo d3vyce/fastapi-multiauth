@@ -1,4 +1,6 @@
 import base64
+import hashlib
+import hmac
 import importlib
 import time
 from pathlib import Path
@@ -182,6 +184,45 @@ def test_jwt_oauth2_source(provider):
     assert client.get("/invoices", headers=_bearer(granted)).status_code == 200
     denied = idp.sign(iss=idp.REALM, aud="my-api", sub="42", scope="profile")
     assert client.get("/invoices", headers=_bearer(denied)).status_code == 403
+
+
+def test_webhook_github():
+    client = _client("webhooks.github")
+    body = b'{"action": "opened", "number": 7}'
+    digest = hmac.new(b"docs-test-webhook-secret", body, hashlib.sha256).hexdigest()
+    headers = {"Content-Type": "application/json"}
+    signed = {**headers, "X-Hub-Signature-256": f"sha256={digest}"}
+    response = client.post("/webhooks/github", content=body, headers=signed)
+    assert response.json() == {"action": "opened"}
+    forged = body.replace(b"7", b"8")
+    assert client.post("/webhooks/github", content=forged, headers=signed).status_code == 401
+    assert client.post("/webhooks/github", content=body, headers=headers).status_code == 401
+
+
+def test_webhook_senders():
+    client = _client("webhooks.senders")
+    t = str(int(time.time()))
+    event = b'{"type": "invoice.paid"}'
+    signed = f"{t}.".encode() + event
+    digest = hmac.new(b"whsec_docs-test-stripe-secret", signed, hashlib.sha256).hexdigest()
+    headers = {"Stripe-Signature": f"t={t},v1={digest}"}
+    response = client.post("/webhooks/stripe", content=event, headers=headers)
+    assert response.json() == {"type": "invoice.paid"}
+    old = {"Stripe-Signature": f"t={int(t) - 600},v1={digest}"}
+    assert client.post("/webhooks/stripe", content=event, headers=old).status_code == 401
+
+    form = b"command=%2Fdeploy&text=prod"
+    signed = f"v0:{t}:".encode() + form
+    digest = hmac.new(b"docs-test-slack-signing-secret", signed, hashlib.sha256).hexdigest()
+    headers = {
+        "X-Slack-Signature": f"v0={digest}",
+        "X-Slack-Request-Timestamp": t,
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    response = client.post("/webhooks/slack", content=form, headers=headers)
+    assert response.json() == {"command": "/deploy"}
+    replayed = {**headers, "X-Slack-Request-Timestamp": str(int(t) + 1)}
+    assert client.post("/webhooks/slack", content=form, headers=replayed).status_code == 401
 
 
 def test_multiauth():

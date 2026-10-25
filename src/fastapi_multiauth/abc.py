@@ -3,7 +3,6 @@
 import copy
 import inspect
 import logging
-import math
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -27,6 +26,8 @@ from fastapi_multiauth.utils import (
     log_decision,
     refusal,
     refusal_reason,
+    require_nonnegative_seconds,
+    require_positive_seconds,
     step_up_challenge,
 )
 
@@ -427,10 +428,8 @@ class AuthSource(ABC):
                 either is not finite, the copy is `optional()` or already has
                 a window, or the credential cannot be dated.
         """
-        if not math.isfinite(max_age) or max_age <= 0:
-            raise ValueError("max_age must be a positive, finite number of seconds")
-        if not math.isfinite(leeway) or leeway < 0:
-            raise ValueError("leeway must be a finite, non-negative number of seconds")
+        require_positive_seconds(max_age, "max_age")
+        require_nonnegative_seconds(leeway, "leeway")
         if self._optional:
             raise _step_up_optional_error(self, "fresh()")
         if self._freshness is not None:

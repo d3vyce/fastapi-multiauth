@@ -218,6 +218,7 @@ Guide = [
         "guide/cookie-sessions.md",
         "guide/api-keys-and-basic.md",
         "guide/jwt-and-oauth2.md",
+        "guide/webhooks.md",
         "guide/custom-sources.md",
     ] },
     { "Going further" = [
