@@ -390,7 +390,7 @@ wheels = [
 
 [[package]]
 name = "fastapi-multiauth"
-version = "0.8.0"
+version = "1.0.0rc1"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
