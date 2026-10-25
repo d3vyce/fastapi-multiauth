@@ -17,6 +17,7 @@ from fastapi_multiauth import (
     HMACSignatureAuth,
     HTTPBasicAuth,
     HTTPBearerAuth,
+    HTTPDPoPAuth,  # needs the jwt extra at construction
     InsufficientAuthenticationError,
     IntrospectionValidator,
     JWTValidator,  # needs the jwt extra at construction
@@ -67,6 +68,8 @@ Request-time authentication dependencies. Guide: [the sources](guide/index.md#th
 ## ::: fastapi_multiauth.AuthSource
 
 ## ::: fastapi_multiauth.HTTPBearerAuth
+
+## ::: fastapi_multiauth.HTTPDPoPAuth
 
 ## ::: fastapi_multiauth.APIKeyCookieAuth
 

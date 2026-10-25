@@ -12,6 +12,7 @@ What the library takes care of, and what stays with you. To report a vulnerabili
 - **Confusion between sources**: a cookie signed for one cookie name is never accepted under another, and a JWKS-backed `JWTValidator` requires an `audience`.
 - **Downgrades**: OAuth, OIDC and JWKS URLs must be HTTPS, and `HS*` algorithms are refused against a provider's keys.
 - **Cross-site requests**: with [`csrf=True`](guide/cookie-sessions.md#csrf), a cookie source refuses requests sent from another origin.
+- **Stolen tokens**: a [DPoP](guide/jwt-and-oauth2.md#sender-constrained-tokens-dpop)-bound token is refused without a fresh proof signed by its key.
 - **Forged webhooks**: [`HMACSignatureAuth`](guide/webhooks.md) checks the sender's signature over the raw body, and refuses an old timestamp when the sender sends one.
 - **Open redirects**: the post-login destination is checked, relative paths only by default.
 - **Timing attacks**: secrets, tokens and signatures are compared in constant time.

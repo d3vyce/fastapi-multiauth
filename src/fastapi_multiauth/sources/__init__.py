@@ -3,6 +3,7 @@
 from .basic import HTTPBasicAuth
 from .bearer import HTTPBearerAuth
 from .cookie import APIKeyCookieAuth
+from .dpop import HTTPDPoPAuth
 from .header import APIKeyHeaderAuth
 from .multi import MultiAuth
 from .oauth2 import (
@@ -20,6 +21,7 @@ __all__ = [
     "HMACSignatureAuth",
     "HTTPBasicAuth",
     "HTTPBearerAuth",
+    "HTTPDPoPAuth",
     "MultiAuth",
     "OAuth2AuthorizationCodeBearerAuth",
     "OAuth2PasswordBearerAuth",

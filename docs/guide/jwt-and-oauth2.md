@@ -23,6 +23,23 @@ The validator fetches the provider's public keys (the JWKS) and checks the signa
 
 By default the route receives the token's claims. Pass `claims_to_identity=` to turn them into your own user object. For tokens you sign yourself, use `JWTValidator(secret=...)` instead of `jwks_url`.
 
+## Sender-constrained tokens (DPoP)
+
+Whoever holds a bearer token can use it. A [DPoP](https://datatracker.ietf.org/doc/html/rfc9449)-bound token only works with the private key the client proved when it got the token. Keycloak, Auth0, Okta and others issue them; [`HTTPDPoPAuth`][fastapi_multiauth.HTTPDPoPAuth] checks them:
+
+```python
+--8<-- "docs_src/jwt/dpop.py"
+```
+
+The client sends `Authorization: DPoP <token>` and a `DPoP` header: a short JWT signed with its key, naming the method and URL of this request and the hash of the token. The source checks that proof, passes the token to your validator, then checks the token's `cnf.jkt` claim names the key that signed the proof. A stolen token is useless without the key, and a proof cannot be moved to another URL or token.
+
+A proof stays valid for `proof_max_age` (60 seconds). `replay_check` records each proof's `jti` so it cannot be sent twice. Make it atomic across your workers, e.g. Redis `SET NX` with the expiry it receives. Pass `HTTPDPoPAuth.NO_REPLAY_CHECK` to skip it knowingly.
+
+!!! warning "Do not accept the same tokens as Bearer"
+    `HTTPDPoPAuth` only reads the `DPoP` scheme. If a route also accepts bearer tokens through another source, a stolen bound token sent as `Bearer` would get through there: refuse tokens carrying a `cnf` claim in that validator.
+
+Behind a proxy that changes the scheme or host, pass `public_origin="https://api.example.com"`: the proof names the URL the client called. With `claims_to_identity`, pass `jkt=` to read the thumbprint from your identity.
+
 ## Opaque tokens
 
 Some providers issue opaque tokens instead of JWTs, or let you choose them because they can be revoked. [`IntrospectionValidator`][fastapi_multiauth.IntrospectionValidator] asks the provider's [introspection endpoint](https://datatracker.ietf.org/doc/html/rfc7662) whether each token is still active:
