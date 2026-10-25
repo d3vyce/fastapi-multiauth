@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 import jwt as pyjwt
+import pyotp
 import pytest
 import respx
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
@@ -65,6 +66,9 @@ from fastapi_multiauth import (
     auth_surface,
     checksum_token_generator,
     hash_token,
+    totp_generate_secret,
+    totp_provisioning_uri,
+    totp_verify,
     verify_token_checksum,
     verify_token_hash,
 )
@@ -4631,6 +4635,116 @@ class TestChecksumTokens:
 
         assert (ok.status_code, bad.status_code) == (200, 401)
         assert len(lookups) == 1
+
+
+class TestTOTP:
+    """totp_verify() and the enrolment helpers: RFC 6238 with replay refusal."""
+
+    NOW: ClassVar[int] = 1_700_000_010
+    STEP: ClassVar[int] = NOW // 30
+    SECRET: ClassVar[str] = "JBSWY3DPEHPK3PXP"
+
+    @pytest.fixture(autouse=True)
+    def _frozen_clock(self):
+        with patch("time.time", return_value=self.NOW):
+            yield
+
+    def _code(self, offset: int = 0) -> str:
+        return pyotp.TOTP(self.SECRET).at(self.NOW + 30 * offset)
+
+    def test_rfc_6238_sha1_vectors(self):
+        secret = base64.b32encode(b"12345678901234567890").decode()
+        for at, expected in [
+            (59, "94287082"),
+            (1111111109, "07081804"),
+            (1111111111, "14050471"),
+            (1234567890, "89005924"),
+            (2000000000, "69279037"),
+            (20000000000, "65353130"),
+        ]:
+            with patch("time.time", return_value=at):
+                assert totp_verify(secret, expected[-6:], window=0) == at // 30
+
+    def test_last_step_refuses_a_used_or_older_code(self):
+        for offset, last_step, expected in [
+            (0, None, self.STEP),
+            (0, self.STEP, None),
+            (0, self.STEP - 1, self.STEP),
+            (-1, self.STEP - 1, None),
+            (-1, self.STEP, None),
+            (1, self.STEP, self.STEP + 1),
+        ]:
+            code = self._code(offset)
+            assert totp_verify(self.SECRET, code, last_step=last_step) == expected
+
+    def test_window(self):
+        for offset in (-1, 1):
+            assert totp_verify(self.SECRET, self._code(offset)) == self.STEP + offset
+            assert totp_verify(self.SECRET, self._code(offset), window=0) is None
+        for offset in (-2, 2):
+            assert totp_verify(self.SECRET, self._code(offset)) is None
+            assert (
+                totp_verify(self.SECRET, self._code(offset), window=2)
+                == self.STEP + offset
+            )
+
+    def test_malformed_codes_are_refused(self):
+        code = self._code()
+        for bad in ["", code[:-1], code + "0", "abcdef", "\u0661" * 6, f"{code[:5]}x"]:
+            assert totp_verify(self.SECRET, bad) is None, bad
+        assert totp_verify(self.SECRET, f" {code[:3]} {code[3:]} ") == self.STEP
+
+    def test_secret_is_read_leniently_and_refused_when_not_base32(self):
+        for spelling in [
+            "jbswy3dpehpk3pxp",
+            "JBSW Y3DP EHPK 3PXP",
+            "JBSWY3DPEHPK3PXP====",
+        ]:
+            assert totp_verify(spelling, self._code()) == self.STEP
+        for bad in ["", "not base32!", "JBSWY3DPEHPK3PX1"]:
+            with pytest.raises(ValueError, match="base32"):
+                totp_verify(bad, self._code())
+
+    def test_window_must_be_a_non_negative_integer(self):
+        for window in [-1, True, 1.5]:
+            with pytest.raises(ValueError, match="window"):
+                totp_verify(self.SECRET, "000000", window=window)  # ty: ignore[invalid-argument-type]
+
+    def test_generate_secret(self):
+        secrets_ = {totp_generate_secret() for _ in range(20)}
+        assert len(secrets_) == 20
+        for secret in secrets_:
+            assert len(secret) == 32
+            assert len(base64.b32decode(secret)) == 20
+
+    def test_provisioning_uri_follows_the_key_uri_format(self):
+        uri = totp_provisioning_uri(self.SECRET, "alice@example.com", "Acme Corp")
+        assert uri == (
+            "otpauth://totp/Acme%20Corp:alice%40example.com"
+            "?secret=JBSWY3DPEHPK3PXP&issuer=Acme%20Corp"
+        )
+        for account, issuer in [
+            ("a:b", "Acme"),
+            ("alice", "Ac:me"),
+            ("", "Acme"),
+            ("alice", ""),
+        ]:
+            with pytest.raises(ValueError, match="colon"):
+                totp_provisioning_uri(self.SECRET, account, issuer)
+        with pytest.raises(ValueError, match="base32"):
+            totp_provisioning_uri("not base32!", "alice", "Acme")
+
+    def test_interoperates_with_pyotp(self):
+        secret = totp_generate_secret()
+        uri = totp_provisioning_uri(secret, "alice@example.com", "Acme Corp")
+        reference = pyotp.parse_uri(uri)
+        assert isinstance(reference, pyotp.TOTP)
+        assert (reference.secret, reference.name, reference.issuer) == (
+            secret,
+            "alice@example.com",
+            "Acme Corp",
+        )
+        assert totp_verify(secret, reference.at(self.NOW)) == self.STEP
 
 
 def _bearer_scope(token: str) -> dict:

@@ -1,5 +1,7 @@
+import time
 from urllib.parse import parse_qs, urlsplit
 
+import pyotp
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -134,6 +136,58 @@ def test_websocket_tickets():
         client.websocket_connect(f"/ws?ticket={ticket}"),
     ):
         pass
+
+
+def test_two_factor(monkeypatch):
+    from docs_src.recipes.two_factor import app
+
+    now = [int(time.time())]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    good = {"username": "alice", "password": "wonderland"}
+
+    laptop = TestClient(app, base_url=HTTPS)
+    assert laptop.post("/login", json=good).json() == {"mfa_required": False}
+    assert laptop.post("/payouts").status_code == 401
+    authenticator = pyotp.parse_uri(laptop.post("/2fa/enroll").json()["uri"])
+    assert isinstance(authenticator, pyotp.TOTP)
+    assert laptop.post("/2fa/confirm", json={"code": "000000"}).status_code == 400
+    confirmed = laptop.post("/2fa/confirm", json={"code": authenticator.at(now[0])})
+    recovery_codes = confirmed.json()["recovery_codes"]
+    assert len(recovery_codes) == 10
+    assert laptop.post("/payouts").json() == {"approved_by": "alice"}
+
+    phone = TestClient(app, base_url=HTTPS)
+    assert phone.post("/login", json=good).json() == {"mfa_required": True}
+    pending = phone.cookies["__Host-mfa-pending"]
+    assert phone.post("/payouts").status_code == 401
+    assert phone.post("/2fa/confirm", json={"code": "000000"}).status_code == 401
+    forged = TestClient(app, base_url=HTTPS)
+    forged.cookies.set("__Host-session", pending)
+    assert forged.post("/2fa/confirm", json={"code": "000000"}).status_code == 401
+
+    replay = {"code": authenticator.at(now[0])}
+    assert phone.post("/login/verify", json=replay).status_code == 401
+    now[0] += 30
+    fresh_code = {"code": authenticator.at(now[0])}
+    assert phone.post("/login/verify", json=fresh_code).json() == {
+        "recovery_codes_left": 10
+    }
+    assert "__Host-mfa-pending" not in phone.cookies
+    assert phone.post("/payouts").json() == {"approved_by": "alice"}
+    assert phone.post("/login/verify", json=fresh_code).status_code == 401
+
+    tablet = TestClient(app, base_url=HTTPS)
+    tablet.post("/login", json=good)
+    used = {"code": recovery_codes[0].upper()}
+    assert tablet.post("/login/verify", json=used).json() == {
+        "recovery_codes_left": 9
+    }
+    assert tablet.post("/payouts").status_code == 200
+    tablet.post("/login", json=good)
+    assert tablet.post("/login/verify", json=used).status_code == 401
+
+    assert phone.post("/2fa/disable").json() == {"ok": True}
+    assert phone.post("/login", json=good).json() == {"mfa_required": False}
 
 
 def test_audit_routes():
