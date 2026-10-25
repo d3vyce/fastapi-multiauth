@@ -25,6 +25,8 @@ Passwords are stored as salted scrypt hashes and compared with `hmac.compare_dig
 | `secure` | `True` | Turn off only for local HTTP development. |
 | `samesite` | `"lax"` | `"strict"` or `"none"`. |
 | `session_id` | `False` | See [revocable sessions](#revocable-sessions). |
+| `csrf` | `False` | Refuse requests from other origins. See [CSRF](#csrf). |
+| `trusted_origins` | `()` | Other origins `csrf` lets through. |
 
 !!! info "Signed is not encrypted"
     Anyone holding the cookie can read its value. Store an id in it, never a secret.
@@ -34,7 +36,20 @@ Passwords are stored as salted scrypt hashes and compared with `hmac.compare_dig
 
 ## CSRF
 
-Browsers send cookies with every request to your site, whoever triggered it. `samesite="lax"` blocks most cross-site requests but not all of them. Protect cookie-authenticated `POST`, `PUT`, `PATCH` and `DELETE` routes with a CSRF token or an `Origin` check, or use `samesite="strict"`.
+Browsers send cookies with every request to your site, whoever triggered it. `samesite="lax"` blocks most cross-site requests but not all of them. Set `csrf=True` to refuse the rest:
+
+```python
+--8<-- "docs_src/cookie_sessions/csrf.py"
+```
+
+Every request except `GET`, `HEAD` and `OPTIONS` must now come from your own origin, or from one listed in `trusted_origins`, such as a frontend on its own domain. Anything else gets a **403** before your validator runs. A sibling subdomain counts as another origin.
+
+The check reads `Sec-Fetch-Site`, which browsers set and pages cannot forge, and falls back to comparing `Origin` with the `Host` header for older browsers. Behind a proxy, keep the `Host` header intact or list your public origin in `trusted_origins`.
+
+!!! warning "Scripts and tests"
+    A request carrying neither header is refused too. Every browser released since 2020 sends one, so only non-browser clients are affected: send `Sec-Fetch-Site: same-origin` from your tests, and give scripts a bearer token instead of a cookie.
+
+`GET` routes are never checked, so keep them free of side effects.
 
 ## Key rotation
 
