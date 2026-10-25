@@ -3320,6 +3320,31 @@ class TestAuthenticatedAtHook:
         assert unsigned.authenticated_at(VALID_COOKIE) is None
         assert _HeaderAuth(secret="s3cr3t").authenticated_at("s3cr3t") is None
 
+    def test_a_custom_source_dates_and_levels_its_own_credentials(self):
+        """Overriding the readers lets fresh() and stepped_up() run without one."""
+        proven = {
+            "recent": (time.time(), "mfa"),
+            "old": (time.time() - 600, "mfa"),
+            "weak": (time.time(), "pwd"),
+        }
+
+        class _ProvenAuth(_HeaderAuth):
+            async def authenticate(self, credential: str) -> dict:
+                if credential not in proven:
+                    raise UnauthorizedError()
+                return {"token": credential}
+
+            def authenticated_at(self, credential: str) -> float:
+                return proven[credential][0]
+
+            def authenticated_acr(self, credential: str) -> str:
+                return proven[credential][1]
+
+        client = _client(_ProvenAuth("unused").fresh(300).stepped_up(["mfa"]))
+        for token, status in [("recent", 200), ("old", 401), ("weak", 401)]:
+            response = client.get("/me", headers={"X-Token": token})
+            assert response.status_code == status, token
+
 
 class TestFreshness:
     """fresh(): a credential proven too long ago gets an RFC 9470 step-up 401."""
@@ -5125,6 +5150,51 @@ class TestCookieAssurance:
         )
         response = _client(sid_auth).get("/me", cookies={"session": legacy_sid})
         assert response.json() == {"session": VALID_COOKIE, "sid": "abc"}
+
+    def test_the_guards_reuse_the_verified_cookie(self, monkeypatch):
+        """fresh() and stepped_up() read the cookie checked by authentication."""
+        unsigned: list[bytes] = []
+        unsign = TimestampSigner.unsign
+
+        def counting(self, signed_value, *args, **kwargs):
+            unsigned.append(signed_value)
+            return unsign(self, signed_value, *args, **kwargs)
+
+        monkeypatch.setattr(TimestampSigner, "unsign", counting)
+        auth = _signed_cookie_auth()
+        client = _client(auth.fresh(300).stepped_up(["mfa"]))
+        for acr, status in [("mfa", 200), ("pwd", 401), (None, 401)]:
+            response = Response()
+            auth.set_cookie(response, VALID_COOKIE, acr=acr)
+            unsigned.clear()
+            cookies = {"session": _cookie_value(response)}
+            assert client.get("/me", cookies=cookies).status_code == status, acr
+            assert len(unsigned) == 1, acr
+
+        # A cookie from before acr/amr fails the current salt, then verifies.
+        legacy = _stock_signer(COOKIE_SECRET).sign(VALID_COOKIE.encode()).decode()
+        unsigned.clear()
+        assert client.get("/me", cookies={"session": legacy}).status_code == 401
+        assert len(unsigned) == 2
+
+    def test_an_override_without_the_request_still_meets_the_guards(self):
+        """Without the request, the guards verify the cookie again."""
+
+        class _StaleCookieAuth(APIKeyCookieAuth):
+            async def authenticate_scoped(  # ty: ignore[invalid-method-override]
+                self, credential: str, scopes: list[str]
+            ) -> Any:
+                return await super().authenticate_scoped(credential, scopes)
+
+        auth = _StaleCookieAuth(
+            "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
+        )
+        client = _client(auth.fresh(300).stepped_up(["mfa"]))
+        for acr, status in [("mfa", 200), ("pwd", 401)]:
+            response = Response()
+            auth.set_cookie(response, VALID_COOKIE, acr=acr)
+            cookies = {"session": _cookie_value(response)}
+            assert client.get("/me", cookies=cookies).status_code == status, acr
 
     def test_the_level_cannot_be_forged(self):
         auth = _signed_cookie_auth()
