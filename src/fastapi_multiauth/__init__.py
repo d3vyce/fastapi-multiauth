@@ -35,6 +35,7 @@ from .sources import (
     OpenIdConnectAuth,
 )
 from .surface import RouteAuth, SchemeRequirement, auth_surface
+from .totp import totp_generate_secret, totp_provisioning_uri, totp_verify
 from .utils import (
     checksum_token_generator,
     hash_token,
@@ -72,6 +73,9 @@ __all__ = [
     "checksum_token_generator",
     "hash_token",
     "oauth",
+    "totp_generate_secret",
+    "totp_provisioning_uri",
+    "totp_verify",
     "verify_token_checksum",
     "verify_token_hash",
 ]

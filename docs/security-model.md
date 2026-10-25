@@ -14,6 +14,7 @@ What the library takes care of, and what stays with you. To report a vulnerabili
 - **Cross-site requests**: with [`csrf=True`](guide/cookie-sessions.md#csrf), a cookie source refuses requests sent from another origin.
 - **Stolen tokens**: a [DPoP](guide/jwt-and-oauth2.md#sender-constrained-tokens-dpop)-bound token is refused without a fresh proof signed by its key.
 - **Forged webhooks**: [`HMACSignatureAuth`](guide/webhooks.md) checks the sender's signature over the raw body, and refuses an old timestamp when the sender sends one.
+- **Replayed one-time codes**: [`totp_verify`][fastapi_multiauth.totp_verify] refuses a code from a time step already used, given the `last_step` you stored.
 - **Open redirects**: the post-login destination is checked, relative paths only by default.
 - **Timing attacks**: secrets, tokens and signatures are compared in constant time.
 - **Misconfiguration**: short secrets, plain-HTTP endpoints, scopes a validator cannot check, and cookie settings a browser would drop are refused loudly instead of being skipped.
@@ -23,7 +24,8 @@ What the library takes care of, and what stays with you. To report a vulnerabili
 - **Your validator.** The library hands you a credential; deciding whether it is valid is your code.
 - **Storage.** Hash passwords with argon2, scrypt or bcrypt. [`hash_token`][fastapi_multiauth.hash_token] (SHA-256) is for random tokens only.
 - **HTTPS** for your own app.
-- **Rate limiting** on login and token endpoints. Refusals are [logged](guide/logging.md) so you can act on them.
+- **TOTP secrets.** Encrypt them at rest: unlike a password, a TOTP secret cannot be stored as a hash. See the [two-factor recipe](recipes/two-factor.md).
+- **Rate limiting** on login, one-time code and token endpoints. Refusals are [logged](guide/logging.md) so you can act on them.
 - **CSRF** on cookie-authenticated routes, unless you turn on [`csrf=True`](guide/cookie-sessions.md#csrf). Either way, keep `GET` routes free of side effects.
 
 ## Good to know

@@ -32,6 +32,9 @@ from fastapi_multiauth import (
     auth_surface,
     checksum_token_generator,
     hash_token,
+    totp_generate_secret,
+    totp_provisioning_uri,
+    totp_verify,
     verify_token_checksum,
     verify_token_hash,
 )
@@ -124,6 +127,16 @@ Guide: [issuing and storing tokens](guide/bearer-tokens.md#issuing-and-storing-t
 ## ::: fastapi_multiauth.checksum_token_generator
 
 ## ::: fastapi_multiauth.verify_token_checksum
+
+## Second factor
+
+Recipe: [two-factor login](recipes/two-factor.md).
+
+## ::: fastapi_multiauth.totp_generate_secret
+
+## ::: fastapi_multiauth.totp_provisioning_uri
+
+## ::: fastapi_multiauth.totp_verify
 
 ## Exceptions
 

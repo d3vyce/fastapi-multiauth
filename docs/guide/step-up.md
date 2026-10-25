@@ -41,7 +41,7 @@ A signed cookie carries its own level: pass `acr=` and `amr=` to `set_cookie`, a
 --8<-- "docs_src/step_up/second_factor.py"
 ```
 
-Call `sign_in` from your login route once the password matches: the session starts at `aal1`. The OTP route re-issues the cookie at `aal2`, adding `otp` to the methods it already had, and `/payouts` refuses anything less. The level names are yours to pick; these follow [NIST SP 800-63B](https://pages.nist.gov/800-63-4/sp800-63b.html).
+Call `sign_in` from your login route once the password matches: the session starts at `aal1`. The OTP route re-issues the cookie at `aal2`, adding `otp` to the methods it already had, and `/payouts` refuses anything less. The level names are yours to pick; these follow [NIST SP 800-63B](https://pages.nist.gov/800-63-4/sp800-63b.html). For the full flow with real TOTP codes, a pending-login cookie and recovery codes, see the [two-factor recipe](../recipes/two-factor.md).
 
 `session.acr_of(request)` and `session.amr_of(request)` read the current cookie's level and methods. Both are signed with the value, so the client cannot raise its own level, and a cookie set without them never passes `stepped_up()`.
 
