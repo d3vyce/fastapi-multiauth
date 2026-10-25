@@ -21,4 +21,6 @@ Each [`RouteAuth`][fastapi_multiauth.RouteAuth] tells you:
 `scopes`
 :   Every scope named on the route.
 
+Each [`SchemeRequirement`][fastapi_multiauth.SchemeRequirement] in `alternatives` also says whether it refuses cross-origin requests: `csrf` is `False` for a cookie source without [`csrf=True`](cookie-sessions.md#csrf).
+
 To fail CI on an unguarded route, see the [audit recipe](../recipes/audit-routes.md).

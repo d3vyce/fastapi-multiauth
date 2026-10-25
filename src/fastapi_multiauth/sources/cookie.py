@@ -5,19 +5,21 @@ import json
 import secrets
 from collections.abc import Callable, Sequence
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from fastapi import Response
 from fastapi.requests import HTTPConnection
 from fastapi.security import APIKeyCookie
 from itsdangerous import BadSignature, SignatureExpired, TimestampSigner
 
-from fastapi_multiauth.exceptions import UnauthorizedError
+from fastapi_multiauth.exceptions import ForbiddenError, UnauthorizedError
 
 from ..abc import ValidatedAuthSource, _accepts_kwarg, _is_header_token
-from ..utils import b64url_decode, b64url_encode, refusal
+from ..utils import b64url_decode, b64url_encode, normalize_origin, refusal
 
 _MIN_SECRET_KEY_BYTES = 32
 _SALT_PREFIX = "fastapi-multiauth.cookie."
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 SameSite = Literal["lax", "strict", "none"]
 
@@ -54,6 +56,23 @@ def _check_name_prefix(
             f'cookie {name!r} requires path="/" and no domain: browsers drop a '
             "__Host- cookie otherwise"
         )
+
+
+def _normalize_origins(origins: Sequence[str]) -> frozenset[str]:
+    """Validate `trusted_origins` as serialized origins: `scheme://host[:port]`."""
+    if isinstance(origins, str):
+        raise TypeError("trusted_origins must be a sequence of origins, not a string")
+    return frozenset(
+        normalize_origin(origin, "each trusted_origins entry") for origin in origins
+    )
+
+
+def _origin_host(origin: str) -> str | None:
+    """The `host[:port]` of an `Origin` header, `None` when it has none."""
+    try:
+        return urlsplit(origin).netloc.lower() or None
+    except ValueError:
+        return None
 
 
 def _encode_assurance(acr: str | None, amr: Sequence[str] | None) -> str:
@@ -115,6 +134,12 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         session_id: Give each session a random id, passed to the validator
             as `session_id`, so sessions can be revoked. Needs a
             `secret_key`; turning it on or off logs existing sessions out.
+        csrf: Refuse cross-origin requests with a 403, judged from the
+            `Sec-Fetch-Site` and `Origin` headers browsers send. Applies to
+            every method but `GET`, `HEAD` and `OPTIONS`, and to WebSocket
+            handshakes. A request carrying neither header is refused too.
+        trusted_origins: Other origins the CSRF check lets through, such as
+            `"https://app.example.com"`. Needs `csrf=True`.
         ttl: Lifetime in seconds, also checked server-side when signed.
         secure: Send the cookie over HTTPS only. Turn off for local HTTP only.
         samesite: The `SameSite` attribute: `"lax"`, `"strict"` or `"none"`.
@@ -136,6 +161,8 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         *,
         secret_key: str | Sequence[str] | None = None,
         session_id: bool = False,
+        csrf: bool = False,
+        trusted_origins: Sequence[str] = (),
         ttl: int = 86400,
         secure: bool = True,
         samesite: SameSite = "lax",
@@ -162,6 +189,13 @@ class APIKeyCookieAuth(ValidatedAuthSource):
                     "parameter: the minted id is injected on every call"
                 )
         self._session_id = session_id
+        self._trusted_origins = _normalize_origins(trusted_origins)
+        if self._trusted_origins and not csrf:
+            raise ValueError(
+                "trusted_origins requires csrf=True: without the check every "
+                "origin is let through"
+            )
+        self._csrf = csrf
         # itsdangerous verifies against every key in the list but signs with
         # the last one, so reverse them to make the first configured key the signer.
         # The salt also separates the payload layouts.
@@ -303,6 +337,24 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         amr = self._assurance_of(request.cookies.get(self._name)).get("amr")
         return tuple(amr) if amr is not None else None
 
+    def _check_origin(self, request: HTTPConnection | None) -> None:
+        """Refuse a request sent from another origin, as a CSRF attack is."""
+        if request is None:
+            raise refusal(ForbiddenError(), "missing_origin")
+        if request.scope["type"] == "http" and request.scope["method"] in _SAFE_METHODS:
+            return
+        site = request.headers.get("sec-fetch-site")
+        origin = request.headers.get("origin")
+        if site in ("same-origin", "none") or origin in self._trusted_origins:
+            return
+        if site is None:
+            if origin is None:
+                raise refusal(ForbiddenError(), "missing_origin")
+            host = request.headers.get("host")
+            if host and _origin_host(origin) == host.lower():
+                return
+        raise refusal(ForbiddenError(), "cross_origin")
+
     async def authenticate_scoped(
         self,
         credential: str,
@@ -310,8 +362,10 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         *,
         request: HTTPConnection | None = None,
     ) -> Any:
-        """Verify the cookie, then pass its value on to the validator."""
+        """Verify the cookie and its origin, then pass its value on to the validator."""
         plain = self._verify(credential)
+        if self._csrf:
+            self._check_origin(request)
         if not self._session_id:
             return await self._call_validator(plain, scopes=scopes, request=request)
         sid, _, value = plain.partition(".")

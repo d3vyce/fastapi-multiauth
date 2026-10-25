@@ -26,12 +26,16 @@ class SchemeRequirement:
         optional: Whether a request without a credential passes, `None`
             when the scheme does not say. Always `False` inside a
             required `MultiAuth`.
+        csrf: Whether the scheme refuses cross-origin requests, as
+            `APIKeyCookieAuth(csrf=True)` does; `False` for a cookie without
+            the check, `None` when the scheme does not say.
     """
 
     scheme_name: str | None
     source: str
     scopes: tuple[str, ...]
     optional: bool | None
+    csrf: bool | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -90,6 +94,7 @@ def _requirements(
             source=type(source).__name__,
             scopes=scopes,
             optional=optional,
+            csrf=source._csrf if isinstance(source, AuthSource) else None,
         )
         for source in sources
     )

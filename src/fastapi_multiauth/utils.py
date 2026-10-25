@@ -14,6 +14,7 @@ import zlib
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, TypeVar
+from urllib.parse import urlsplit
 
 import anyio.to_thread
 from fastapi import HTTPException
@@ -32,6 +33,32 @@ def b64url_decode(text: str) -> bytes:
         ValueError: If `text` is not base64url.
     """
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def normalize_origin(origin: str, label: str) -> str:
+    """Validate a configured origin, `scheme://host[:port]`, and normalize it.
+
+    Returns:
+        The origin lowercased, without its scheme's default port.
+
+    Raises:
+        ValueError: If `origin` is not an http(s) origin, or has a path,
+            a trailing slash or credentials. `label` names it in the message.
+    """
+    lowered = origin.lower()
+    parts = urlsplit(lowered)
+    if (
+        parts.scheme not in ("http", "https")
+        or not parts.hostname
+        or "@" in parts.netloc
+        or lowered != f"{parts.scheme}://{parts.netloc}"
+    ):
+        raise ValueError(
+            f"{label} must be an origin such as 'https://app.example.com', "
+            f"without path or trailing slash (got {origin!r})"
+        )
+    default_port = ":443" if parts.scheme == "https" else ":80"
+    return f"{parts.scheme}://{parts.netloc.removesuffix(default_port)}"
 
 
 def hash_token(token: str) -> str:

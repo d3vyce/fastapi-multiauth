@@ -39,6 +39,8 @@ Records never contain the credential, its hash, or the identity. Correlate with 
 | `malformed` | a Basic header or JWT header that does not parse |
 | `stale` | outside the [`fresh()`](step-up.md#recent-login-fresh) window |
 | `insufficient_acr` | below the [`stepped_up()`](step-up.md#strong-login-stepped_up) level |
+| `cross_origin` | a cookie request from another origin, with [`csrf=True`](cookie-sessions.md#csrf) (403) |
+| `missing_origin` | a cookie request carrying neither `Sec-Fetch-Site` nor `Origin`, with `csrf=True` (403) |
 | `insufficient_scope` | a valid JWT missing a route scope (403) |
 | `unknown_key` | a JWT signed with a key the provider does not publish |
 | `jwks_unavailable` | the provider's keys cannot be fetched (503) |

@@ -130,6 +130,22 @@ def test_cookie_revocable():
     assert client.get("/me").status_code == 401
 
 
+def test_cookie_csrf():
+    from docs_src.cookie_sessions.csrf import session
+
+    client = _client("cookie_sessions.csrf", base_url=HTTPS)
+    _sign_in(client, session, "1")
+    body = {"email": "alice@wonderland.example"}
+    for headers in [
+        {"Sec-Fetch-Site": "same-origin"},
+        {"Origin": "https://testserver"},
+        {"Origin": "https://app.example.com"},
+    ]:
+        assert client.post("/me/email", json=body, headers=headers).status_code == 200
+    for headers in [{"Sec-Fetch-Site": "cross-site"}, {"Origin": "https://evil.example"}, {}]:
+        assert client.post("/me/email", json=body, headers=headers).status_code == 403
+
+
 def test_api_key_header():
     client = _client("api_keys.header")
     ok = client.get("/reports", headers={"X-API-Key": "key-for-reporting"})
@@ -254,12 +270,12 @@ def test_websocket():
     same_origin = {"cookie": cookie, "origin": "https://app.example.com"}
     with client.websocket_connect("/ws", headers=same_origin) as ws:
         assert ws.receive_json() == {"hello": "alice"}
-    foreign = {"cookie": cookie, "origin": "https://evil.example"}
-    with (
-        pytest.raises(WebSocketDisconnect),
-        client.websocket_connect("/ws", headers=foreign),
-    ):
-        pass
+    for headers in [{"cookie": cookie, "origin": "https://evil.example"}, {"cookie": cookie}]:
+        with (
+            pytest.raises(WebSocketDisconnect),
+            client.websocket_connect("/ws", headers=headers),
+        ):
+            pass
     with pytest.raises(WebSocketDisconnect), client.websocket_connect("/ws"):
         pass
 

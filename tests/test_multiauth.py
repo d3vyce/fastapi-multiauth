@@ -5062,6 +5062,187 @@ class TestCookieAssurance:
                 _signed_cookie_auth().set_cookie(Response(), VALID_COOKIE, **kwargs)
 
 
+class TestCookieCsrf:
+    """csrf=True: cookie requests from another origin are refused with a 403."""
+
+    TRUSTED = "https://app.example.com"
+    CROSS_SITE: ClassVar[dict[str, str]] = {"Sec-Fetch-Site": "cross-site"}
+
+    def _client(self, auth: APIKeyCookieAuth) -> TestClient:
+        def setup(app: FastAPI):
+            @app.api_route(
+                "/me",
+                methods=["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"],
+            )
+            async def me(user=Security(auth)):
+                return user
+
+            @app.websocket("/ws")
+            async def ws(websocket: WebSocket, user=Security(auth)):
+                await websocket.accept()
+                await websocket.send_json(user)
+                await websocket.close()
+
+        client = TestClient(_app(setup))
+        client.cookies.set("session", auth._sign(VALID_COOKIE))
+        return client
+
+    def _status(self, client: TestClient, method: str = "POST", **headers: str) -> int:
+        return client.request(method, "/me", headers=headers).status_code
+
+    def test_same_origin_requests_pass(self):
+        client = self._client(_signed_cookie_auth(csrf=True))
+        for headers in [
+            {"Sec-Fetch-Site": "same-origin"},
+            {"Sec-Fetch-Site": "none"},
+            {"Origin": "http://testserver"},
+            {"Origin": "http://TestServer"},
+        ]:
+            for method in ["POST", "PUT", "PATCH", "DELETE"]:
+                assert self._status(client, method, **headers) == 200, headers
+
+    def test_cross_origin_requests_are_refused(self):
+        client = self._client(_signed_cookie_auth(csrf=True))
+        for headers in [
+            {"Sec-Fetch-Site": "cross-site"},
+            {"Sec-Fetch-Site": "same-site"},
+            {"Sec-Fetch-Site": "cross-site", "Origin": "http://testserver"},
+            {"Origin": "https://evil.example"},
+            {"Origin": "http://testserver.evil.example"},
+            {"Origin": "http://testserver:8080"},
+            {"Origin": "null"},
+            {"Origin": "http://[::1"},
+            {},
+        ]:
+            for method in ["POST", "PUT", "PATCH", "DELETE"]:
+                assert self._status(client, method, **headers) == 403, headers
+            response = client.post("/me", headers=headers)
+            assert response.json() == {"detail": "Forbidden"}
+
+    def test_safe_methods_are_not_checked(self):
+        client = self._client(_signed_cookie_auth(csrf=True))
+        for method in ["GET", "HEAD", "OPTIONS"]:
+            assert self._status(client, method, **self.CROSS_SITE) == 200
+            assert self._status(client, method) == 200
+
+    def test_trusted_origins_pass(self):
+        client = self._client(
+            _signed_cookie_auth(csrf=True, trusted_origins=["HTTPS://App.Example.com"])
+        )
+        assert self._status(client, Origin=self.TRUSTED, **self.CROSS_SITE) == 200
+        assert self._status(client, Origin=self.TRUSTED) == 200
+        assert (
+            self._status(
+                client, Origin=f"{self.TRUSTED}.evil.example", **self.CROSS_SITE
+            )
+            == 403
+        )
+        assert (
+            self._status(client, Origin="http://app.example.com", **self.CROSS_SITE)
+            == 403
+        )
+
+        client = self._client(
+            _signed_cookie_auth(
+                csrf=True, trusted_origins=["https://app.example.com:443"]
+            )
+        )
+        assert self._status(client, Origin=self.TRUSTED, **self.CROSS_SITE) == 200
+        client = self._client(
+            _signed_cookie_auth(
+                csrf=True, trusted_origins=["http://app.example.com:8443"]
+            )
+        )
+        assert (
+            self._status(
+                client, Origin="http://app.example.com:8443", **self.CROSS_SITE
+            )
+            == 200
+        )
+
+    def test_an_invalid_cookie_is_refused_as_invalid(self):
+        client = self._client(_signed_cookie_auth(csrf=True))
+        client.cookies.set("session", "forged")
+        assert self._status(client, **self.CROSS_SITE) == 401
+        client.cookies.clear()
+        assert self._status(client, **self.CROSS_SITE) == 401
+
+    def test_off_by_default(self):
+        client = self._client(_signed_cookie_auth())
+        assert self._status(client, **self.CROSS_SITE) == 200
+        assert self._status(client) == 200
+
+    def test_websocket_handshakes_are_checked(self):
+        client = self._client(
+            _signed_cookie_auth(csrf=True, trusted_origins=[self.TRUSTED])
+        )
+        for headers in [{"Origin": self.TRUSTED}, {"Origin": "http://testserver"}]:
+            with client.websocket_connect("/ws", headers=headers) as websocket:
+                assert websocket.receive_json() == {"session": VALID_COOKIE}
+        for headers in [{"Origin": "https://evil.example"}, {}]:
+            with (
+                pytest.raises(WebSocketDenialResponse) as exc_info,
+                client.websocket_connect("/ws", headers=headers),
+            ):
+                pass
+            assert exc_info.value.status_code == 403
+
+    @pytest.mark.anyio
+    async def test_no_request_fails_closed(self):
+        auth = _signed_cookie_auth(csrf=True)
+        with pytest.raises(ForbiddenError):
+            await auth.authenticate(auth._sign(VALID_COOKIE))
+
+    def test_refusals_are_logged(self, caplog):
+        caplog.set_level(logging.WARNING, logger="fastapi_multiauth")
+        client = self._client(_signed_cookie_auth(csrf=True))
+        self._status(client, **self.CROSS_SITE)
+        self._status(client)
+        assert [(r.auth_reason, r.auth_status) for r in caplog.records] == [
+            ("cross_origin", 403),
+            ("missing_origin", 403),
+        ]
+
+    def test_auth_surface_reports_the_check(self):
+        def setup(app: FastAPI):
+            for path, auth in [
+                ("/csrf", _signed_cookie_auth(csrf=True)),
+                ("/cookie", _signed_cookie_auth()),
+                ("/bearer", HTTPBearerAuth(simple_validator)),
+            ]:
+                app.add_api_route(
+                    path, lambda user=Security(auth): user, methods=["POST"]
+                )
+
+        surface = {route.path: route for route in auth_surface(_app(setup))}
+        assert [
+            surface[path].alternatives[0][0].csrf
+            for path in ("/csrf", "/cookie", "/bearer")
+        ] == [
+            True,
+            False,
+            None,
+        ]
+
+    def test_misconfiguration_rejected(self):
+        with pytest.raises(ValueError, match="trusted_origins requires csrf=True"):
+            _signed_cookie_auth(trusted_origins=[self.TRUSTED])
+        with pytest.raises(TypeError, match="not a string"):
+            _signed_cookie_auth(csrf=True, trusted_origins=self.TRUSTED)
+        for origin in [
+            "https://app.example.com/",
+            "https://app.example.com/path",
+            "https://app.example.com?x=1",
+            "https://user@app.example.com",
+            "app.example.com",
+            "ftp://app.example.com",
+            "null",
+            "*",
+        ]:
+            with pytest.raises(ValueError, match="trusted_origins entry"):
+                _signed_cookie_auth(csrf=True, trusted_origins=[origin])
+
+
 SECRET_CREDENTIAL = "s3cr3t-credential-value"
 
 

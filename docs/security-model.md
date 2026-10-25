@@ -11,6 +11,7 @@ What the library takes care of, and what stays with you. To report a vulnerabili
 - **Tampering**: cookies are signed (HMAC-SHA256), JWTs and ID tokens are verified, OAuth `state` is checked against CSRF.
 - **Confusion between sources**: a cookie signed for one cookie name is never accepted under another, and a JWKS-backed `JWTValidator` requires an `audience`.
 - **Downgrades**: OAuth, OIDC and JWKS URLs must be HTTPS, and `HS*` algorithms are refused against a provider's keys.
+- **Cross-site requests**: with [`csrf=True`](guide/cookie-sessions.md#csrf), a cookie source refuses requests sent from another origin.
 - **Open redirects**: the post-login destination is checked, relative paths only by default.
 - **Timing attacks**: secrets, tokens and signatures are compared in constant time.
 - **Misconfiguration**: short secrets, plain-HTTP endpoints, scopes a validator cannot check, and cookie settings a browser would drop are refused loudly instead of being skipped.
@@ -21,7 +22,7 @@ What the library takes care of, and what stays with you. To report a vulnerabili
 - **Storage.** Hash passwords with argon2, scrypt or bcrypt. [`hash_token`][fastapi_multiauth.hash_token] (SHA-256) is for random tokens only.
 - **HTTPS** for your own app.
 - **Rate limiting** on login and token endpoints. Refusals are [logged](guide/logging.md) so you can act on them.
-- **CSRF** on cookie-authenticated `POST`, `PUT`, `PATCH` and `DELETE` routes. See [Cookie sessions](guide/cookie-sessions.md#csrf).
+- **CSRF** on cookie-authenticated routes, unless you turn on [`csrf=True`](guide/cookie-sessions.md#csrf). Either way, keep `GET` routes free of side effects.
 
 ## Good to know
 
@@ -36,5 +37,5 @@ What the library takes care of, and what stays with you. To report a vulnerabili
 | --- | --- |
 | 401 | no credential, or an invalid one; carries a `WWW-Authenticate` challenge where the scheme has one |
 | 401 `insufficient_user_authentication` | valid, but authenticated too long ago or too weakly ([step-up](guide/step-up.md)) |
-| 403 | authenticated, but not allowed |
+| 403 | authenticated, but not allowed, or sent from another origin ([`csrf=True`](guide/cookie-sessions.md#csrf)) |
 | 503 | a provider's keys cannot be fetched and none are cached; clients should retry |

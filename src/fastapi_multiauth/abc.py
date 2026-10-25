@@ -244,6 +244,8 @@ class AuthSource(ABC):
     """The scopes this source publishes to OpenAPI, `None` when it has none."""
     _freshness: _Freshness | None = None
     _assurance: _Assurance | None = None
+    _csrf: bool | None = None
+    """Whether cross-origin requests are refused, `None` when the source does not say."""
     _logger: ClassVar[logging.Logger] = logger
     """Where this source logs its decisions: its module's logger."""
 
