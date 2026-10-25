@@ -133,6 +133,17 @@ def _step_up_optional_guard(owner: Any) -> str | None:
     return None
 
 
+def _is_header_token(value: Any) -> bool:
+    """Whether `value` fits a space-separated list inside a quoted-string."""
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value.isascii()
+        and value.isprintable()
+        and not any(char in value for char in ' "\\')
+    )
+
+
 def _validate_acr_values(acr_values: Sequence[str]) -> tuple[str, ...]:
     """Check `acr_values` can travel in the step-up challenge's quoted string."""
     if isinstance(acr_values, str):
@@ -141,13 +152,7 @@ def _validate_acr_values(acr_values: Sequence[str]) -> tuple[str, ...]:
     if not values:
         raise ValueError("acr_values must list at least one value")
     for value in values:
-        if not (
-            isinstance(value, str)
-            and value
-            and value.isascii()
-            and value.isprintable()
-            and not any(char in value for char in ' "\\')
-        ):
+        if not _is_header_token(value):
             raise ValueError(
                 f"each acr_values entry must be non-empty printable US-ASCII "
                 f"without spaces, quotes or backslashes (got {value!r}): the "
@@ -216,8 +221,8 @@ class _Assurance:
     """The levels set by `stepped_up()`."""
 
     acr_values: tuple[str, ...]
-    read: Callable[[Any], Awaitable[Any]]
-    """Caller-supplied reader of the identity's `acr`."""
+    read: Callable[[Any], Awaitable[Any]] | None
+    """Caller-supplied reader of the identity's `acr`, `None` to use the source's own."""
 
 
 class AuthSource(ABC):
@@ -225,7 +230,8 @@ class AuthSource(ABC):
 
     Subclass it to read a credential the built-in sources do not handle.
     Implement `extract()` and `authenticate()`; override `www_authenticate()`,
-    `authenticated_at()` or `authenticate_scoped()` when the source needs them.
+    `authenticated_at()`, `authenticated_acr()` or `authenticate_scoped()`
+    when the source needs them.
 
     Args:
         scheme: A `fastapi.security` scheme describing the source in OpenAPI.
@@ -443,11 +449,29 @@ class AuthSource(ABC):
         )
         return clone
 
+    def authenticated_acr(self, credential: str) -> Any:
+        """Return the `acr` a credential was proven at, for `stepped_up()`.
+
+        Override it in a source that carries the level in its own
+        credentials, as the signed cookie does.
+
+        Args:
+            credential: The credential returned by `extract()`.
+
+        Returns:
+            The level, `None` when the source cannot tell.
+        """
+        return None
+
+    def _carries_acr(self) -> bool:
+        """Whether this source can read a credential's level without a caller's help."""
+        return type(self).authenticated_acr is not AuthSource.authenticated_acr
+
     def stepped_up(
         self,
         acr_values: Sequence[str],
         *,
-        acr: Callable[..., Any],
+        acr: Callable[..., Any] | None = None,
     ) -> Self:
         """Return a copy that refuses a credential not proven at one of `acr_values`.
 
@@ -459,13 +483,16 @@ class AuthSource(ABC):
                 any one of them passes.
             acr: Sync or async callable taking the identity and returning the
                 `acr` it achieved, e.g. `lambda claims: claims.get("acr")`.
-                Any other value, `None` included, refuses the request.
+                Required when the source cannot read the level itself, and
+                overrides `authenticated_acr()` when given. Any value outside
+                `acr_values`, `None` included, refuses the request.
 
         Raises:
             TypeError: If `acr_values` is a bare string.
             ValueError: If `acr_values` is empty or holds a value that cannot
                 be sent in a header (whitespace, quotes, backslashes,
-                non-ASCII), or the copy is `optional()` or already has levels.
+                non-ASCII), the copy is `optional()` or already has levels,
+                or the level cannot be read.
         """
         values = _validate_acr_values(acr_values)
         if self._optional:
@@ -475,8 +502,15 @@ class AuthSource(ABC):
                 f"{type(self).__name__} already has acr_values: call "
                 "stepped_up() once, on the source or on the MultiAuth"
             )
+        if acr is None and not self._carries_acr():
+            raise ValueError(
+                f"{type(self).__name__} cannot read a credential's level: "
+                "stepped_up() needs acr=..."
+            )
         clone = copy.copy(self)
-        clone._assurance = _Assurance(acr_values=values, read=ensure_async(acr))
+        clone._assurance = _Assurance(
+            acr_values=values, read=ensure_async(acr) if acr else None
+        )
         return clone
 
     async def _enforce_step_up(self, credential: str, identity: Any) -> None:
@@ -487,7 +521,10 @@ class AuthSource(ABC):
         ):
             raise refusal(self._step_up_error(StaleCredentialError), "stale")
         if assurance is not None:
-            achieved = await assurance.read(identity)
+            if assurance.read is not None:
+                achieved = await assurance.read(identity)
+            else:
+                achieved = self.authenticated_acr(credential)
             if achieved not in assurance.acr_values:
                 raise refusal(
                     self._step_up_error(InsufficientAuthenticationError),

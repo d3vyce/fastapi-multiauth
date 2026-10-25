@@ -1,5 +1,6 @@
 """Standalone helpers: public token utilities plus internal source helpers."""
 
+import base64
 import functools
 import hashlib
 import hmac
@@ -17,6 +18,20 @@ from typing import Any, TypeVar
 import anyio.to_thread
 from fastapi import HTTPException
 from fastapi.requests import HTTPConnection
+
+
+def b64url_encode(data: bytes) -> str:
+    """Unpadded base64url, as JOSE, PKCE and the cookie payload carry bytes."""
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def b64url_decode(text: str) -> bytes:
+    """Decode unpadded base64url.
+
+    Raises:
+        ValueError: If `text` is not base64url.
+    """
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
 
 
 def hash_token(token: str) -> str:
