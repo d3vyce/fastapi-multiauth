@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import hmac
 import json
 import logging
 import math
@@ -38,6 +39,7 @@ from fastapi.security.base import SecurityBase
 from fastapi.testclient import TestClient
 from itsdangerous import TimestampSigner
 from jwt.algorithms import OKPAlgorithm, RSAAlgorithm
+from pydantic import BaseModel
 from starlette.testclient import WebSocketDenialResponse
 
 from fastapi_multiauth import (
@@ -47,6 +49,7 @@ from fastapi_multiauth import (
     AuthenticationMethodReference,
     AuthSource,
     ForbiddenError,
+    HMACSignatureAuth,
     HTTPBasicAuth,
     HTTPBearerAuth,
     InsufficientAuthenticationError,
@@ -5241,6 +5244,295 @@ class TestCookieCsrf:
         ]:
             with pytest.raises(ValueError, match="trusted_origins entry"):
                 _signed_cookie_auth(csrf=True, trusted_origins=[origin])
+
+
+WEBHOOK_SECRET = "webhook-secret-of-16-bytes-or-more"
+
+
+def _hmac_hex(secret: str, message: bytes) -> str:
+    return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
+
+
+class TestHMACSignatureAuth:
+    """Signed webhooks: HMAC-SHA256 of the raw body, timestamp optional."""
+
+    # Three header layouts, configured as their senders document them.
+    GITHUB: ClassVar[dict[str, Any]] = {
+        "header": "X-Hub-Signature-256",
+        "prefix": "sha256=",
+    }
+    STRIPE: ClassVar[dict[str, Any]] = {
+        "header": "Stripe-Signature",
+        "signature_key": "v1",
+        "timestamp_key": "t",
+    }
+    SLACK: ClassVar[dict[str, Any]] = {
+        "header": "X-Slack-Signature",
+        "prefix": "v0=",
+        "timestamp_header": "X-Slack-Request-Timestamp",
+        "signed_message": "v0:{timestamp}:{body}",
+    }
+    GENERIC: ClassVar[dict[str, Any]] = {
+        "header": "X-Signature",
+        "prefix": "sha256=",
+        "timestamp_header": "X-Timestamp",
+    }
+
+    # GitHub's and Slack's published test vectors.
+    GITHUB_SECRET = "It's a Secret to Everybody"
+    GITHUB_SIGNATURE = (
+        "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17"
+    )
+    SLACK_SECRET = "8f742231b10e8888abcd99yyyzzz85a5"
+    SLACK_TIMESTAMP = 1531420618
+    SLACK_BODY = (
+        "token=xyzz0WbapA4vBCDEFasx0q6G&team_id=T1DC2JH3J&team_domain=testteamnow"
+        "&channel_id=G8PSS9T3V&channel_name=foobar&user_id=U2CERLKJA"
+        "&user_name=roadrunner&command=%2Fwebhook-collect&text=&response_url="
+        "https%3A%2F%2Fhooks.slack.com%2Fcommands%2FT1DC2JH3J%2F397700885554"
+        "%2F96rGlfmibIGlgcZRskXaIFfN"
+        "&trigger_id=398738663015.47445629121.803a0bc887a14d10d2c447fce8b6703c"
+    )
+    SLACK_SIGNATURE = (
+        "v0=a2114d57b48eac39b9ad189dd8316235a7b4a8d21a10bd27519666489c69b503"
+    )
+
+    @staticmethod
+    def _client(source) -> TestClient:
+        class Event(BaseModel):
+            action: str
+
+        def setup(app: FastAPI):
+            @app.post("/hook")
+            async def hook(body: bytes = Security(source)):
+                return {"body": body.decode()}
+
+            @app.post("/typed", dependencies=[Security(source)])
+            async def typed(event: Event):
+                return {"action": event.action}
+
+        return TestClient(_app(setup))
+
+    @staticmethod
+    def _stamped(body: bytes, t: int | str | None = None) -> tuple[str, str]:
+        """A timestamp and the hex signature of `{timestamp}.{body}`."""
+        t = str(int(time.time()) if t is None else t)
+        return t, _hmac_hex(WEBHOOK_SECRET, f"{t}.".encode() + body)
+
+    def test_github_layout(self):
+        client = self._client(HMACSignatureAuth(self.GITHUB_SECRET, **self.GITHUB))
+        upper = "sha256=" + self.GITHUB_SIGNATURE.removeprefix("sha256=").upper()
+        for signature in [self.GITHUB_SIGNATURE, upper]:
+            response = client.post(
+                "/hook",
+                content=b"Hello, World!",
+                headers={"X-Hub-Signature-256": signature},
+            )
+            assert response.json() == {"body": "Hello, World!"}
+
+    def test_slack_layout(self):
+        client = self._client(HMACSignatureAuth(self.SLACK_SECRET, **self.SLACK))
+        headers = {
+            "X-Slack-Signature": self.SLACK_SIGNATURE,
+            "X-Slack-Request-Timestamp": str(self.SLACK_TIMESTAMP),
+        }
+        with patch("time.time", return_value=self.SLACK_TIMESTAMP + 10):
+            response = client.post("/hook", content=self.SLACK_BODY, headers=headers)
+        assert response.json() == {"body": self.SLACK_BODY}
+        with patch("time.time", return_value=self.SLACK_TIMESTAMP + 301):
+            response = client.post("/hook", content=self.SLACK_BODY, headers=headers)
+        assert response.status_code == 401
+
+    def test_stripe_layout(self):
+        source = HMACSignatureAuth(
+            ["whsec_new-secret-of-16-bytes", WEBHOOK_SECRET], **self.STRIPE
+        )
+        client = self._client(source)
+        body = b'{"type": "invoice.paid"}'
+        t, signature = self._stamped(body)
+        zeros = "0" * 64
+        for header in [
+            f"t={t},v1={signature}",
+            f"t={t}, v1={zeros}, v1={signature}, v0=x",
+        ]:
+            response = client.post(
+                "/hook", content=body, headers={"Stripe-Signature": header}
+            )
+            assert response.json() == {"body": body.decode()}, header
+        old_t, old_signature = self._stamped(body, int(time.time()) - 301)
+        for header in [
+            f"t={old_t},v1={old_signature}",
+            f"t={t},t={t},v1={signature}",
+            f"v1={signature}",
+            f"t={t}",
+            "garbage",
+        ]:
+            response = client.post(
+                "/hook", content=body, headers={"Stripe-Signature": header}
+            )
+            assert response.status_code == 401, header
+
+    def test_the_route_can_still_parse_the_body(self):
+        source = HMACSignatureAuth(WEBHOOK_SECRET, **self.GITHUB)
+        body = b'{"action": "opened"}'
+        response = self._client(source).post(
+            "/typed",
+            content=body,
+            headers={
+                "X-Hub-Signature-256": f"sha256={_hmac_hex(WEBHOOK_SECRET, body)}",
+                "Content-Type": "application/json",
+            },
+        )
+        assert response.json() == {"action": "opened"}
+
+    def test_the_timestamp_is_signed(self):
+        client = self._client(HMACSignatureAuth(WEBHOOK_SECRET, **self.GENERIC))
+        body = b"payload"
+        t, signature = self._stamped(body)
+        headers = {"X-Signature": f"sha256={signature}", "X-Timestamp": t}
+        assert client.post("/hook", content=body, headers=headers).status_code == 200
+        body_only = {
+            **headers,
+            "X-Signature": f"sha256={_hmac_hex(WEBHOOK_SECRET, body)}",
+        }
+        assert client.post("/hook", content=body, headers=body_only).status_code == 401
+        twice = [
+            ("X-Signature", f"sha256={signature}"),
+            ("X-Timestamp", t),
+            ("X-Timestamp", t),
+        ]
+        assert client.post("/hook", content=body, headers=twice).status_code == 401
+
+    def test_refusals_are_logged_with_their_reason(self, caplog):
+        caplog.set_level(logging.WARNING, logger="fastapi_multiauth")
+        client = self._client(HMACSignatureAuth(WEBHOOK_SECRET, **self.GENERIC))
+        body = b"payload"
+        t, signature = self._stamped(body)
+        good = f"sha256={signature}"
+        cases = [
+            ({"X-Signature": good, "X-Timestamp": t}, b"tampered", "invalid_signature"),
+            (
+                {"X-Signature": good.replace("sha256=", "sha1="), "X-Timestamp": t},
+                body,
+                "malformed",
+            ),
+            ({"X-Signature": good}, body, "malformed"),
+            ({"X-Signature": good, "X-Timestamp": "soon"}, body, "malformed"),
+            ({"X-Signature": good, "X-Timestamp": "0"}, body, "expired"),
+            ({"X-Signature": good, "X-Timestamp": "9" * 400}, body, "malformed"),
+            (
+                {"X-Signature": "sha256=not-hex", "X-Timestamp": t},
+                body,
+                "invalid_signature",
+            ),
+            ({"X-Signature": "sha256=", "X-Timestamp": t}, body, "invalid_signature"),
+        ]
+        for headers, content, reason in cases:
+            caplog.clear()
+            response = client.post("/hook", content=content, headers=headers)
+            assert response.status_code == 401, headers
+            assert "www-authenticate" not in response.headers
+            assert [r.auth_reason for r in caplog.records] == [reason], headers
+        other = HMACSignatureAuth("another-secret-of-16-bytes", **self.GENERIC)
+        response = self._client(other).post(
+            "/hook", content=body, headers={"X-Signature": good, "X-Timestamp": t}
+        )
+        assert response.status_code == 401
+        assert client.post("/hook", content=body).status_code == 401
+
+    def test_misuse_is_refused(self):
+        source = HMACSignatureAuth(WEBHOOK_SECRET, **self.GITHUB)
+
+        def setup(app: FastAPI):
+            @app.post("/scoped")
+            async def scoped(body=Security(source, scopes=["admin"])):
+                return {}
+
+            @app.post("/multi")
+            async def multi(body=Security(MultiAuth(source), scopes=["admin"])):
+                return {}
+
+            @app.websocket("/ws")
+            async def ws(websocket: WebSocket, body=Security(source)):
+                await websocket.accept()
+
+            async def consume(request: Request):
+                async for _ in request.stream():
+                    pass
+
+            @app.post("/consumed", dependencies=[Depends(consume), Security(source)])
+            async def consumed():
+                return {}
+
+        client = TestClient(_app(setup))
+        headers = {"X-Hub-Signature-256": f"sha256={'0' * 64}"}
+        for path in ["/scoped", "/multi"]:
+            with pytest.raises(
+                RuntimeError, match="cannot enforce the security scopes"
+            ):
+                client.post(path, headers=headers)
+        with (
+            pytest.raises(RuntimeError, match="signs the request body"),
+            client.websocket_connect("/ws", headers=headers),
+        ):
+            pass
+        with pytest.raises(RuntimeError, match="already consumed it"):
+            client.post("/consumed", content=b"command=deploy", headers=headers)
+
+    def test_misconfiguration_rejected(self):
+        secret_keys: list[Any] = ["short", [], [WEBHOOK_SECRET, "short"]]
+        for secret_key in secret_keys:
+            with pytest.raises(ValueError, match="secret_key"):
+                HMACSignatureAuth(secret_key, header="X-Signature")
+        for tolerance in [0, -1, math.inf, math.nan]:
+            with pytest.raises(ValueError, match="tolerance"):
+                HMACSignatureAuth(
+                    WEBHOOK_SECRET, header="X-Signature", tolerance=tolerance
+                )
+        cases: list[tuple[dict[str, Any], str]] = [
+            ({"prefix": "sha256=", "signature_key": "v1"}, "two header layouts"),
+            ({"timestamp_key": "t"}, "requires signature_key"),
+            (
+                {
+                    "signature_key": "v1",
+                    "timestamp_key": "t",
+                    "timestamp_header": "X-T",
+                },
+                "one of timestamp_key or timestamp_header",
+            ),
+            ({"signed_message": "{body}.signed"}, "must end with"),
+            ({"signed_message": "{body}{body}"}, "must end with"),
+            ({"signed_message": "{timestamp}.{body}"}, "exactly when a timestamp"),
+            ({"timestamp_header": "X-T", "signed_message": "{body}"}, "exactly when"),
+            (
+                {"timestamp_header": "X-T", "signed_message": "{ts}.{body}"},
+                "exactly when",
+            ),
+            (
+                {
+                    "timestamp_header": "X-T",
+                    "signed_message": "{timestamp}.{id}.{body}",
+                },
+                "only knows",
+            ),
+        ]
+        for kwargs, match in cases:
+            with pytest.raises(ValueError, match=match):
+                HMACSignatureAuth(WEBHOOK_SECRET, header="X-Signature", **kwargs)
+
+    def test_openapi(self):
+        schemes = (
+            self._client(HMACSignatureAuth(WEBHOOK_SECRET, **self.STRIPE))
+            .get("/openapi.json")
+            .json()["components"]["securitySchemes"]
+        )
+        assert schemes == {
+            "APIKeyHeader_Stripe-Signature": {
+                "type": "apiKey",
+                "in": "header",
+                "name": "Stripe-Signature",
+            }
+        }
 
 
 SECRET_CREDENTIAL = "s3cr3t-credential-value"

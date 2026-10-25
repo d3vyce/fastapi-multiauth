@@ -14,6 +14,7 @@ from fastapi_multiauth import (
     AuthSource,
     AuthenticationMethodReference,
     ForbiddenError,
+    HMACSignatureAuth,
     HTTPBasicAuth,
     HTTPBearerAuth,
     InsufficientAuthenticationError,
@@ -73,6 +74,8 @@ Request-time authentication dependencies. Guide: [the sources](guide/index.md#th
 ## ::: fastapi_multiauth.APIKeyQueryAuth
 
 ## ::: fastapi_multiauth.HTTPBasicAuth
+
+## ::: fastapi_multiauth.HMACSignatureAuth
 
 ## ::: fastapi_multiauth.OAuth2AuthorizationCodeBearerAuth
 

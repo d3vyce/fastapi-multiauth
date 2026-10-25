@@ -34,9 +34,9 @@ Records never contain the credential, its hash, or the identity. Correlate with 
 | `authenticated` | accepted |
 | `anonymous` | an `optional()` route served a caller without a credential |
 | `missing_credential` | no credential on a route that requires one |
-| `invalid_signature` | a signed cookie or JWT failed its signature check |
-| `expired` | a signed cookie past its `ttl`, or a JWT past its `exp` |
-| `malformed` | a Basic header or JWT header that does not parse |
+| `invalid_signature` | a signed cookie, JWT or webhook failed its signature check |
+| `expired` | a signed cookie past its `ttl`, a JWT past its `exp`, or a webhook timestamp outside its `tolerance` |
+| `malformed` | a Basic header, JWT header or webhook signature header that does not parse |
 | `stale` | outside the [`fresh()`](step-up.md#recent-login-fresh) window |
 | `insufficient_acr` | below the [`stepped_up()`](step-up.md#strong-login-stepped_up) level |
 | `cross_origin` | a cookie request from another origin, with [`csrf=True`](cookie-sessions.md#csrf) (403) |
