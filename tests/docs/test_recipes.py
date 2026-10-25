@@ -3,6 +3,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pyotp
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
@@ -139,7 +140,13 @@ def test_websocket_tickets():
 
 
 def test_two_factor(monkeypatch):
-    from docs_src.recipes.two_factor import app
+    from docs_src.recipes.two_factor import app, session
+
+    def amr(client: TestClient) -> tuple[str, ...] | None:
+        cookie = f"__Host-session={client.cookies['__Host-session']}".encode()
+        return session.amr_of(
+            Request({"type": "http", "headers": [(b"cookie", cookie)]})
+        )
 
     now = [int(time.time())]
     monkeypatch.setattr(time, "time", lambda: now[0])
@@ -173,6 +180,7 @@ def test_two_factor(monkeypatch):
         "recovery_codes_left": 10
     }
     assert "__Host-mfa-pending" not in phone.cookies
+    assert amr(phone) == ("pwd", "otp")
     assert phone.post("/payouts").json() == {"approved_by": "alice"}
     assert phone.post("/login/verify", json=fresh_code).status_code == 401
 
@@ -182,11 +190,22 @@ def test_two_factor(monkeypatch):
     assert tablet.post("/login/verify", json=used).json() == {
         "recovery_codes_left": 9
     }
+    assert amr(tablet) == ("pwd", "mfa")
     assert tablet.post("/payouts").status_code == 200
     tablet.post("/login", json=good)
     assert tablet.post("/login/verify", json=used).status_code == 401
 
-    assert phone.post("/2fa/disable").json() == {"ok": True}
+    for _ in range(4):
+        assert tablet.post("/login/verify", json={"code": "000000"}).status_code == 401
+    now[0] += 30
+    locked = {"code": authenticator.at(now[0])}
+    assert tablet.post("/login/verify", json=locked).status_code == 429
+    now[0] += 900
+    tablet.post("/login", json=good)
+    unlocked = {"code": authenticator.at(now[0])}
+    assert tablet.post("/login/verify", json=unlocked).status_code == 200
+
+    assert tablet.post("/2fa/disable").json() == {"ok": True}
     assert phone.post("/login", json=good).json() == {"mfa_required": False}
 
 

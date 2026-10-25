@@ -45,8 +45,12 @@ Call `sign_in` from your login route once the password matches: the session star
 
 `session.acr_of(request)` and `session.amr_of(request)` read the current cookie's level and methods. Both are signed with the value, so the client cannot raise its own level, and a cookie set without them never passes `stepped_up()`.
 
+!!! warning "Step up every source of a `MultiAuth`"
+    A source left out of the guard is never checked: `MultiAuth(bearer, session.stepped_up(["mfa"]))` lets any bearer token through. When sources read the level differently, guard each one: `MultiAuth(bearer.stepped_up(["mfa"], acr=read_acr), session.stepped_up(["mfa"]))`.
+
 ## Good to know
 
-- `fresh()` and `stepped_up()` can be chained, and work on `MultiAuth` too.
+- `fresh()` and `stepped_up()` can be chained, and work on `MultiAuth` too, passing the same reader to every source, a signed cookie included.
+- With `session_id=True`, the step-up `set_cookie` returns a new session id: move your stored session to it.
 - Neither works with `optional()`.
 - Refusals raise [`StaleCredentialError`][fastapi_multiauth.StaleCredentialError] or [`InsufficientAuthenticationError`][fastapi_multiauth.InsufficientAuthenticationError].
