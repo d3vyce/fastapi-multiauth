@@ -175,6 +175,17 @@ def test_jwt_jwks(provider):
     assert client.get("/me", headers=_bearer(other)).status_code == 401
 
 
+def test_jwt_dpop(provider):
+    client = _client("jwt.dpop")
+    token = idp.sign(iss=idp.REALM, aud="my-api", sub="42", cnf={"jkt": idp.client_thumbprint()})
+    proof = idp.dpop_proof("GET", "http://testserver/me", token)
+    headers = {"Authorization": f"DPoP {token}", "DPoP": proof}
+    assert client.get("/me", headers=headers).json() == {"sub": "42"}
+    assert client.get("/me", headers=headers).status_code == 401
+    stolen = {"Authorization": f"Bearer {token}"}
+    assert client.get("/me", headers=stolen).status_code == 401
+
+
 def test_jwt_introspection(provider):
     route = provider.post(idp.INTROSPECTION_URL)
     route.respond(json={"active": True, "sub": "42", "aud": "my-api"})

@@ -20,7 +20,7 @@ import httpx
 import jwt as pyjwt
 import pytest
 import respx
-from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from fastapi import (
     APIRouter,
     Depends,
@@ -38,7 +38,7 @@ from fastapi.security import HTTPBearer
 from fastapi.security.base import SecurityBase
 from fastapi.testclient import TestClient
 from itsdangerous import TimestampSigner
-from jwt.algorithms import OKPAlgorithm, RSAAlgorithm
+from jwt.algorithms import ECAlgorithm, OKPAlgorithm, RSAAlgorithm
 from pydantic import BaseModel
 from starlette.testclient import WebSocketDenialResponse
 
@@ -52,6 +52,7 @@ from fastapi_multiauth import (
     HMACSignatureAuth,
     HTTPBasicAuth,
     HTTPBearerAuth,
+    HTTPDPoPAuth,
     InsufficientAuthenticationError,
     IntrospectionValidator,
     JWTValidator,
@@ -90,6 +91,7 @@ from fastapi_multiauth.oauth import (
     oauth_validate_id_token,
 )
 from fastapi_multiauth.oauth.id_token import _key_set as _id_key_set
+from fastapi_multiauth.sources.dpop import _jwk_thumbprint
 from fastapi_multiauth.utils import step_up_challenge
 
 
@@ -5749,6 +5751,319 @@ class TestIntrospectionValidator:
                 self._validator(cache_ttl=cache_ttl)
         with pytest.raises(ValueError, match="cache_size"):
             self._validator(cache_size=0)
+
+
+_EC_KEY = ec.generate_private_key(ec.SECP256R1())
+_EC_KEY_2 = ec.generate_private_key(ec.SECP256R1())
+_ED_KEY = ed25519.Ed25519PrivateKey.generate()
+
+
+def _public_jwk(key) -> dict:
+    public = key.public_key()
+    if isinstance(public, ec.EllipticCurvePublicKey):
+        return json.loads(ECAlgorithm.to_jwk(public))
+    if isinstance(public, rsa.RSAPublicKey):
+        return json.loads(RSAAlgorithm.to_jwk(public))
+    return json.loads(OKPAlgorithm.to_jwk(public))
+
+
+def _ath(token: str) -> str:
+    digest = hashlib.sha256(token.encode()).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+class TestDPoP:
+    """RFC 9449: the token only works with a proof signed by the key it is bound to."""
+
+    URL = "http://testserver/me"
+    ALGS = "ES256 RS256 PS256 EdDSA"
+    PROOF_CHALLENGE = f'DPoP error="invalid_dpop_proof", algs="{ALGS}"'
+
+    @staticmethod
+    def _token(key=_EC_KEY, **claims) -> str:
+        cnf = {"jkt": _jwk_thumbprint(_public_jwk(key))}
+        return _hs_token(_claims(cnf=cnf, **claims))
+
+    @staticmethod
+    def _proof(
+        token: str,
+        key: Any = _EC_KEY,
+        *,
+        alg: str = "ES256",
+        drop: tuple[str, ...] = (),
+        **overrides: Any,
+    ) -> str:
+        header = {
+            "typ": overrides.pop("typ", "dpop+jwt"),
+            "jwk": overrides.pop("jwk") if "jwk" in overrides else _public_jwk(key),
+        }
+        claims = {
+            "jti": secrets.token_urlsafe(),
+            "htm": "GET",
+            "htu": TestDPoP.URL,
+            "iat": int(time.time()),
+            "ath": _ath(token),
+            **overrides,
+        }
+        for name in drop:
+            claims.pop(name, None)
+        header = {name: value for name, value in header.items() if value is not None}
+        return pyjwt.encode(claims, key, algorithm=alg, headers=header)
+
+    @staticmethod
+    def _source(validator: Any = None, **kwargs) -> HTTPDPoPAuth:
+        kwargs.setdefault("replay_check", HTTPDPoPAuth.NO_REPLAY_CHECK)
+        return HTTPDPoPAuth(validator or JWTValidator(secret=JWT_SECRET), **kwargs)
+
+    @staticmethod
+    def _get(client: TestClient, token: str, proof: str | None, scheme="DPoP"):
+        headers = {"Authorization": f"{scheme} {token}"}
+        if proof is not None:
+            headers["DPoP"] = proof
+        return client.get("/me", headers=headers)
+
+    def test_a_bound_token_with_its_proof_passes(self):
+        client = _client(self._source())
+        for key, alg in [
+            (_EC_KEY, "ES256"),
+            (_RSA_KEY_1, "RS256"),
+            (_RSA_KEY_1, "PS256"),
+            (_ED_KEY, "EdDSA"),
+        ]:
+            token = self._token(key)
+            response = self._get(client, token, self._proof(token, key, alg=alg))
+            assert response.json()["sub"] == "user-1", alg
+        token = self._token()
+        for htu in ["http://TESTSERVER:80/me?page=2#top", "HTTP://testserver/me"]:
+            response = self._get(client, token, self._proof(token, htu=htu))
+            assert response.status_code == 200, htu
+
+    def test_the_challenge_and_openapi(self):
+        client = _client(self._source())
+        response = client.get("/me")
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == f'DPoP algs="{self.ALGS}"'
+        token = self._token()
+        response = self._get(client, token, self._proof(token), scheme="Bearer")
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == f'DPoP algs="{self.ALGS}"'
+        schemes = client.get("/openapi.json").json()["components"]["securitySchemes"]
+        assert schemes == {"DPoP": {"type": "http", "scheme": "DPoP"}}
+
+    def test_invalid_proofs_are_refused(self, caplog):
+        caplog.set_level(logging.WARNING, logger="fastapi_multiauth")
+        client = _client(self._source())
+        token = self._token()
+        now = int(time.time())
+        ec_384 = ec.generate_private_key(ec.SECP384R1())
+        no_y = {k: v for k, v in _public_jwk(_EC_KEY).items() if k != "y"}
+        cases: dict[str, str | None] = {
+            "missing": None,
+            "not a jwt": "not-a-jwt",
+            "typ": self._proof(token, typ="JWT"),
+            "no typ": self._proof(token, typ=None),
+            "symmetric": self._proof(
+                token, JWT_SECRET, alg="HS256", jwk={"kty": "oct", "k": "c2VjcmV0"}
+            ),
+            "kty type": self._proof(token, jwk={**_public_jwk(_EC_KEY), "kty": ["EC"]}),
+            "unlisted alg": self._proof(token, ec_384, alg="ES384"),
+            "no jwk": self._proof(token, jwk=None),
+            "private jwk": self._proof(
+                token, jwk=json.loads(ECAlgorithm.to_jwk(_EC_KEY))
+            ),
+            "oct jwk": self._proof(token, jwk={"kty": "oct", "k": "c2VjcmV0"}),
+            "incomplete jwk": self._proof(token, jwk=no_y),
+            "jwk of another key": self._proof(token, jwk=_public_jwk(_EC_KEY_2)),
+            "jwk of another type": self._proof(token, jwk=_public_jwk(_RSA_KEY_1)),
+            "htm": self._proof(token, htm="POST"),
+            "htu path": self._proof(token, htu="http://testserver/admin"),
+            "htu host": self._proof(token, htu="http://evil.example/me"),
+            "htu port": self._proof(token, htu="http://testserver:8080/me"),
+            "htu garbage": self._proof(token, htu="http://[::1/me"),
+            "htu relative": self._proof(token, htu="/me"),
+            "htu type": self._proof(token, htu=7),
+            "stale": self._proof(token, iat=now - 120),
+            "future": self._proof(token, iat=now + 60),
+            "iat type": self._proof(token, iat="now"),
+            "ath": self._proof(token, ath=_ath("another-token")),
+            "ath type": self._proof(token, ath=7),
+            "empty jti": self._proof(token, jti=""),
+            "jti type": self._proof(token, jti=7),
+            **{
+                f"no {c}": self._proof(token, drop=(c,))
+                for c in ("jti", "htm", "htu", "iat", "ath")
+            },
+        }
+        for case, proof in cases.items():
+            caplog.clear()
+            response = self._get(client, token, proof)
+            assert response.status_code == 401, case
+            assert response.headers["www-authenticate"] == self.PROOF_CHALLENGE, case
+            assert [r.auth_reason for r in caplog.records] == ["invalid_dpop_proof"], (
+                case
+            )
+
+        proof = self._proof(token)
+        response = client.get(
+            "/me",
+            headers=[
+                ("Authorization", f"DPoP {token}"),
+                ("DPoP", proof),
+                ("DPoP", proof),
+            ],
+        )
+        assert response.status_code == 401
+
+    def test_the_token_must_be_bound_to_the_proof_key(self, caplog):
+        caplog.set_level(logging.WARNING, logger="fastapi_multiauth")
+        client = _client(self._source())
+        for token in [self._token(_EC_KEY_2), _hs_token(_claims())]:
+            caplog.clear()
+            response = self._get(client, token, self._proof(token))
+            assert response.status_code == 401
+            assert response.headers["www-authenticate"] == self.PROOF_CHALLENGE
+            assert [r.auth_reason for r in caplog.records] == ["dpop_key_mismatch"]
+
+        token = self._token()
+        user = JWTValidator(
+            secret=JWT_SECRET,
+            claims_to_identity=lambda c: {"id": c["sub"], "key": c["cnf"]["jkt"]},
+        )
+        proof = self._proof(token)
+        assert self._get(_client(self._source(user)), token, proof).status_code == 401
+
+        async def jkt(identity: dict) -> str:
+            return identity["key"]
+
+        reader = self._source(user, jkt=jkt)
+        response = self._get(_client(reader), token, self._proof(token))
+        assert response.json() == {
+            "id": "user-1",
+            "key": _jwk_thumbprint(_public_jwk(_EC_KEY)),
+        }
+
+    def test_replays_are_refused(self, caplog):
+        caplog.set_level(logging.WARNING, logger="fastapi_multiauth")
+        seen: dict[str, float] = {}
+
+        def remember(jti: str, expires_at: float) -> bool:
+            if jti in seen:
+                return False
+            seen[jti] = expires_at
+            return True
+
+        validate = JWTValidator(secret=JWT_SECRET)
+        refusals = [UnauthorizedError()]
+
+        async def flaky(token: str) -> dict:
+            if refusals:
+                raise refusals.pop()
+            return await validate(token)
+
+        client = _client(self._source(flaky, replay_check=remember))
+        token = self._token()
+        iat = int(time.time())
+        proof = self._proof(token, iat=iat, jti="proof-1")
+        assert self._get(client, token, proof).status_code == 401
+        assert seen == {}
+        assert self._get(client, token, proof).status_code == 200
+        assert seen == {"proof-1": iat + 65}
+        caplog.clear()
+        response = self._get(client, token, proof)
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == self.PROOF_CHALLENGE
+        assert [r.auth_reason for r in caplog.records] == ["dpop_replay"]
+
+        async def never_seen(jti: str, expires_at: float) -> bool:
+            return True
+
+        client = _client(self._source(replay_check=never_seen))
+        for _ in range(2):
+            assert self._get(client, token, proof).status_code == 200
+
+    def test_public_origin(self):
+        def setup(app: FastAPI):
+            for path, source in [
+                ("/me", self._source(public_origin="https://API.example.com")),
+                ("/direct", self._source()),
+            ]:
+                app.add_api_route(path, lambda user=Security(source): user)
+
+        client = TestClient(_app(setup), base_url="http://internal:8000")
+        token = self._token()
+        public = self._proof(token, htu="https://api.example.com/me")
+        internal = self._proof(token, htu="http://internal:8000/me")
+        assert self._get(client, token, public).status_code == 200
+        assert self._get(client, token, internal).status_code == 401
+        headers = {"Authorization": f"DPoP {token}"}
+        for htu, expected in [
+            ("https://api.example.com/direct", 401),
+            ("http://internal:8000/direct", 200),
+        ]:
+            headers["DPoP"] = self._proof(token, htu=htu)
+            assert client.get("/direct", headers=headers).status_code == expected
+
+    def test_composes_with_fresh(self):
+        dep = self._source().fresh(
+            300, authenticated_at=lambda claims: claims["auth_time"]
+        )
+        token = self._token(auth_time=0)
+        response = self._get(_client(dep), token, self._proof(token))
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == (
+            f'DPoP algs="{self.ALGS}", error="insufficient_user_authentication", '
+            'error_description="More recent authentication is required", max_age="300"'
+        )
+
+    @pytest.mark.anyio
+    async def test_without_a_usable_request_url(self):
+        source = self._source()
+        token = self._token()
+        with pytest.raises(UnauthorizedError):
+            await source.authenticate(token)
+        for htu in [self.URL, "/"]:
+            proof = self._proof(token, htu=htu)
+            request = _request(authorization=f"DPoP {token}", dpop=proof)
+            with pytest.raises(UnauthorizedError):
+                await source.dispatch(request, [])
+
+    def test_thumbprint_matches_rfc_7638(self):
+        jwk = {
+            "kty": "RSA",
+            "e": "AQAB",
+            "alg": "RS256",
+            "n": (
+                "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw"
+            ),
+        }
+        assert _jwk_thumbprint(jwk) == "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs"
+
+    def test_misconfiguration_rejected(self):
+        validator = JWTValidator(secret=JWT_SECRET)
+        with pytest.raises(ValueError, match="replay_check is required"):
+            HTTPDPoPAuth(validator)
+        assert repr(HTTPDPoPAuth.NO_REPLAY_CHECK) == "HTTPDPoPAuth.NO_REPLAY_CHECK"
+        with pytest.raises(TypeError, match="not a string"):
+            self._source(algorithms="ES256")
+        with pytest.raises(ValueError, match="at least one"):
+            self._source(algorithms=[])
+        for alg in ["HS256", "none", "XX999"]:
+            with pytest.raises(ValueError, match="cannot sign a DPoP proof"):
+                self._source(algorithms=[alg])
+        for proof_max_age in [0, -1, math.inf]:
+            with pytest.raises(ValueError, match="proof_max_age"):
+                self._source(proof_max_age=proof_max_age)
+        for leeway in [-1, math.nan]:
+            with pytest.raises(ValueError, match="leeway"):
+                self._source(leeway=leeway)
+        for origin in [
+            "https://api.example.com/",
+            "https://api.example.com/v1",
+            "api.example.com",
+            "https://user@api.example.com",
+        ]:
+            with pytest.raises(ValueError, match="public_origin"):
+                self._source(public_origin=origin)
 
 
 SECRET_CREDENTIAL = "s3cr3t-credential-value"

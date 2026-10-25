@@ -41,6 +41,9 @@ Records never contain the credential, its hash, or the identity. Correlate with 
 | `insufficient_acr` | below the [`stepped_up()`](step-up.md#strong-login-stepped_up) level |
 | `cross_origin` | a cookie request from another origin, with [`csrf=True`](cookie-sessions.md#csrf) (403) |
 | `missing_origin` | a cookie request carrying neither `Sec-Fetch-Site` nor `Origin`, with `csrf=True` (403) |
+| `invalid_dpop_proof` | a DPoP proof that is missing, malformed, or does not match the request or token |
+| `dpop_key_mismatch` | a valid DPoP proof signed by another key than the token is bound to |
+| `dpop_replay` | a DPoP proof sent a second time |
 | `insufficient_scope` | a valid JWT missing a route scope (403) |
 | `unknown_key` | a JWT signed with a key the provider does not publish |
 | `jwks_unavailable` | the provider's keys cannot be fetched (503) |
