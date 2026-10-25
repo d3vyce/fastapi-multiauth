@@ -67,4 +67,4 @@ A signed cookie stays valid until it expires; `delete_cookie` only clears one br
 --8<-- "docs_src/cookie_sessions/revocable.py"
 ```
 
-Call `start_session` from your login route once the password matches, as in the first example. You decide where the ids live and what "revoked" means. `session_id_of(request)` returns the current id; the [Sign out everywhere](../recipes/sign-out-everywhere.md) recipe builds a device list with it.
+Call `start_session` from your login route once the password matches, as in the first example. Every `set_cookie` creates a new id, including a re-issue after [step-up](step-up.md#second-factor-on-a-cookie-session), so move a stored session to the id it returns. You decide where the ids live and what "revoked" means. `session_id_of(request)` returns the current id; the [Sign out everywhere](../recipes/sign-out-everywhere.md) recipe builds a device list with it.

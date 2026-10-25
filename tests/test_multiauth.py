@@ -3532,7 +3532,9 @@ class TestFreshness:
 
         # A source that cannot be dated would be the way around the window.
         auth = MultiAuth(self._cookie(), HTTPBearerAuth(simple_validator))
-        with pytest.raises(ValueError, match="HTTPBearerAuth cannot date"):
+        with pytest.raises(
+            ValueError, match=r"HTTPBearerAuth cannot date.*fresh\(\) on each source"
+        ):
             auth.fresh(300)
 
     def test_the_window_is_validated(self):
@@ -4705,6 +4707,13 @@ class TestTOTP:
             with pytest.raises(ValueError, match="base32"):
                 totp_verify(bad, self._code())
 
+    def test_secrets_shorter_than_80_bits_are_refused(self):
+        for short in ["AA", "JBSWY3DPEHPK3PX"]:
+            with pytest.raises(ValueError, match="at least 80 bits"):
+                totp_verify(short, "000000")
+            with pytest.raises(ValueError, match="at least 80 bits"):
+                totp_provisioning_uri(short, "alice", "Acme")
+
     def test_window_must_be_a_non_negative_integer(self):
         for window in [-1, True, 1.5]:
             with pytest.raises(ValueError, match="window"):
@@ -4733,6 +4742,12 @@ class TestTOTP:
                 totp_provisioning_uri(self.SECRET, account, issuer)
         with pytest.raises(ValueError, match="base32"):
             totp_provisioning_uri("not base32!", "alice", "Acme")
+
+    def test_provisioning_uri_escapes_a_slash_in_the_label(self):
+        uri = totp_provisioning_uri(self.SECRET, "ops/alice", "Acme/Prod")
+        assert uri.startswith("otpauth://totp/Acme%2FProd:ops%2Falice?")
+        reference = pyotp.parse_uri(uri)
+        assert (reference.name, reference.issuer) == ("ops/alice", "Acme/Prod")
 
     def test_interoperates_with_pyotp(self):
         secret = totp_generate_secret()
@@ -5162,7 +5177,10 @@ class TestCookieAssurance:
             unsigned.stepped_up(["mfa"])
         with pytest.raises(ValueError, match=r"HTTPBearerAuth cannot read"):
             HTTPBearerAuth(simple_validator).stepped_up(["mfa"])
-        with pytest.raises(ValueError, match=r"HTTPBearerAuth cannot read"):
+        with pytest.raises(
+            ValueError,
+            match=r"HTTPBearerAuth cannot read.*stepped_up\(\) on each source",
+        ):
             MultiAuth(
                 _signed_cookie_auth(), HTTPBearerAuth(simple_validator)
             ).stepped_up(["mfa"])

@@ -25,6 +25,19 @@ from ..utils import challenge_headers, log_decision
 logger = logging.getLogger(__name__)
 
 
+def _step_up_each_error(
+    source: AuthSource, missing: str, guard: str, reader: str
+) -> ValueError:
+    """The error for a source a combined `fresh()` or `stepped_up()` cannot check."""
+    return ValueError(
+        f"{type(source).__name__} cannot {missing}: pass {reader}=..., which "
+        f"every source then uses, or call {guard}() on each source before "
+        f"combining them, e.g. MultiAuth(bearer.{guard}(..., {reader}=...), "
+        f"cookie.{guard}(...)). A source left out of {guard}() lets its "
+        "credentials through unchecked"
+    )
+
+
 class MultiAuth:
     """Combine several sources on one route.
 
@@ -126,13 +139,22 @@ class MultiAuth:
     ) -> "MultiAuth":
         """Return a copy whose sources all refuse a credential older than `max_age`.
 
-        Applies `AuthSource.fresh()` to every source, with the same arguments.
+        Applies `AuthSource.fresh()` to every source, with the same arguments:
+        an `authenticated_at` reader replaces each source's own dating, a
+        signed cookie's included. To give sources different readers, call
+        `fresh()` on each one before combining them.
 
         Raises:
             ValueError: As `AuthSource.fresh()`, naming the source at fault.
         """
         if self._optional:
             raise _step_up_optional_error(self, "fresh()")
+        if authenticated_at is None:
+            for source in self._sources:
+                if not source._dates_credentials():
+                    raise _step_up_each_error(
+                        source, "date a credential", "fresh", "authenticated_at"
+                    )
         return self._with_sources(
             source.fresh(max_age, authenticated_at=authenticated_at, leeway=leeway)
             for source in self._sources
@@ -146,7 +168,10 @@ class MultiAuth:
     ) -> "MultiAuth":
         """Return a copy whose sources all require one of `acr_values`.
 
-        Applies `AuthSource.stepped_up()` to every source, with the same arguments.
+        Applies `AuthSource.stepped_up()` to every source, with the same
+        arguments: an `acr` reader replaces each source's own level, a signed
+        cookie's included. To give sources different readers, call
+        `stepped_up()` on each one before combining them.
 
         Raises:
             TypeError: As `AuthSource.stepped_up()`.
@@ -154,6 +179,12 @@ class MultiAuth:
         """
         if self._optional:
             raise _step_up_optional_error(self, "stepped_up()")
+        if acr is None:
+            for source in self._sources:
+                if not source._carries_acr():
+                    raise _step_up_each_error(
+                        source, "read a credential's level", "stepped_up", "acr"
+                    )
         return self._with_sources(
             source.stepped_up(acr_values, acr=acr) for source in self._sources
         )

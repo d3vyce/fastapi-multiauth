@@ -11,6 +11,7 @@ from urllib.parse import quote, urlencode
 _DIGITS = 6
 _PERIOD = 30
 _SECRET_BYTES = 20
+_MIN_SECRET_BYTES = 10
 
 
 def _compact_secret(secret: str) -> str:
@@ -25,8 +26,11 @@ def _decode_secret(secret: str) -> bytes:
         key = base64.b32decode(compact + "=" * (-len(compact) % 8))
     except ValueError:
         key = b""
-    if not key:
-        raise ValueError("secret must be a base32 string")
+    if len(key) < _MIN_SECRET_BYTES:
+        raise ValueError(
+            f"secret must be a base32 string of at least {_MIN_SECRET_BYTES * 8} "
+            "bits, 16 characters"
+        )
     return key
 
 
@@ -65,8 +69,9 @@ def totp_provisioning_uri(secret: str, account: str, issuer: str) -> str:
         The provisioning URI.
 
     Raises:
-        ValueError: If `secret` is not base32, or `account` or `issuer` is
-            empty or contains a colon, the label's separator.
+        ValueError: If `secret` is not base32 or shorter than 80 bits, or
+            `account` or `issuer` is empty or contains a colon, the label's
+            separator.
     """
     _decode_secret(secret)
     for label, value in (("account", account), ("issuer", issuer)):
@@ -75,7 +80,8 @@ def totp_provisioning_uri(secret: str, account: str, issuer: str) -> str:
     query = urlencode(
         {"secret": _compact_secret(secret), "issuer": issuer}, quote_via=quote
     )
-    return f"otpauth://totp/{quote(issuer)}:{quote(account)}?{query}"
+    label = f"{quote(issuer, safe='')}:{quote(account, safe='')}"
+    return f"otpauth://totp/{label}?{query}"
 
 
 def totp_verify(
@@ -85,7 +91,14 @@ def totp_verify(
 
     Store the returned step with the user and pass it back as `last_step`
     next time: a code from that step or an earlier one is refused, so a
-    code cannot be replayed within its window.
+    code cannot be replayed within its window. Save it atomically, only if
+    the stored step is still older, e.g. `UPDATE ... SET last_step = :step
+    WHERE last_step IS NULL OR last_step < :step`, and refuse the login
+    when nothing was updated: two requests carrying the same code would
+    otherwise both read the old step and both pass.
+
+    Each guess has three chances in a million at the default `window`, and
+    nothing here counts them: cap failed attempts per account.
 
     Args:
         secret: The user's base32 secret.
@@ -100,7 +113,8 @@ def totp_verify(
         is malformed, or is not later than `last_step`.
 
     Raises:
-        ValueError: If `secret` is not base32 or `window` is negative.
+        ValueError: If `secret` is not base32 or shorter than 80 bits, or
+            `window` is negative.
     """
     if isinstance(window, bool) or not isinstance(window, int) or window < 0:
         raise ValueError("window must be a non-negative integer")
