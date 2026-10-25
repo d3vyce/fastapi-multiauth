@@ -1,6 +1,7 @@
 """Cookie-based authentication source."""
 
 import hashlib
+import json
 import secrets
 from collections.abc import Callable, Sequence
 from typing import Any, Literal
@@ -12,8 +13,8 @@ from itsdangerous import BadSignature, SignatureExpired, TimestampSigner
 
 from fastapi_multiauth.exceptions import UnauthorizedError
 
-from ..abc import ValidatedAuthSource, _accepts_kwarg
-from ..utils import refusal
+from ..abc import ValidatedAuthSource, _accepts_kwarg, _is_header_token
+from ..utils import b64url_decode, b64url_encode, refusal
 
 _MIN_SECRET_KEY_BYTES = 32
 _SALT_PREFIX = "fastapi-multiauth.cookie."
@@ -53,6 +54,39 @@ def _check_name_prefix(
             f'cookie {name!r} requires path="/" and no domain: browsers drop a '
             "__Host- cookie otherwise"
         )
+
+
+def _encode_assurance(acr: str | None, amr: Sequence[str] | None) -> str:
+    """The acr/amr header of a cookie payload, empty when neither is set."""
+    claims: dict[str, Any] = {}
+    if acr is not None:
+        if not _is_header_token(acr):
+            raise ValueError(
+                f"acr must be non-empty printable US-ASCII without spaces, "
+                f"quotes or backslashes (got {acr!r}): it is compared against "
+                "the acr_values of stepped_up()"
+            )
+        claims["acr"] = acr
+    if amr is not None:
+        if isinstance(amr, str):
+            raise TypeError("amr must be a sequence of strings, not a string")
+        methods = list(amr)
+        if not methods or not all(_is_header_token(method) for method in methods):
+            raise ValueError(
+                f"amr must list at least one method, each non-empty printable "
+                f"US-ASCII without spaces, quotes or backslashes (got {amr!r})"
+            )
+        claims["amr"] = methods
+    if not claims:
+        return ""
+    return b64url_encode(json.dumps(claims, separators=(",", ":")).encode())
+
+
+def _decode_assurance(header: str) -> dict[str, Any]:
+    """The acr/amr stored by `_encode_assurance`."""
+    if not header:
+        return {}
+    return json.loads(b64url_decode(header))
 
 
 def _precomputed_signer(keys: list[str], salt: str) -> TimestampSigner:
@@ -130,15 +164,11 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         self._session_id = session_id
         # itsdangerous verifies against every key in the list but signs with
         # the last one, so reverse them to make the first configured key the signer.
-        # The salt also separates the two payload layouts.
-        self._signer = (
-            _precomputed_signer(
-                list(reversed(self._secret_keys)),
-                f"{_SALT_PREFIX}{name}{'.sid' if session_id else ''}",
-            )
-            if self._secret_keys
-            else None
-        )
+        # The salt also separates the payload layouts.
+        keys = list(reversed(self._secret_keys))
+        salt = f"{_SALT_PREFIX}{name}{'.sid' if session_id else ''}"
+        self._signer = _precomputed_signer(keys, f"{salt}.v2") if keys else None
+        self._legacy_signer = _precomputed_signer(keys, salt) if keys else None
         self._ttl = ttl
         self._secure = secure
         self._samesite: SameSite = samesite
@@ -155,38 +185,72 @@ class APIKeyCookieAuth(ValidatedAuthSource):
             **kwargs,
         )
 
-    def _sign(self, value: str) -> str:
+    def _sign(self, value: str, assurance: str = "") -> str:
         if self._signer is None:
             raise RuntimeError("_sign called without secret_key configured")
-        return self._signer.sign(value.encode()).decode()
+        return self._signer.sign(f"{assurance}.{value}".encode()).decode()
+
+    def _unsign(self, cookie_value: str, **kwargs: Any) -> tuple[Any, bool]:
+        """Verify signature + expiry, saying whether the payload predates acr/amr."""
+        if self._signer is None or self._legacy_signer is None:
+            raise RuntimeError("_unsign called without secret_key configured")
+        data = cookie_value.encode()
+        try:
+            return self._signer.unsign(data, max_age=self._ttl, **kwargs), False
+        except SignatureExpired:
+            raise
+        except BadSignature:
+            return self._legacy_signer.unsign(data, max_age=self._ttl, **kwargs), True
+
+    def _open(self, cookie_value: str) -> tuple[str, str]:
+        """Return the acr/amr header and the plain value of a signed cookie."""
+        payload, legacy = self._unsign(cookie_value)
+        if legacy:
+            return "", payload.decode()
+        assurance, _, value = payload.decode().partition(".")
+        return assurance, value
 
     def _verify(self, cookie_value: str) -> str:
         """Return the plain value, verifying signature + expiry when signed."""
         if self._signer is None:
             return cookie_value
         try:
-            return self._signer.unsign(
-                cookie_value.encode(), max_age=self._ttl
-            ).decode()
+            return self._open(cookie_value)[1]
         except SignatureExpired:
             raise refusal(UnauthorizedError(), "expired") from None
         except BadSignature:
             raise refusal(UnauthorizedError(), "invalid_signature") from None
+
+    def _assurance_of(self, cookie_value: str | None) -> dict[str, Any]:
+        """Return the acr/amr of a signed cookie, empty when it does not verify."""
+        if self._signer is None or not cookie_value:
+            return {}
+        try:
+            assurance, _ = self._open(cookie_value)
+        except BadSignature:
+            return {}
+        return _decode_assurance(assurance)
 
     def authenticated_at(self, credential: str) -> float | None:
         """Return when the signed cookie was set, `None` when it does not verify."""
         if self._signer is None:
             return None
         try:
-            _, signed_at = self._signer.unsign(
-                credential.encode(), max_age=self._ttl, return_timestamp=True
-            )
+            (_, signed_at), _ = self._unsign(credential, return_timestamp=True)
         except BadSignature:
             return None
         return signed_at.timestamp()
 
     def _dates_credentials(self) -> bool:
         """Only a signed cookie carries the timestamp `fresh()` needs."""
+        return self._signer is not None
+
+    def authenticated_acr(self, credential: str) -> str | None:
+        """Return the `acr` passed to `set_cookie()`, `None` when absent or forged."""
+        return self._assurance_of(credential).get("acr")
+
+    def _carries_acr(self) -> bool:
+        """Only a signed cookie carries the level `stepped_up()` needs."""
         return self._signer is not None
 
     @property
@@ -220,6 +284,25 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         except UnauthorizedError:
             return None
 
+    def acr_of(self, request: HTTPConnection) -> str | None:
+        """Return the `acr` of the request's cookie, without the validator.
+
+        Returns:
+            The level passed to `set_cookie()`, or `None` when none was passed
+            or the cookie is absent, expired or forged.
+        """
+        return self._assurance_of(request.cookies.get(self._name)).get("acr")
+
+    def amr_of(self, request: HTTPConnection) -> tuple[str, ...] | None:
+        """Return the `amr` of the request's cookie, without the validator.
+
+        Returns:
+            The methods passed to `set_cookie()`, or `None` when none were
+            passed or the cookie is absent, expired or forged.
+        """
+        amr = self._assurance_of(request.cookies.get(self._name)).get("amr")
+        return tuple(amr) if amr is not None else None
+
     async def authenticate_scoped(
         self,
         credential: str,
@@ -236,7 +319,14 @@ class APIKeyCookieAuth(ValidatedAuthSource):
             value, scopes=scopes, request=request, session_id=sid
         )
 
-    def set_cookie(self, response: Response, value: str) -> str | None:
+    def set_cookie(
+        self,
+        response: Response,
+        value: str,
+        *,
+        acr: str | None = None,
+        amr: Sequence[str] | None = None,
+    ) -> str | None:
         """Set the cookie on `response`, signed when a `secret_key` is configured.
 
         Each call stamps the current time, so the caller counts as freshly
@@ -245,14 +335,30 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         Args:
             response: The response to set the cookie on.
             value: The value to store, typically a user id.
+            acr: The level the user just authenticated at, checked by
+                `stepped_up()`. Needs a `secret_key`.
+            amr: The methods the user just authenticated with, e.g.
+                `[AuthenticationMethodReference.PASSWORD]`. Needs a `secret_key`.
 
         Returns:
             The new session id when `session_id` is on, otherwise `None`.
+
+        Raises:
+            TypeError: If `amr` is a bare string.
+            ValueError: If `acr` or `amr` is passed without a `secret_key`, or
+                holds a value with whitespace, quotes, backslashes or
+                non-ASCII characters.
         """
+        if self._signer is None and (acr is not None or amr is not None):
+            raise ValueError(
+                "acr and amr require secret_key: without a signature the "
+                "client could raise its own level"
+            )
+        assurance = _encode_assurance(acr, amr)
         sid = secrets.token_urlsafe(16) if self._session_id else None
         if sid is not None:
             value = f"{sid}.{value}"
-        cookie_value = self._sign(value) if self._signer else value
+        cookie_value = self._sign(value, assurance) if self._signer else value
         response.set_cookie(
             self._name,
             cookie_value,

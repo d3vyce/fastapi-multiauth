@@ -20,4 +20,4 @@ When no built-in source reads your credential, subclass [`AuthSource`][fastapi_m
 
 The scheme passed to `super().__init__()` is only used for OpenAPI. Your source works with `MultiAuth`, `optional()`, WebSockets, logging and auditing like the built-in ones.
 
-To check [scopes](scopes.md) or use [`fresh()`](step-up.md), override `authenticate_scoped()` and `authenticated_at()`. See the [API reference](../reference.md#fastapi_multiauth.AuthSource).
+To check [scopes](scopes.md), override `authenticate_scoped()`. To use [`fresh()`](step-up.md) or [`stepped_up()`](step-up.md#strong-login-stepped_up) without a reader, override `authenticated_at()` or `authenticated_acr()`. See the [API reference](../reference.md#fastapi_multiauth.AuthSource).

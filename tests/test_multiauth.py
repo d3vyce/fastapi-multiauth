@@ -102,6 +102,27 @@ VALID_COOKIE = "session123"
 COOKIE_SECRET = "unit-test-secret-key-32-bytes-minimum!"
 
 
+def _signed_cookie_auth(**kwargs) -> APIKeyCookieAuth:
+    """A signed "session" cookie source over plain HTTP, validated by cookie_validator."""
+    return APIKeyCookieAuth(
+        "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False, **kwargs
+    )
+
+
+def _cookie_value(response: Response) -> str:
+    """The value of the cookie *response* sets."""
+    return response.headers["set-cookie"].split(";", 1)[0].split("=", 1)[1]
+
+
+def _stock_signer(*keys: str, salt: str = "session") -> TimestampSigner:
+    """A stock itsdangerous signer, salted like the cookie named *salt*."""
+    return TimestampSigner(
+        list(keys),
+        salt=f"fastapi-multiauth.cookie.{salt}",
+        digest_method=hashlib.sha256,
+    )
+
+
 def _client(auth) -> TestClient:
     """App exposing a single /me route guarded by *auth*."""
 
@@ -844,13 +865,6 @@ class TestCookieKeyRotation:
     OLD = "old-rotation-secret-key-32-bytes-min!"
     NEW = "new-rotation-secret-key-32-bytes-min!"
 
-    def _stock(self, *keys: str) -> TimestampSigner:
-        return TimestampSigner(
-            list(keys),
-            salt="fastapi-multiauth.cookie.session",
-            digest_method=hashlib.sha256,
-        )
-
     def test_rotation(self):
         old_auth = APIKeyCookieAuth("session", cookie_validator, secret_key=self.OLD)
         rotated = APIKeyCookieAuth(
@@ -871,14 +885,13 @@ class TestCookieKeyRotation:
         """Cookies stay byte-compatible with a stock signer despite precomputed keys."""
         auth = APIKeyCookieAuth("session", cookie_validator, secret_key=self.NEW)
         signed = auth._sign(VALID_COOKIE).encode()
-        assert (
-            self._stock(self.NEW).unsign(signed, max_age=86400) == VALID_COOKIE.encode()
-        )
+        stock = _stock_signer(self.NEW, salt="session.v2")
+        assert stock.unsign(signed, max_age=86400) == f".{VALID_COOKIE}".encode()
 
         auth = APIKeyCookieAuth(
             "session", cookie_validator, secret_key=[self.NEW, self.OLD]
         )
-        signed = self._stock(self.OLD).sign(VALID_COOKIE.encode()).decode()
+        signed = _stock_signer(self.OLD).sign(VALID_COOKIE.encode()).decode()
         assert auth._verify(signed) == VALID_COOKIE
 
     def test_session_id_salt_still_separates_the_two_layouts(self):
@@ -888,7 +901,7 @@ class TestCookieKeyRotation:
             secret_key=self.NEW,
             session_id=True,
         )
-        signed = self._stock(self.NEW).sign(VALID_COOKIE.encode()).decode()
+        signed = _stock_signer(self.NEW).sign(VALID_COOKIE.encode()).decode()
         with pytest.raises(UnauthorizedError):
             auth._verify(signed)
 
@@ -4883,6 +4896,170 @@ class TestSteppedUp:
             token = _hs_token(_claims(acr=acr))
             response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
             assert response.status_code == expected, acr
+
+
+class TestCookieAssurance:
+    """acr/amr signed into the cookie: stepped_up() without an acr= reader."""
+
+    AMR = AuthenticationMethodReference
+
+    @staticmethod
+    def _client(auth: APIKeyCookieAuth, **set_cookie: Any) -> TestClient:
+        """One cookie jar: /login sets *set_cookie*, /mfa needs acr "mfa"."""
+        strong = auth.stepped_up(["mfa"])
+
+        def setup(app: FastAPI):
+            @app.get("/login")
+            async def login(response: Response):
+                auth.set_cookie(response, VALID_COOKIE, **set_cookie)
+                return {"ok": True}
+
+            @app.get("/whoami")
+            async def whoami(request: Request):
+                return {"acr": auth.acr_of(request), "amr": auth.amr_of(request)}
+
+            @app.get("/me")
+            async def me(user=Security(auth)):
+                return user
+
+            @app.get("/mfa")
+            async def mfa(user=Security(strong)):
+                return user
+
+        return TestClient(_app(setup))
+
+    def test_the_level_travels_in_the_cookie(self):
+        with self._client(
+            _signed_cookie_auth(),
+            acr="mfa",
+            amr=[self.AMR.PASSWORD, self.AMR.ONE_TIME_PASSWORD],
+        ) as client:
+            client.get("/login")
+            assert client.get("/mfa").json() == {"session": VALID_COOKIE}
+            assert client.get("/whoami").json() == {"acr": "mfa", "amr": ["pwd", "otp"]}
+
+        with self._client(_signed_cookie_auth(), acr="pwd") as client:
+            client.get("/login")
+            assert client.get("/me").status_code == 200
+            response = client.get("/mfa")
+            assert response.status_code == 401
+            assert response.json() == {"detail": "Insufficient user authentication"}
+            assert client.get("/whoami").json() == {"acr": "pwd", "amr": None}
+
+        with self._client(_signed_cookie_auth()) as client:
+            client.get("/login")
+            assert client.get("/me").status_code == 200
+            assert client.get("/mfa").status_code == 401
+            assert client.get("/whoami").json() == {"acr": None, "amr": None}
+
+    def test_survives_a_session_id_and_dotted_values(self):
+        async def validate(value: str, *, session_id: str) -> dict:
+            return {"session": value, "sid": session_id}
+
+        auth = APIKeyCookieAuth(
+            "session", validate, secret_key=COOKIE_SECRET, session_id=True, secure=False
+        )
+        response = Response()
+        sid = auth.set_cookie(response, "user.42:v3", acr="urn:mfa.v2", amr=["hwk"])
+        client = _client(auth.stepped_up(["urn:mfa.v2"]))
+        response = client.get("/me", cookies={"session": _cookie_value(response)})
+        assert response.json() == {"session": "user.42:v3", "sid": sid}
+
+    def test_a_cookie_from_before_the_upgrade_still_signs_in(self):
+        """Pre-acr cookies authenticate, date themselves, and fail closed on levels."""
+        legacy = _stock_signer(COOKIE_SECRET).sign(VALID_COOKIE.encode()).decode()
+        auth = _signed_cookie_auth()
+        client = self._client(auth)
+        client.cookies.set("session", legacy)
+        assert client.get("/me").json() == {"session": VALID_COOKIE}
+        assert client.get("/whoami").json() == {"acr": None, "amr": None}
+        assert client.get("/mfa").status_code == 401
+        assert (
+            _client(auth.fresh(300)).get("/me", cookies={"session": legacy}).status_code
+            == 200
+        )
+
+        legacy_sid = _stock_signer(COOKIE_SECRET, salt="session.sid")
+        legacy_sid = legacy_sid.sign(f"abc.{VALID_COOKIE}".encode()).decode()
+        sid_auth = APIKeyCookieAuth(
+            "session",
+            sid_validator,
+            secret_key=COOKIE_SECRET,
+            session_id=True,
+            secure=False,
+        )
+        response = _client(sid_auth).get("/me", cookies={"session": legacy_sid})
+        assert response.json() == {"session": VALID_COOKIE, "sid": "abc"}
+
+    def test_the_level_cannot_be_forged(self):
+        auth = _signed_cookie_auth()
+        response = Response()
+        auth.set_cookie(response, VALID_COOKIE, acr="pwd")
+        rest = _cookie_value(response).partition(".")[2]
+        raised = base64.urlsafe_b64encode(b'{"acr":"mfa"}').rstrip(b"=").decode()
+        other = Response()
+        APIKeyCookieAuth(
+            "admin", cookie_validator, secret_key=COOKIE_SECRET, secure=False
+        ).set_cookie(other, VALID_COOKIE, acr="mfa")
+        other_signed = _cookie_value(other)
+        client = self._client(auth)
+        for forged in [f"{raised}.{rest}", other_signed, ""]:
+            client.cookies.set("session", forged)
+            assert client.get("/mfa").status_code == 401, forged
+            assert client.get("/whoami").json() == {"acr": None, "amr": None}
+
+        with self._client(_signed_cookie_auth(ttl=60), acr="mfa") as client:
+            client.get("/login")
+            with patch("time.time", return_value=time.time() + 61):
+                assert client.get("/whoami").json() == {"acr": None, "amr": None}
+                assert client.get("/mfa").status_code == 401
+
+    def test_an_acr_reader_still_wins(self):
+        async def validate(value: str) -> dict:
+            return {**await cookie_validator(value), "acr": "mfa"}
+
+        auth = APIKeyCookieAuth(
+            "session", validate, secret_key=COOKIE_SECRET, secure=False
+        )
+        dep = auth.stepped_up(["mfa"], acr=lambda user: user["acr"])
+        cookie = {"session": auth._sign(VALID_COOKIE)}
+        assert _client(dep).get("/me", cookies=cookie).status_code == 200
+
+        dep = MultiAuth(auth).stepped_up(["mfa"])
+        assert _client(dep).get("/me", cookies=cookie).status_code == 401
+
+    def test_misuse_is_refused(self):
+        unsigned = APIKeyCookieAuth("session", cookie_validator)
+        assert unsigned.authenticated_acr(VALID_COOKIE) is None
+        assert HTTPBearerAuth(simple_validator).authenticated_acr(VALID_TOKEN) is None
+        with pytest.raises(RuntimeError, match="secret_key"):
+            unsigned._unsign(VALID_COOKIE)
+        with pytest.raises(ValueError, match="acr and amr require secret_key"):
+            unsigned.set_cookie(Response(), VALID_COOKIE, acr="mfa")
+        with pytest.raises(ValueError, match="acr and amr require secret_key"):
+            unsigned.set_cookie(Response(), VALID_COOKIE, amr=["pwd"])
+        with pytest.raises(ValueError, match=r"APIKeyCookieAuth cannot read"):
+            unsigned.stepped_up(["mfa"])
+        with pytest.raises(ValueError, match=r"HTTPBearerAuth cannot read"):
+            HTTPBearerAuth(simple_validator).stepped_up(["mfa"])
+        with pytest.raises(ValueError, match=r"HTTPBearerAuth cannot read"):
+            MultiAuth(
+                _signed_cookie_auth(), HTTPBearerAuth(simple_validator)
+            ).stepped_up(["mfa"])
+
+        cases: list[tuple[dict[str, Any], type[Exception]]] = [
+            ({"amr": "pwd"}, TypeError),
+            ({"amr": []}, ValueError),
+            ({"amr": ["pwd otp"]}, ValueError),
+            ({"amr": [7]}, ValueError),
+            ({"acr": ""}, ValueError),
+            ({"acr": "gold silver"}, ValueError),
+            ({"acr": 'gold"'}, ValueError),
+            ({"acr": "oré"}, ValueError),
+        ]
+        for kwargs, error in cases:
+            with pytest.raises(error):
+                _signed_cookie_auth().set_cookie(Response(), VALID_COOKIE, **kwargs)
 
 
 SECRET_CREDENTIAL = "s3cr3t-credential-value"

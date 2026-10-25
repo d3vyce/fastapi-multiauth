@@ -33,6 +33,18 @@ bearer.fresh(max_age=300, authenticated_at=lambda claims: claims.get("auth_time"
 
 A weaker login gets a 401 whose `WWW-Authenticate` header names the required level (`acr_values="urn:mfa"`), so the client can send the user back to the provider. To check the methods used (the `amr` claim), compare against [`AuthenticationMethodReference`][fastapi_multiauth.AuthenticationMethodReference].
 
+## Second factor on a cookie session
+
+A signed cookie carries its own level: pass `acr=` and `amr=` to `set_cookie`, and `stepped_up()` reads them back without an `acr=` reader:
+
+```python
+--8<-- "docs_src/step_up/second_factor.py"
+```
+
+Call `sign_in` from your login route once the password matches: the session starts at `aal1`. The OTP route re-issues the cookie at `aal2`, adding `otp` to the methods it already had, and `/payouts` refuses anything less. The level names are yours to pick; these follow [NIST SP 800-63B](https://pages.nist.gov/800-63-4/sp800-63b.html).
+
+`session.acr_of(request)` and `session.amr_of(request)` read the current cookie's level and methods. Both are signed with the value, so the client cannot raise its own level, and a cookie set without them never passes `stepped_up()`.
+
 ## Good to know
 
 - `fresh()` and `stepped_up()` can be chained, and work on `MultiAuth` too.

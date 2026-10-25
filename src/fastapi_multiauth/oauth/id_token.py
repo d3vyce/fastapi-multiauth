@@ -15,7 +15,7 @@ from ..jwt import (
     _reject_symmetric,
     _UnknownKey,
 )
-from .utils import _b64url
+from ..utils import b64url_encode
 
 __all__ = ["oauth_validate_id_token"]
 
@@ -40,7 +40,7 @@ def _check_at_hash(pyjwt: Any, alg: str, claim: Any, access_token: str) -> None:
         raise OAuthIDTokenError(f"at_hash cannot be checked for alg {alg!r}") from None
     except UnicodeEncodeError:
         raise OAuthIDTokenError("ID token at_hash does not match") from None
-    expected = _b64url(digest[: len(digest) // 2])
+    expected = b64url_encode(digest[: len(digest) // 2])
     if not hmac.compare_digest(claim.encode(), expected.encode()):
         raise OAuthIDTokenError("ID token at_hash does not match")
 

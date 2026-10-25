@@ -142,7 +142,7 @@ class MultiAuth:
         self,
         acr_values: Sequence[str],
         *,
-        acr: Callable[..., Any],
+        acr: Callable[..., Any] | None = None,
     ) -> "MultiAuth":
         """Return a copy whose sources all require one of `acr_values`.
 

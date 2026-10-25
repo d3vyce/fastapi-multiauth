@@ -40,6 +40,10 @@ Browsers send cookies with every request to your site, whoever triggered it. `sa
 
 Pass a list of keys: the first one signs, all of them verify. Add the new key in front, then remove the old one once a `ttl` has passed.
 
+## Authentication level
+
+`set_cookie(response, value, acr=..., amr=...)` signs the login's level and methods into the cookie, for [`stepped_up()`](step-up.md#second-factor-on-a-cookie-session). Cookies set by earlier releases keep working until they expire; they carry no level, so they never pass `stepped_up()`.
+
 ## Revocable sessions
 
 A signed cookie stays valid until it expires; `delete_cookie` only clears one browser. To end a session for real, set `session_id=True`: each `set_cookie` creates a random id, returns it, and passes it to your validator.

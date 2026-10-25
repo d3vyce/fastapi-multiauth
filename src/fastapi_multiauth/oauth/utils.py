@@ -14,6 +14,7 @@ from fastapi.responses import RedirectResponse
 
 from .._http import _require_https
 from ..exceptions import OAuthStateError
+from ..utils import b64url_decode, b64url_encode
 
 __all__ = [
     "oauth_build_authorization_redirect",
@@ -23,11 +24,6 @@ __all__ = [
     "oauth_generate_pkce_pair",
     "oauth_generate_state_token",
 ]
-
-
-def _b64url(data: bytes) -> str:
-    """Unpadded base64url, as PKCE and OIDC hashes are carried."""
-    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
 
 def oauth_generate_state_token() -> str:
@@ -57,7 +53,7 @@ def oauth_generate_pkce_pair() -> tuple[str, str]:
     """
     code_verifier = secrets.token_urlsafe(64)
     digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
-    return code_verifier, _b64url(digest)
+    return code_verifier, b64url_encode(digest)
 
 
 def oauth_build_authorization_redirect(
@@ -149,8 +145,7 @@ def _verified_payload(
     if not state:
         return None
     try:
-        padded = state + "=" * (-len(state) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+        payload = json.loads(b64url_decode(state).decode("utf-8"))
         token = payload.get("n") if isinstance(payload, dict) else None
         matches = isinstance(token, str) and hmac.compare_digest(
             token.encode(), expected_state_token.encode()

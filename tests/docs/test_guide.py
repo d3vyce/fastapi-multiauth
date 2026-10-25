@@ -66,11 +66,15 @@ def test_validators_request():
     assert response.json() == {"name": "alice", "token_id": 7}
 
 
+def _adopt_cookie(client: TestClient, response: Response) -> None:
+    name, cookie = response.headers["set-cookie"].split(";", 1)[0].split("=", 1)
+    client.cookies.set(name, cookie)
+
+
 def _sign_in(client: TestClient, session, value: str) -> None:
     response = Response()
     session.set_cookie(response, value)
-    name, cookie = response.headers["set-cookie"].split(";", 1)[0].split("=", 1)
-    client.cookies.set(name, cookie)
+    _adopt_cookie(client, response)
 
 
 def test_bearer_issue():
@@ -222,6 +226,22 @@ def test_step_up_acr(provider):
     assert 'acr_values="urn:mfa"' in response.headers["www-authenticate"]
     strong = idp.sign(iss=idp.REALM, aud="my-api", sub="42", acr="urn:mfa")
     assert client.post("/payouts", headers=_bearer(strong)).status_code == 200
+
+
+def test_step_up_second_factor():
+    from docs_src.step_up.second_factor import sign_in
+
+    client = _client("step_up.second_factor", base_url=HTTPS)
+    response = Response()
+    sign_in(response, "alice")
+    _adopt_cookie(client, response)
+
+    weak = client.post("/payouts")
+    assert weak.status_code == 401
+    assert weak.json()["detail"] == "Insufficient user authentication"
+    assert client.post("/login/otp", json={"code": "000000"}).status_code == 401
+    assert client.post("/login/otp", json={"code": "123456"}).status_code == 200
+    assert client.post("/payouts").json() == {"approved_by": "alice"}
 
 
 def test_websocket():
