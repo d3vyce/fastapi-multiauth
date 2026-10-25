@@ -6229,6 +6229,46 @@ class TestDPoP:
             with pytest.raises(UnauthorizedError):
                 await source.dispatch(request, [])
 
+    def test_proof_keys_are_parsed_once_per_key(self, monkeypatch):
+        parsed: list[str | None] = []
+        pyjwk = pyjwt.PyJWK
+
+        def counting(jwk, algorithm=None):
+            parsed.append(algorithm)
+            return pyjwk(jwk, algorithm=algorithm)
+
+        monkeypatch.setattr(pyjwt, "PyJWK", counting)
+        monkeypatch.setattr("fastapi_multiauth.sources.dpop._KEY_CACHE_SIZE", 2)
+        ec, ec_2, ed = (_EC_KEY, "ES256"), (_EC_KEY_2, "ES256"), (_ED_KEY, "EdDSA")
+        for keys, calls in [
+            ([ec, ec, ec], 1),
+            ([ec, ec_2, ec, ec_2], 2),
+            ([ec, ec_2, ed, ec], 4),
+        ]:
+            parsed.clear()
+            client = _client(self._source())
+            for key, alg in keys:
+                token = self._token(key)
+                response = self._get(client, token, self._proof(token, key, alg=alg))
+                assert response.status_code == 200, alg
+            assert len(parsed) == calls, keys
+
+        # A key that does not parse takes no slot from the cached ones.
+        parsed.clear()
+        client = _client(self._source())
+        token, token_2 = self._token(), self._token(_EC_KEY_2)
+        malformed = self._proof(token, jwk={**_public_jwk(_EC_KEY), "x": "AAAA"})
+        for bound, proof, status in [
+            (token, self._proof(token), 200),
+            (token_2, self._proof(token_2, _EC_KEY_2), 200),
+            (token, malformed, 401),
+            (token, malformed, 401),
+            (token, self._proof(token), 200),
+            (token_2, self._proof(token_2, _EC_KEY_2), 200),
+        ]:
+            assert self._get(client, bound, proof).status_code == status
+        assert len(parsed) == 4
+
     def test_thumbprint_matches_rfc_7638(self):
         jwk = {
             "kty": "RSA",

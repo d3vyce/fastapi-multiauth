@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar
 from urllib.parse import urlsplit
@@ -35,6 +36,7 @@ _THUMBPRINT_MEMBERS = {
 }
 _DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 _PROOF_CLAIMS = ["iat", "jti", "htm", "htu", "ath"]
+_KEY_CACHE_SIZE = 1024
 
 
 class NoReplayCheck(enum.Enum):
@@ -167,6 +169,7 @@ class HTTPDPoPAuth(ValidatedAuthSource):
             normalize_origin(public_origin, "public_origin") if public_origin else None
         )
         self._jkt = ensure_async(jkt) if jkt else None
+        self._keys: OrderedDict[tuple[str, str], Any] = OrderedDict()
         super().__init__(
             validator,
             HTTPBase(
@@ -230,6 +233,19 @@ class HTTPDPoPAuth(ValidatedAuthSource):
             return self._origin + (request.url.path or "/")
         return _normalize_url(str(request.url))
 
+    def _proof_key(self, jwk: dict[str, Any], alg: str, thumbprint: str) -> Any:
+        """The parsed public key of a proof, cached by its thumbprint."""
+        cache_key = (thumbprint, alg)
+        key = self._keys.get(cache_key)
+        if key is None:
+            key = self._jwt.PyJWK(jwk, algorithm=alg)
+            self._keys[cache_key] = key
+            if len(self._keys) > _KEY_CACHE_SIZE:
+                self._keys.popitem(last=False)
+        else:
+            self._keys.move_to_end(cache_key)
+        return key
+
     def _verify_proof(
         self, token: str, request: HTTPConnection | None
     ) -> tuple[str, str, float]:
@@ -262,7 +278,7 @@ class HTTPDPoPAuth(ValidatedAuthSource):
         try:
             claims = self._jwt.decode(
                 proofs[0],
-                key=self._jwt.PyJWK(jwk, algorithm=alg),
+                key=self._proof_key(jwk, alg, thumbprint),
                 algorithms=[alg],
                 leeway=self._leeway,
                 options={
