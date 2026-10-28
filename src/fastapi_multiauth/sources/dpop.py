@@ -252,18 +252,12 @@ class HTTPDPoPAuth(ValidatedAuthSource):
         origin = _normalize_url(str(request.url.replace(path="")))
         return None if origin is None else origin.removesuffix("/") + path
 
-    def _proof_key(self, jwk: dict[str, Any], alg: str, thumbprint: str) -> Any:
-        """The parsed public key of a proof, cached by its thumbprint."""
-        cache_key = (thumbprint, alg)
-        key = self._keys.get(cache_key)
-        if key is None:
-            key = self._jwt.PyJWK(jwk, algorithm=alg)
-            self._keys[cache_key] = key
-            if len(self._keys) > _KEY_CACHE_SIZE:
-                self._keys.popitem(last=False)
-        else:
-            self._keys.move_to_end(cache_key)
-        return key
+    def _remember_key(self, cache_key: tuple[str, str], key: Any) -> None:
+        """Remember the parsed key of a verified proof, by thumbprint and algorithm."""
+        self._keys[cache_key] = key
+        self._keys.move_to_end(cache_key)
+        if len(self._keys) > _KEY_CACHE_SIZE:
+            self._keys.popitem(last=False)
 
     def _verify_proof(
         self, token: str, request: HTTPConnection | None
@@ -294,10 +288,12 @@ class HTTPDPoPAuth(ValidatedAuthSource):
         thumbprint = _jwk_thumbprint(jwk)
         if thumbprint is None:
             raise self._proof_error("invalid_dpop_proof")
+        cache_key = (thumbprint, alg)
         try:
+            key = self._keys.get(cache_key) or self._jwt.PyJWK(jwk, algorithm=alg)
             claims = self._jwt.decode(
                 proofs[0],
-                key=self._proof_key(jwk, alg, thumbprint),
+                key=key,
                 algorithms=[alg],
                 leeway=self._leeway,
                 options={
@@ -308,6 +304,7 @@ class HTTPDPoPAuth(ValidatedAuthSource):
             )
         except (self._jwt.exceptions.PyJWTError, TypeError, ValueError):
             raise self._proof_error("invalid_dpop_proof") from None
+        self._remember_key(cache_key, key)
         now = time.time()
         iat = finite_number(claims["iat"])
         if iat is None or not (
