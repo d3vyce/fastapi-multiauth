@@ -2526,6 +2526,9 @@ class TestJWTValidatorConfig:
         for audience in [None, "", []]:
             with pytest.raises(ValueError, match="audience is required.*ANY_AUDIENCE"):
                 JWTValidator(jwks_url="https://idp.example.com/jwks", audience=audience)
+        for leeway in [-1, math.inf, math.nan]:
+            with pytest.raises(ValueError, match="leeway"):
+                JWTValidator(secret=JWT_SECRET, leeway=leeway)
 
     def test_valid_configuration_accepted(self):
         _jwks_validator("http://localhost:8080/jwks")
@@ -4569,6 +4572,8 @@ class TestValidateIDToken:
             ({"algorithms": []}, "at least one"),
             ({"issuer": ""}, "issuer"),
             ({"client_id": ""}, "client_id"),
+            ({"leeway": -1}, "leeway"),
+            ({"leeway": math.nan}, "leeway"),
         ]:
             with pytest.raises(ValueError, match=match):
                 await self._validate(_id_token(), **kwargs)
@@ -5948,9 +5953,10 @@ class TestIntrospectionValidator:
         )
         with pytest.raises(ValueError, match="audience is required"):
             IntrospectionValidator(url=self.URL, client_id="a", client_secret="b")
-        for cache_ttl in [-1, math.inf, math.nan]:
-            with pytest.raises(ValueError, match="cache_ttl"):
-                self._validator(cache_ttl=cache_ttl)
+        for name in ["leeway", "cache_ttl"]:
+            for value in [-1, math.inf, math.nan]:
+                with pytest.raises(ValueError, match=name):
+                    self._validator(**{name: value})
         with pytest.raises(ValueError, match="cache_size"):
             self._validator(cache_size=0)
 
