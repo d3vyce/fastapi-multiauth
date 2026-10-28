@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import string
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from fastapi import Request
@@ -14,7 +14,12 @@ from fastapi.security import APIKeyHeader
 from fastapi_multiauth.exceptions import UnauthorizedError
 
 from ..abc import AuthSource, _unenforceable_scopes_error
-from ..utils import normalize_secret_keys, refusal, require_positive_seconds
+from ..utils import (
+    ensure_async,
+    normalize_secret_keys,
+    refusal,
+    require_positive_seconds,
+)
 
 _MIN_SECRET_KEY_BYTES = 16
 _MAX_TIMESTAMP_DIGITS = 12
@@ -86,13 +91,17 @@ class HMACSignatureAuth(AuthSource):
             e.g. `"v0:{timestamp}:{body}"`. Defaults to `{timestamp}.{body}`
             with a timestamp, `{body}` without.
         tolerance: How far the timestamp may be from now, in seconds.
+        replay_check: Sync or async callable recording a verified signature
+            until the epoch time it receives, returning `False` if it was
+            already recorded. Needs a timestamp.
         scheme_name: Name of the security scheme in OpenAPI, `APIKeyHeader_{header}` by default.
         description: Description of the security scheme in OpenAPI.
 
     Raises:
         ValueError: On an invalid configuration, such as a short secret, a
-            `tolerance` that is not positive, two timestamp sources, or a
-            `signed_message` that leaves the timestamp unsigned.
+            `tolerance` that is not positive, two timestamp sources, a
+            `signed_message` that leaves the timestamp unsigned, or a
+            `replay_check` without a timestamp.
     """
 
     def __init__(
@@ -106,6 +115,7 @@ class HMACSignatureAuth(AuthSource):
         timestamp_header: str | None = None,
         signed_message: str | None = None,
         tolerance: float = 300.0,
+        replay_check: Callable[[str, float], Any] | None = None,
         scheme_name: str | None = None,
         description: str | None = None,
     ) -> None:
@@ -119,6 +129,12 @@ class HMACSignatureAuth(AuthSource):
         if timestamp_key is not None and timestamp_header is not None:
             raise ValueError("pass one of timestamp_key or timestamp_header")
         timestamped = timestamp_key is not None or timestamp_header is not None
+        if replay_check is not None and not timestamped:
+            raise ValueError(
+                "replay_check needs a timestamp: without one, every signature "
+                "would have to be kept forever. Deduplicate on the sender's "
+                "event id instead"
+            )
         if signed_message is None:
             signed_message = f"{_TIMESTAMP}.{_BODY}" if timestamped else _BODY
         self._before, self._after = _split_template(
@@ -137,6 +153,7 @@ class HMACSignatureAuth(AuthSource):
         self._timestamp_header = timestamp_header
         self._timestamped = timestamped
         self._tolerance = tolerance
+        self._replay_check = ensure_async(replay_check) if replay_check else None
         super().__init__(
             APIKeyHeader(
                 name=header,
@@ -201,8 +218,9 @@ class HMACSignatureAuth(AuthSource):
 
         Raises:
             UnauthorizedError: If the header does not parse (`malformed`),
-                the timestamp is outside `tolerance` (`expired`), or no
-                signature matches (`invalid_signature`).
+                the timestamp is outside `tolerance` (`expired`), no
+                signature matches (`invalid_signature`), or `replay_check`
+                already saw it (`replay`).
             RuntimeError: If the route declares scopes, is a WebSocket, or
                 already consumed the body.
         """
@@ -214,6 +232,7 @@ class HMACSignatureAuth(AuthSource):
             return await self.authenticate(credential)
         timestamp, signatures = self._parse(credential, request)
         signed_prefix = self._before
+        expires_at = None
         if timestamp is not None:
             if not (
                 timestamp.isascii()
@@ -221,9 +240,11 @@ class HMACSignatureAuth(AuthSource):
                 and len(timestamp) <= _MAX_TIMESTAMP_DIGITS
             ):
                 raise _malformed()
-            if abs(time.time() - int(timestamp)) > self._tolerance:
+            issued_at = int(timestamp)
+            if abs(time.time() - issued_at) > self._tolerance:
                 raise refusal(UnauthorizedError(), "expired")
             signed_prefix += timestamp.encode() + self._after
+            expires_at = issued_at + self._tolerance
         try:
             body = await request.body()
         except RuntimeError as exc:
@@ -242,6 +263,12 @@ class HMACSignatureAuth(AuthSource):
             mac.update(body)
             digest = mac.hexdigest()
             if any(hmac.compare_digest(digest, c) for c in candidates):
+                if (
+                    self._replay_check is not None
+                    and expires_at is not None
+                    and not await self._replay_check(digest, expires_at)
+                ):
+                    raise refusal(UnauthorizedError(), "replay")
                 return body
         raise refusal(UnauthorizedError(), "invalid_signature")
 

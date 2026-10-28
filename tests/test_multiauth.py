@@ -5650,6 +5650,35 @@ class TestHMACSignatureAuth:
         assert response.status_code == 401
         assert client.post("/hook", content=body).status_code == 401
 
+    def test_replays_are_refused(self, caplog):
+        caplog.set_level(logging.WARNING, logger="fastapi_multiauth")
+        seen: dict[str, float] = {}
+
+        async def remember(signature: str, expires_at: float) -> bool:
+            if signature in seen:
+                return False
+            seen[signature] = expires_at
+            return True
+
+        source = HMACSignatureAuth(
+            WEBHOOK_SECRET, replay_check=remember, **self.GENERIC
+        )
+        client = self._client(source)
+        body = b"payment.succeeded"
+        t, signature = self._stamped(body)
+        headers = {"X-Signature": f"sha256={signature.upper()}", "X-Timestamp": t}
+        tampered = client.post("/hook", content=b"tampered", headers=headers)
+        assert tampered.status_code == 401
+        assert seen == {}
+        assert client.post("/hook", content=body, headers=headers).status_code == 200
+        assert seen == {signature: int(t) + 300}
+        caplog.clear()
+        assert client.post("/hook", content=body, headers=headers).status_code == 401
+        assert [r.auth_reason for r in caplog.records] == ["replay"]
+        t2, signature2 = self._stamped(body, int(t) + 1)
+        headers = {"X-Signature": f"sha256={signature2}", "X-Timestamp": t2}
+        assert client.post("/hook", content=body, headers=headers).status_code == 200
+
     def test_misuse_is_refused(self):
         source = HMACSignatureAuth(WEBHOOK_SECRET, **self.GITHUB)
 
@@ -5710,6 +5739,7 @@ class TestHMACSignatureAuth:
                 },
                 "one of timestamp_key or timestamp_header",
             ),
+            ({"replay_check": lambda signature, expires_at: True}, "needs a timestamp"),
             ({"signed_message": "{body}.signed"}, "must end with"),
             ({"signed_message": "{body}{body}"}, "must end with"),
             ({"signed_message": "{timestamp}.{body}"}, "exactly when a timestamp"),
