@@ -26,6 +26,11 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 
+_OTHER_TOKEN_KINDS = {
+    "typ": frozenset({"refresh", "offline", "id", "logout"}),
+    "token_use": frozenset({"refresh_token", "id_token", "refresh", "id"}),
+}
+
 
 class _IntrospectionUnavailable(Exception):
     """The introspection endpoint is unreachable or answered unusably."""
@@ -62,6 +67,7 @@ class IntrospectionValidator:
     For providers that issue opaque access tokens instead of JWTs. Each new
     token costs one request to the introspection endpoint; active answers
     are cached, so a revoked token keeps working for up to `cache_ttl`.
+    Refresh and ID tokens are refused.
     If the endpoint is down, the request is answered with a 503.
 
     Args:
@@ -201,7 +207,11 @@ class IntrospectionValidator:
         return response
 
     def _check_claims(self, claims: dict[str, Any]) -> None:
-        """Check `exp`, `nbf`, `aud` and `iss` locally, as for a JWT."""
+        """Check the token is an access token, then `exp`, `nbf`, `aud` and `iss`."""
+        for field, kinds in _OTHER_TOKEN_KINDS.items():
+            kind = claims.get(field)
+            if isinstance(kind, str) and kind.lower() in kinds:
+                raise refusal(UnauthorizedError(), "not_access_token")
         now = time.time()
         if "exp" in claims:
             exp = finite_number(claims["exp"])
