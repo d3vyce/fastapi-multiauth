@@ -43,7 +43,7 @@ from .utils import (
     verify_token_hash,
 )
 
-__version__ = "1.0.0rc1"
+__version__ = "1.0.0rc2"
 
 logging.getLogger(__name__).addHandler(logging.NullHandler())
 
