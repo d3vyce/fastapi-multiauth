@@ -68,7 +68,7 @@ class IntrospectionValidator:
 
     Raises:
         ValueError: On an invalid configuration, such as a plain-HTTP `url`,
-            a missing `audience`, or a negative `cache_ttl`.
+            a missing `audience`, or a negative `leeway` or `cache_ttl`.
     """
 
     ANY_AUDIENCE: ClassVar[AnyAudience] = AnyAudience.ANY
@@ -97,6 +97,7 @@ class IntrospectionValidator:
                 "its other clients too. Pass "
                 "audience=IntrospectionValidator.ANY_AUDIENCE to skip the check"
             )
+        require_nonnegative_seconds(leeway, "leeway")
         require_nonnegative_seconds(cache_ttl, "cache_ttl")
         if cache_size < 1:
             raise ValueError("cache_size must be at least 1")

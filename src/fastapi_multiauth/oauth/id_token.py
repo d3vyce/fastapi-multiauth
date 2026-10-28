@@ -15,7 +15,7 @@ from ..jwt import (
     _reject_symmetric,
     _UnknownKey,
 )
-from ..utils import b64url_encode
+from ..utils import b64url_encode, require_nonnegative_seconds
 
 __all__ = ["oauth_validate_id_token"]
 
@@ -82,7 +82,8 @@ async def oauth_validate_id_token(
 
     Raises:
         ValueError: If `jwks_uri` is not HTTPS, `issuer` or `client_id` is
-            empty, or `algorithms` is empty or includes `HS*`.
+            empty, `algorithms` is empty or includes `HS*`, or `leeway` is
+            negative.
         OAuthIDTokenError: If any check fails, or the keys cannot be
             fetched and none are cached.
     """
@@ -92,6 +93,7 @@ async def oauth_validate_id_token(
         raise ValueError("issuer must be a non-empty string")
     if not client_id:
         raise ValueError("client_id must be a non-empty string")
+    require_nonnegative_seconds(leeway, "leeway")
     accepted = tuple(algorithms)
     if not accepted:
         raise ValueError("algorithms must list at least one algorithm")

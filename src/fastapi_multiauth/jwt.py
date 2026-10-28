@@ -11,7 +11,13 @@ import anyio
 from ._http import DEFAULT_TIMEOUT, _get_json, _require_https
 from ._imports import require_extra
 from .exceptions import UnauthorizedError
-from .utils import ensure_async, refusal, require_scopes, service_unavailable
+from .utils import (
+    ensure_async,
+    refusal,
+    require_nonnegative_seconds,
+    require_scopes,
+    service_unavailable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +243,8 @@ class JWTValidator:
 
     Raises:
         ValueError: On an invalid configuration, such as both or neither of
-            `secret` and `jwks_url`, a short secret, or a JWKS without `audience`.
+            `secret` and `jwks_url`, a short secret, a JWKS without `audience`,
+            or a negative `leeway`.
     """
 
     ANY_AUDIENCE: ClassVar[AnyAudience] = AnyAudience.ANY
@@ -262,6 +269,7 @@ class JWTValidator:
         self._jwt = _import_pyjwt()
         if (secret is None) == (jwks_url is None):
             raise ValueError("provide exactly one of 'secret' or 'jwks_url'")
+        require_nonnegative_seconds(leeway, "leeway")
         if secret is not None:
             if len(secret.encode()) < _MIN_SECRET_BYTES:
                 raise ValueError(
