@@ -202,9 +202,8 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         # the last one, so reverse them to make the first configured key the signer.
         # The salt also separates the payload layouts.
         keys = list(reversed(self._secret_keys))
-        salt = f"{_SALT_PREFIX}{name}{'.sid' if session_id else ''}"
-        self._signer = _precomputed_signer(keys, f"{salt}.v2") if keys else None
-        self._legacy_signer = _precomputed_signer(keys, salt) if keys else None
+        salt = f"{_SALT_PREFIX}{name}{'.sid' if session_id else ''}.v2"
+        self._signer = _precomputed_signer(keys, salt) if keys else None
         self._ttl = ttl
         self._secure = secure
         self._samesite: SameSite = samesite
@@ -227,31 +226,19 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         return self._signer.sign(f"{assurance}.{value}".encode()).decode()
 
     def _unsign(self, cookie_value: str, *, dated: bool = False) -> _Opened:
-        """Verify signature + expiry, reading payloads from before acr/amr too.
+        """Verify signature + expiry.
 
         The signing time is only read when `dated`.
         """
-        if self._signer is None or self._legacy_signer is None:
+        if self._signer is None:
             raise RuntimeError("_unsign called without secret_key configured")
-        data = cookie_value.encode()
-        legacy = False
-        try:
-            result = self._signer.unsign(
-                data, max_age=self._ttl, return_timestamp=dated
-            )
-        except SignatureExpired:
-            raise
-        except BadSignature:
-            legacy = True
-            result = self._legacy_signer.unsign(
-                data, max_age=self._ttl, return_timestamp=dated
-            )
+        result = self._signer.unsign(
+            cookie_value.encode(), max_age=self._ttl, return_timestamp=dated
+        )
         signed_at = None
         if isinstance(result, tuple):
             result, stamp = result
             signed_at = stamp.timestamp()
-        if legacy:
-            return _Opened("", result.decode(), signed_at)
         assurance, _, value = result.decode().partition(".")
         return _Opened(assurance, value, signed_at)
 

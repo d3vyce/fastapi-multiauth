@@ -901,7 +901,8 @@ class TestCookieKeyRotation:
         auth = APIKeyCookieAuth(
             "session", cookie_validator, secret_key=[self.NEW, self.OLD]
         )
-        signed = _stock_signer(self.OLD).sign(VALID_COOKIE.encode()).decode()
+        stock = _stock_signer(self.OLD, salt="session.v2")
+        signed = stock.sign(f".{VALID_COOKIE}".encode()).decode()
         assert auth._verify(signed) == VALID_COOKIE
 
     def test_session_id_salt_still_separates_the_two_layouts(self):
@@ -911,7 +912,8 @@ class TestCookieKeyRotation:
             secret_key=self.NEW,
             session_id=True,
         )
-        signed = _stock_signer(self.NEW).sign(VALID_COOKIE.encode()).decode()
+        stock = _stock_signer(self.NEW, salt="session.v2")
+        signed = stock.sign(f".{VALID_COOKIE}".encode()).decode()
         with pytest.raises(UnauthorizedError):
             auth._verify(signed)
 
@@ -5130,19 +5132,14 @@ class TestCookieAssurance:
         response = client.get("/me", cookies={"session": _cookie_value(response)})
         assert response.json() == {"session": "user.42:v3", "sid": sid}
 
-    def test_a_cookie_from_before_the_upgrade_still_signs_in(self):
-        """Pre-acr cookies authenticate, date themselves, and fail closed on levels."""
+    def test_a_cookie_from_before_acr_and_amr_is_refused(self):
+        """Pre-acr cookies are signed under another salt: they fail closed."""
         legacy = _stock_signer(COOKIE_SECRET).sign(VALID_COOKIE.encode()).decode()
         auth = _signed_cookie_auth()
         client = self._client(auth)
         client.cookies.set("session", legacy)
-        assert client.get("/me").json() == {"session": VALID_COOKIE}
+        assert client.get("/me").status_code == 401
         assert client.get("/whoami").json() == {"acr": None, "amr": None}
-        assert client.get("/mfa").status_code == 401
-        assert (
-            _client(auth.fresh(300)).get("/me", cookies={"session": legacy}).status_code
-            == 200
-        )
 
         legacy_sid = _stock_signer(COOKIE_SECRET, salt="session.sid")
         legacy_sid = legacy_sid.sign(f"abc.{VALID_COOKIE}".encode()).decode()
@@ -5154,7 +5151,7 @@ class TestCookieAssurance:
             secure=False,
         )
         response = _client(sid_auth).get("/me", cookies={"session": legacy_sid})
-        assert response.json() == {"session": VALID_COOKIE, "sid": "abc"}
+        assert response.status_code == 401
 
     def test_the_guards_reuse_the_verified_cookie(self, monkeypatch):
         """fresh() and stepped_up() read the cookie checked by authentication."""
@@ -5175,12 +5172,6 @@ class TestCookieAssurance:
             cookies = {"session": _cookie_value(response)}
             assert client.get("/me", cookies=cookies).status_code == status, acr
             assert len(unsigned) == 1, acr
-
-        # A cookie from before acr/amr fails the current salt, then verifies.
-        legacy = _stock_signer(COOKIE_SECRET).sign(VALID_COOKIE.encode()).decode()
-        unsigned.clear()
-        assert client.get("/me", cookies={"session": legacy}).status_code == 401
-        assert len(unsigned) == 2
 
     def test_an_override_without_the_request_still_meets_the_guards(self):
         """Without the request, the guards verify the cookie again."""
