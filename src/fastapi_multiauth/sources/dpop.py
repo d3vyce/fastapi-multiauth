@@ -29,6 +29,7 @@ from ..utils import (
     refusal,
     require_nonnegative_seconds,
     require_positive_seconds,
+    url_origin,
 )
 
 _DEFAULT_ALGORITHMS = ("ES256", "RS256", "PS256", "EdDSA")
@@ -37,7 +38,6 @@ _THUMBPRINT_MEMBERS = {
     "EC": ("crv", "kty", "x", "y"),
     "OKP": ("crv", "kty", "x"),
 }
-_DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 _PROOF_CLAIMS = ["iat", "jti", "htm", "htu", "ath"]
 _PATH_SAFE = "/%:@!$&'()*+,;=-._~"
 _UNRESERVED = frozenset(string.ascii_letters + string.digits + "-._~")
@@ -80,19 +80,11 @@ def _normalize_path(path: str | bytes) -> str:
 
 
 def _normalize_url(url: str) -> str | None:
-    """`url` without query and fragment, scheme and host lowercased, default port dropped."""
-    try:
-        parts = urlsplit(url)
-        port = parts.port
-    except ValueError:
+    """`url` without query and fragment, origin and path normalized."""
+    origin = url_origin(url)
+    if origin is None:
         return None
-    scheme, host = parts.scheme.lower(), parts.hostname
-    if not scheme or not host:
-        return None
-    netloc = f"[{host}]" if ":" in host else host
-    if port is not None and port != _DEFAULT_PORTS.get(scheme):
-        netloc = f"{netloc}:{port}"
-    return f"{scheme}://{netloc}{_normalize_path(parts.path)}"
+    return origin + _normalize_path(urlsplit(url).path)
 
 
 class HTTPDPoPAuth(ValidatedAuthSource):
@@ -240,12 +232,12 @@ class HTTPDPoPAuth(ValidatedAuthSource):
 
     def _request_url(self, request: HTTPConnection) -> str | None:
         """The URL the client called, as `htu` must name it."""
-        raw_path = request.scope.get("raw_path")
-        path = _normalize_path(raw_path or request.url.path)
-        if self._origin is not None:
-            return self._origin + path
-        origin = _normalize_url(str(request.url.replace(path="")))
-        return None if origin is None else origin.removesuffix("/") + path
+        origin = self._origin or url_origin(str(request.url))
+        if origin is None:
+            return None
+        return origin + _normalize_path(
+            request.scope.get("raw_path") or request.url.path
+        )
 
     def _remember_key(self, cache_key: tuple[str, str], key: Any) -> None:
         """Remember the parsed key of a verified proof, by thumbprint and algorithm."""
