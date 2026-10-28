@@ -9,6 +9,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, ClassVar
 from urllib.parse import quote_plus
 
+import anyio
 import httpx
 
 from ._http import DEFAULT_TIMEOUT, _request_json, _require_https
@@ -55,6 +56,15 @@ class _Answer:
         return copied
 
 
+class _Lookup:
+    """One introspection in flight, awaited by every request carrying its token."""
+
+    def __init__(self) -> None:
+        self.done = anyio.Event()
+        self.answer: _Answer | None = None
+        self.error: Exception | None = None
+
+
 def _basic_authorization(client_id: str, client_secret: str) -> str:
     """`client_secret_basic`: both halves form-encoded before base64 (RFC 6749 §2.3.1)."""
     pair = f"{quote_plus(client_id, safe='')}:{quote_plus(client_secret, safe='')}"
@@ -65,8 +75,9 @@ class IntrospectionValidator:
     """Validator asking the provider whether an opaque token is active.
 
     For providers that issue opaque access tokens instead of JWTs. Each new
-    token costs one request to the introspection endpoint; active answers
-    are cached, so a revoked token keeps working for up to `cache_ttl`.
+    token costs one request to the introspection endpoint, shared by
+    concurrent requests; active answers are cached, so a revoked token
+    keeps working for up to `cache_ttl`.
     Refresh and ID tokens are refused.
     If the endpoint is down, the request is answered with a 503.
 
@@ -147,6 +158,7 @@ class IntrospectionValidator:
         self._cache_ttl = cache_ttl
         self._cache_size = cache_size
         self._cache: OrderedDict[str, tuple[float, _Answer]] = OrderedDict()
+        self._lookups: dict[str, _Lookup] = {}
         self._timeout = timeout
         self._client = client
 
@@ -159,18 +171,36 @@ class IntrospectionValidator:
             HTTPException: 503 if the introspection endpoint cannot be used.
         """
         key = hash_token(token)
-        answer = self._cached(key)
-        if answer is None:
-            claims = await self._introspect(token)
-            self._check_claims(claims)
-            answer = _Answer(claims)
-            self._store(key, answer)
+        answer = self._cached(key) or await self._lookup(token, key)
         claims = answer.copy()
         if scopes:
             require_scopes(claims, self._scopes_claim, scopes)
         if self._claims_to_identity is not None:
             return await self._claims_to_identity(claims)
         return claims
+
+    async def _lookup(self, token: str, key: str) -> _Answer:
+        """The answer for `token`, from the introspection in flight or a new one."""
+        while (lookup := self._lookups.get(key)) is not None:
+            await lookup.done.wait()
+            if lookup.error is not None:
+                raise copy.copy(lookup.error)
+            if lookup.answer is not None:
+                return lookup.answer
+        lookup = self._lookups[key] = _Lookup()
+        try:
+            claims = await self._introspect(token)
+            self._check_claims(claims)
+            answer = _Answer(claims)
+            self._store(key, answer)
+            lookup.answer = answer
+        except Exception as exc:
+            lookup.error = exc
+            raise
+        finally:
+            del self._lookups[key]
+            lookup.done.set()
+        return answer
 
     async def _introspect(self, token: str) -> dict[str, Any]:
         """The provider's answer for an active token; refuse an inactive one."""

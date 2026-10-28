@@ -5966,6 +5966,60 @@ class TestIntrospectionValidator:
         for dep in [strong, recent]:
             assert _client(dep).get("/me", headers=headers).status_code == 200
 
+    def _slow_endpoint(self, answer: dict) -> list[httpx.Request]:
+        """Answer introspections slowly with `answer`; return the requests sent."""
+        import asyncio
+
+        sent: list[httpx.Request] = []
+
+        async def slow(request):
+            sent.append(request)
+            await asyncio.sleep(0.05)
+            return httpx.Response(200, json=answer)
+
+        respx.post(self.URL).mock(side_effect=slow)
+        return sent
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_concurrent_requests_share_one_introspection(self):
+        import asyncio
+
+        for answer, kwargs in [
+            (self._active(), {}),
+            (self._active(), {"cache_ttl": 0}),
+            ({"active": False}, {}),
+        ]:
+            sent = self._slow_endpoint(answer)
+            validator = self._validator(**kwargs)
+            results = await asyncio.gather(
+                *(validator("t") for _ in range(3)), return_exceptions=True
+            )
+            assert len(sent) == 1, answer
+            if answer["active"]:
+                assert all(
+                    isinstance(r, dict) and r["sub"] == "user-1" for r in results
+                )
+            else:
+                assert all(isinstance(r, UnauthorizedError) for r in results)
+                assert len({id(r) for r in results}) == 3
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_a_cancelled_introspection_lets_the_waiters_retry(self):
+        import asyncio
+
+        sent = self._slow_endpoint(self._active())
+        validator = self._validator()
+        leader = asyncio.ensure_future(validator("t"))
+        while not sent:
+            await asyncio.sleep(0)
+        follower = asyncio.ensure_future(validator("t"))
+        await asyncio.sleep(0)
+        leader.cancel()
+        assert (await follower)["sub"] == "user-1"
+        assert len(sent) == 2
+
     @respx.mock
     def test_changing_the_identity_leaves_the_cache_alone(self):
         respx.post(self.URL).respond(json=self._active(groups=["staff"]))
