@@ -44,6 +44,7 @@ Records never contain the credential, its hash, or the identity. Correlate with 
 | `invalid_dpop_proof` | a DPoP proof that is missing, malformed, or does not match the request or token |
 | `dpop_key_mismatch` | a valid DPoP proof signed by another key than the token is bound to |
 | `dpop_replay` | a DPoP proof sent a second time |
+| `dpop_bound` | a DPoP-bound token sent as `Bearer`, without its proof |
 | `insufficient_scope` | a valid JWT missing a route scope (403) |
 | `unknown_key` | a JWT signed with a key the provider does not publish |
 | `jwks_unavailable` | the provider's keys cannot be fetched (503) |

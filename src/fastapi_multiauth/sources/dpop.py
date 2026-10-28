@@ -22,6 +22,7 @@ from ..jwt import _import_pyjwt
 from ..utils import (
     authorization_credential,
     b64url_encode,
+    claims_jkt,
     ensure_async,
     finite_number,
     normalize_origin,
@@ -92,12 +93,6 @@ def _normalize_url(url: str) -> str | None:
     if port is not None and port != _DEFAULT_PORTS.get(scheme):
         netloc = f"{netloc}:{port}"
     return f"{scheme}://{netloc}{_normalize_path(parts.path)}"
-
-
-def _claims_jkt(identity: Any) -> Any:
-    """The `cnf.jkt` of an identity that is the token's claims."""
-    cnf = identity.get("cnf") if isinstance(identity, Mapping) else None
-    return cnf.get("jkt") if isinstance(cnf, Mapping) else None
 
 
 class HTTPDPoPAuth(ValidatedAuthSource):
@@ -225,7 +220,7 @@ class HTTPDPoPAuth(ValidatedAuthSource):
         identity = await self._call_validator(
             credential, scopes=scopes, request=request
         )
-        bound = await self._jkt(identity) if self._jkt else _claims_jkt(identity)
+        bound = await self._jkt(identity) if self._jkt else claims_jkt(identity)
         if not isinstance(bound, str) or not hmac.compare_digest(
             bound.encode(), thumbprint.encode()
         ):

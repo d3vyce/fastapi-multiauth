@@ -29,6 +29,7 @@ class OAuth2PasswordBearerAuth(_BearerSource):
         token_url: URL of the token endpoint.
         scopes: Available scopes mapped to their descriptions. A route
             declaring a scope outside this catalogue is refused.
+        allow_dpop_bound: Accept a DPoP-bound token (`cnf.jkt`) without its proof.
         scheme_name: Name of the security scheme in OpenAPI, `OAuth2PasswordBearer` by default.
         description: Description of the security scheme in OpenAPI.
         **kwargs: Keyword arguments passed to the validator on every call.
@@ -40,6 +41,7 @@ class OAuth2PasswordBearerAuth(_BearerSource):
         *,
         token_url: str,
         scopes: dict[str, str] | None = None,
+        allow_dpop_bound: bool = False,
         scheme_name: str | None = None,
         description: str | None = None,
         **kwargs: Any,
@@ -54,6 +56,7 @@ class OAuth2PasswordBearerAuth(_BearerSource):
                 description=description,
                 auto_error=False,
             ),
+            allow_dpop_bound=allow_dpop_bound,
             **kwargs,
         )
 
@@ -71,6 +74,7 @@ class OAuth2AuthorizationCodeBearerAuth(_BearerSource):
         refresh_url: URL of the provider's refresh endpoint, if any.
         scopes: Available scopes mapped to their descriptions. A route
             declaring a scope outside this catalogue is refused.
+        allow_dpop_bound: Accept a DPoP-bound token (`cnf.jkt`) without its proof.
         scheme_name: Name of the security scheme in OpenAPI, `OAuth2AuthorizationCodeBearer` by default.
         description: Description of the security scheme in OpenAPI.
         **kwargs: Keyword arguments passed to the validator on every call.
@@ -84,6 +88,7 @@ class OAuth2AuthorizationCodeBearerAuth(_BearerSource):
         token_url: str,
         refresh_url: str | None = None,
         scopes: dict[str, str] | None = None,
+        allow_dpop_bound: bool = False,
         scheme_name: str | None = None,
         description: str | None = None,
         **kwargs: Any,
@@ -100,6 +105,7 @@ class OAuth2AuthorizationCodeBearerAuth(_BearerSource):
                 description=description,
                 auto_error=False,
             ),
+            allow_dpop_bound=allow_dpop_bound,
             **kwargs,
         )
 
@@ -112,6 +118,7 @@ class OpenIdConnectAuth(_BearerSource):
     Args:
         validator: Sync or async callable returning the identity, or raising to refuse.
         openid_connect_url: URL of the provider's discovery document.
+        allow_dpop_bound: Accept a DPoP-bound token (`cnf.jkt`) without its proof.
         scheme_name: Name of the security scheme in OpenAPI, `OpenIdConnect` by default.
         description: Description of the security scheme in OpenAPI.
         **kwargs: Keyword arguments passed to the validator on every call.
@@ -122,6 +129,7 @@ class OpenIdConnectAuth(_BearerSource):
         validator: Callable[..., Any],
         *,
         openid_connect_url: str,
+        allow_dpop_bound: bool = False,
         scheme_name: str | None = None,
         description: str | None = None,
         **kwargs: Any,
@@ -134,5 +142,6 @@ class OpenIdConnectAuth(_BearerSource):
                 description=description,
                 auto_error=False,
             ),
+            allow_dpop_bound=allow_dpop_bound,
             **kwargs,
         )

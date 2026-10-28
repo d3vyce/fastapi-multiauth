@@ -10,13 +10,25 @@ from fastapi.security import HTTPBearer
 from fastapi_multiauth.exceptions import UnauthorizedError
 
 from ..abc import ValidatedAuthSource
-from ..utils import authorization_credential
+from ..utils import authorization_credential, claims_jkt, refusal
 
 
 class _BearerSource(ValidatedAuthSource):
     """Extraction shared by every source carrying an `Authorization: Bearer` token."""
 
     _prefix: str | None = None
+
+    def __init__(
+        self,
+        validator: Callable[..., Any],
+        scheme: Any,
+        /,
+        *,
+        allow_dpop_bound: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        self._allow_dpop_bound = allow_dpop_bound
+        super().__init__(validator, scheme, **kwargs)
 
     def www_authenticate(self) -> str:
         """Return the `Bearer` challenge, as RFC 6750 defines it."""
@@ -42,10 +54,20 @@ class _BearerSource(ValidatedAuthSource):
         *,
         request: HTTPConnection | None = None,
     ) -> Any:
-        """Validate the token, passing the route's scopes and request on."""
+        """Validate the token, passing the route's scopes and request on.
+
+        Raises:
+            UnauthorizedError: If the identity carries a `cnf.jkt` and
+                `allow_dpop_bound` is not set (`dpop_bound`).
+        """
         if self._prefix is not None and not credential.startswith(self._prefix):
             raise UnauthorizedError()
-        return await self._call_validator(credential, scopes=scopes, request=request)
+        identity = await self._call_validator(
+            credential, scopes=scopes, request=request
+        )
+        if not self._allow_dpop_bound and claims_jkt(identity) is not None:
+            raise refusal(UnauthorizedError(), "dpop_bound")
+        return identity
 
 
 class HTTPBearerAuth(_BearerSource):
@@ -55,6 +77,7 @@ class HTTPBearerAuth(_BearerSource):
         validator: Sync or async callable returning the identity, or raising to refuse.
         prefix: Only accept tokens starting with this, e.g. `"user_"`. The
             prefix stays in the token the validator receives.
+        allow_dpop_bound: Accept a DPoP-bound token (`cnf.jkt`) without its proof.
         scheme_name: Name of the security scheme in OpenAPI, `HTTPBearer` by default. Give each
             source its own name when several share an app.
         description: Description of the security scheme in OpenAPI.
@@ -69,6 +92,7 @@ class HTTPBearerAuth(_BearerSource):
         validator: Callable[..., Any],
         *,
         prefix: str | None = None,
+        allow_dpop_bound: bool = False,
         scheme_name: str | None = None,
         description: str | None = None,
         bearer_format: str | None = None,
@@ -85,6 +109,7 @@ class HTTPBearerAuth(_BearerSource):
                 description=description,
                 bearerFormat=bearer_format,
             ),
+            allow_dpop_bound=allow_dpop_bound,
             **kwargs,
         )
 
