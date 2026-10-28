@@ -4,11 +4,13 @@ import enum
 import hashlib
 import hmac
 import json
+import re
+import string
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from fastapi.requests import HTTPConnection
 from fastapi.security.http import HTTPBase
@@ -36,6 +38,9 @@ _THUMBPRINT_MEMBERS = {
 }
 _DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 _PROOF_CLAIMS = ["iat", "jti", "htm", "htu", "ath"]
+_PATH_SAFE = "/%:@!$&'()*+,;=-._~"
+_UNRESERVED = frozenset(string.ascii_letters + string.digits + "-._~")
+_PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
 _KEY_CACHE_SIZE = 1024
 
 
@@ -62,6 +67,17 @@ def _jwk_thumbprint(jwk: Mapping[str, Any]) -> str | None:
     return b64url_encode(hashlib.sha256(canonical.encode()).digest())
 
 
+def _normalize_escape(match: re.Match[str]) -> str:
+    """An unreserved character for its escape, any other escape uppercased."""
+    char = chr(int(match.group()[1:], 16))
+    return char if char in _UNRESERVED else match.group().upper()
+
+
+def _normalize_path(path: str | bytes) -> str:
+    """`path` percent-encoded the way RFC 3986 §6.2.2 compares URLs."""
+    return _PERCENT_ESCAPE.sub(_normalize_escape, quote(path, safe=_PATH_SAFE)) or "/"
+
+
 def _normalize_url(url: str) -> str | None:
     """`url` without query and fragment, scheme and host lowercased, default port dropped."""
     try:
@@ -75,7 +91,7 @@ def _normalize_url(url: str) -> str | None:
     netloc = f"[{host}]" if ":" in host else host
     if port is not None and port != _DEFAULT_PORTS.get(scheme):
         netloc = f"{netloc}:{port}"
-    return f"{scheme}://{netloc}{parts.path or '/'}"
+    return f"{scheme}://{netloc}{_normalize_path(parts.path)}"
 
 
 def _claims_jkt(identity: Any) -> Any:
@@ -229,9 +245,12 @@ class HTTPDPoPAuth(ValidatedAuthSource):
 
     def _request_url(self, request: HTTPConnection) -> str | None:
         """The URL the client called, as `htu` must name it."""
+        raw_path = request.scope.get("raw_path")
+        path = _normalize_path(raw_path or request.url.path)
         if self._origin is not None:
-            return self._origin + (request.url.path or "/")
-        return _normalize_url(str(request.url))
+            return self._origin + path
+        origin = _normalize_url(str(request.url.replace(path="")))
+        return None if origin is None else origin.removesuffix("/") + path
 
     def _proof_key(self, jwk: dict[str, Any], alg: str, thumbprint: str) -> Any:
         """The parsed public key of a proof, cached by its thumbprint."""

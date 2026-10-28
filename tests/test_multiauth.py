@@ -6240,6 +6240,42 @@ class TestDPoP:
             headers["DPoP"] = self._proof(token, htu=htu)
             assert client.get("/direct", headers=headers).status_code == expected
 
+    def test_htu_names_the_path_as_the_client_sent_it(self):
+        source = self._source()
+        public = self._source(public_origin="https://api.example.com")
+
+        def setup(app: FastAPI):
+            app.add_api_route("/files/{name:path}", lambda user=Security(source): user)
+            app.add_api_route("/public/{name}", lambda user=Security(public): user)
+
+        token = self._token()
+        for root_path in ["", "/api"]:
+            client = TestClient(_app(setup), root_path=root_path)
+            base = f"http://testserver{root_path}"
+            for path, htu, expected in [
+                ("/files/abc", "/files/abc", 200),
+                ("/files/a%20b", "/files/a%20b", 200),
+                ("/files/caf%C3%A9", "/files/caf%C3%A9", 200),
+                ("/files/caf%C3%A9", "/files/caf%c3%a9", 200),
+                ("/files/caf%C3%A9", "/files/café", 200),
+                ("/files/a~b", "/files/a%7Eb", 200),
+                ("/files/a%3Fb", "/files/a%3Fb", 200),
+                ("/files/a%2Fb", "/files/a%2Fb", 200),
+                ("/files/a%2Fb", "/files/a/b", 401),
+                ("/files/a%20b", "/files/a+b", 401),
+            ]:
+                headers = {
+                    "Authorization": f"DPoP {token}",
+                    "DPoP": self._proof(token, htu=base + htu),
+                }
+                response = client.get(root_path + path, headers=headers)
+                assert response.status_code == expected, (root_path, path, htu)
+            headers["DPoP"] = self._proof(
+                token, htu=f"https://api.example.com{root_path}/public/a%20b"
+            )
+            response = client.get(f"{root_path}/public/a%20b", headers=headers)
+            assert response.status_code == 200, root_path
+
     def test_composes_with_fresh(self):
         dep = self._source().fresh(
             300, authenticated_at=lambda claims: claims["auth_time"]
