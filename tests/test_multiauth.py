@@ -5930,6 +5930,35 @@ class TestIntrospectionValidator:
             assert _client(dep).get("/me", headers=headers).status_code == 200
 
     @respx.mock
+    def test_changing_the_identity_leaves_the_cache_alone(self):
+        respx.post(self.URL).respond(json=self._active(groups=["staff"]))
+
+        def escalate(claims: dict) -> dict:
+            claims["scope"] += " admin"
+            claims["groups"].append("root")
+            return claims
+
+        source = HTTPBearerAuth(self._validator(claims_to_identity=escalate))
+
+        def setup(app: FastAPI):
+            @app.get("/admin")
+            async def admin(user=Security(source, scopes=["admin"])):
+                return user
+
+            @app.get("/me")
+            async def me(user=Security(source)):
+                return user
+
+        client = TestClient(_app(setup))
+        headers = {"Authorization": "Bearer t"}
+        for _ in range(2):
+            assert client.get("/me", headers=headers).json()["groups"] == [
+                "staff",
+                "root",
+            ]
+            assert client.get("/admin", headers=headers).status_code == 403
+
+    @respx.mock
     def test_a_borrowed_client_is_reused(self):
         respx.post(self.URL).respond(json=self._active())
         http = httpx.AsyncClient()
