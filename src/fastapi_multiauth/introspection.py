@@ -1,6 +1,7 @@
 """Token introspection (RFC 7662), for use as a `HTTPBearerAuth` validator."""
 
 import base64
+import copy
 import logging
 import time
 from collections import OrderedDict
@@ -28,6 +29,25 @@ logger = logging.getLogger(__name__)
 
 class _IntrospectionUnavailable(Exception):
     """The introspection endpoint is unreachable or answered unusably."""
+
+
+class _Answer:
+    """A checked introspection answer, handed to each request as its own copy."""
+
+    __slots__ = ("claims", "nested")
+
+    def __init__(self, claims: dict[str, Any]) -> None:
+        self.claims = claims
+        self.nested = tuple(
+            name for name, value in claims.items() if isinstance(value, (dict, list))
+        )
+
+    def copy(self) -> dict[str, Any]:
+        """The claims, copied deeply only where they hold a container."""
+        copied = dict(self.claims)
+        for name in self.nested:
+            copied[name] = copy.deepcopy(self.claims[name])
+        return copied
 
 
 def _basic_authorization(client_id: str, client_secret: str) -> str:
@@ -120,7 +140,7 @@ class IntrospectionValidator:
         )
         self._cache_ttl = cache_ttl
         self._cache_size = cache_size
-        self._cache: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
+        self._cache: OrderedDict[str, tuple[float, _Answer]] = OrderedDict()
         self._timeout = timeout
         self._client = client
 
@@ -133,11 +153,13 @@ class IntrospectionValidator:
             HTTPException: 503 if the introspection endpoint cannot be used.
         """
         key = hash_token(token)
-        claims = self._cached(key)
-        if claims is None:
+        answer = self._cached(key)
+        if answer is None:
             claims = await self._introspect(token)
             self._check_claims(claims)
-            self._store(key, claims)
+            answer = _Answer(claims)
+            self._store(key, answer)
+        claims = answer.copy()
         if scopes:
             require_scopes(claims, self._scopes_claim, scopes)
         if self._claims_to_identity is not None:
@@ -203,27 +225,27 @@ class IntrospectionValidator:
         if self._issuer is not None and claims.get("iss") != self._issuer:
             raise refusal(UnauthorizedError(), "invalid_issuer")
 
-    def _cached(self, key: str) -> dict[str, Any] | None:
+    def _cached(self, key: str) -> _Answer | None:
         """A cached answer still within its lifetime, `None` otherwise."""
         entry = self._cache.get(key)
         if entry is None:
             return None
-        expires_at, claims = entry
+        expires_at, answer = entry
         if time.monotonic() >= expires_at:
             del self._cache[key]
             return None
         self._cache.move_to_end(key)
-        return claims
+        return answer
 
-    def _store(self, key: str, claims: dict[str, Any]) -> None:
+    def _store(self, key: str, answer: _Answer) -> None:
         """Cache an active answer for `cache_ttl`, never past the token's `exp`."""
         ttl = self._cache_ttl
-        exp = finite_number(claims.get("exp"))
+        exp = finite_number(answer.claims.get("exp"))
         if exp is not None:
             ttl = min(ttl, exp - time.time())
         if ttl <= 0:
             return
-        self._cache[key] = (time.monotonic() + ttl, claims)
+        self._cache[key] = (time.monotonic() + ttl, answer)
         self._cache.move_to_end(key)
         while len(self._cache) > self._cache_size:
             self._cache.popitem(last=False)
