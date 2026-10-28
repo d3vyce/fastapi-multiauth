@@ -35,8 +35,8 @@ The client sends `Authorization: DPoP <token>` and a `DPoP` header: a short JWT 
 
 A proof stays valid for `proof_max_age` (60 seconds). `replay_check` records each proof's `jti` so it cannot be sent twice. Make it atomic across your workers, e.g. Redis `SET NX` with the expiry it receives. Pass `HTTPDPoPAuth.NO_REPLAY_CHECK` to skip it knowingly.
 
-!!! warning "Do not accept the same tokens as Bearer"
-    `HTTPDPoPAuth` only reads the `DPoP` scheme. If a route also accepts bearer tokens through another source, a stolen bound token sent as `Bearer` would get through there: refuse tokens carrying a `cnf` claim in that validator.
+!!! note "Bound tokens are refused as Bearer"
+    A stolen bound token sent as `Bearer` would skip the proof, so `HTTPBearerAuth` and the OAuth 2.0 sources refuse an identity carrying `cnf.jkt`. With `claims_to_identity`, keep `cnf` in your identity or refuse bound tokens there. Pass `allow_dpop_bound=True` to accept them anyway.
 
 Behind a proxy that changes the scheme or host, pass `public_origin="https://api.example.com"`: the proof names the URL the client called. With `claims_to_identity`, pass `jkt=` to read the thumbprint from your identity.
 

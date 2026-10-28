@@ -11,7 +11,7 @@ import secrets
 import string
 import time
 import zlib
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, TypeVar
 from urllib.parse import urlsplit
@@ -270,6 +270,16 @@ def granted_scopes(claims: dict[str, Any], claim: str) -> set[str]:
     if isinstance(value, (list, tuple)):
         return {str(item) for item in value}
     return set()
+
+
+def claims_jkt(identity: Any) -> Any:
+    """The `cnf.jkt` of an identity that is the token's claims, `None` when absent."""
+    if not isinstance(identity, dict) and not isinstance(identity, Mapping):
+        return None
+    cnf = identity.get("cnf")
+    if cnf is None or (not isinstance(cnf, dict) and not isinstance(cnf, Mapping)):
+        return None
+    return cnf.get("jkt")
 
 
 def finite_number(value: Any) -> float | None:

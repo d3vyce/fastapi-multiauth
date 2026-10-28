@@ -6179,6 +6179,43 @@ class TestDPoP:
             "key": _jwk_thumbprint(_public_jwk(_EC_KEY)),
         }
 
+    def test_bearer_sources_refuse_a_bound_token(self, caplog):
+        caplog.set_level(logging.WARNING, logger="fastapi_multiauth")
+        validator = JWTValidator(secret=JWT_SECRET)
+        token = self._token()
+        sources = [
+            HTTPBearerAuth(validator),
+            OAuth2PasswordBearerAuth(validator, token_url="/token"),
+            OAuth2AuthorizationCodeBearerAuth(
+                validator, authorization_url="/authorize", token_url="/token"
+            ),
+            OpenIdConnectAuth(validator, openid_connect_url="/.well-known/openid"),
+        ]
+        for source in sources:
+            caplog.clear()
+            response = self._get(_client(source), token, None, scheme="Bearer")
+            assert response.status_code == 401, type(source).__name__
+            assert response.headers["www-authenticate"] == "Bearer"
+            assert [r.auth_reason for r in caplog.records] == ["dpop_bound"]
+
+        mtls = _hs_token(
+            _claims(cnf={"x5t#S256": "bwcK0esc3ACC3DB2Y5_lESsXE8o9ltc05O89jdN-dg2"})
+        )
+        for source, bound, expected in [
+            (HTTPBearerAuth(validator), mtls, 200),
+            (HTTPBearerAuth(validator, allow_dpop_bound=True), token, 200),
+            (
+                OpenIdConnectAuth(
+                    validator, openid_connect_url="/oidc", allow_dpop_bound=True
+                ),
+                token,
+                200,
+            ),
+            (HTTPBearerAuth(validator).require(), token, 401),
+        ]:
+            response = self._get(_client(source), bound, None, scheme="Bearer")
+            assert response.status_code == expected
+
     def test_replays_are_refused(self, caplog):
         caplog.set_level(logging.WARNING, logger="fastapi_multiauth")
         seen: dict[str, float] = {}
