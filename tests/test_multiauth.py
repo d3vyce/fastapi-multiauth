@@ -6499,6 +6499,7 @@ class TestDPoP:
             "https://api.example.com/v1",
             "api.example.com",
             "https://user@api.example.com",
+            "https://api.example.com:99999",
         ]:
             with pytest.raises(ValueError, match="public_origin"):
                 self._source(public_origin=origin)

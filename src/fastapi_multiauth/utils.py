@@ -69,6 +69,30 @@ def require_nonnegative_seconds(value: float, name: str) -> None:
         raise ValueError(f"{name} must be a finite, non-negative number of seconds")
 
 
+_DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
+
+
+def url_origin(url: str) -> str | None:
+    """The `scheme://host[:port]` of `url`, normalized.
+
+    Returns:
+        The origin lowercased, without its scheme's default port, or `None`
+        if `url` has no scheme or host, or an invalid port.
+    """
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    scheme, host = parts.scheme.lower(), parts.hostname
+    if not scheme or not host:
+        return None
+    netloc = f"[{host}]" if ":" in host else host
+    if port is not None and port != _DEFAULT_PORTS.get(scheme):
+        netloc = f"{netloc}:{port}"
+    return f"{scheme}://{netloc}"
+
+
 def normalize_origin(origin: str, label: str) -> str:
     """Validate a configured origin, `scheme://host[:port]`, and normalize it.
 
@@ -81,9 +105,10 @@ def normalize_origin(origin: str, label: str) -> str:
     """
     lowered = origin.lower()
     parts = urlsplit(lowered)
+    normalized = url_origin(lowered)
     if (
         parts.scheme not in ("http", "https")
-        or not parts.hostname
+        or normalized is None
         or "@" in parts.netloc
         or lowered != f"{parts.scheme}://{parts.netloc}"
     ):
@@ -91,8 +116,7 @@ def normalize_origin(origin: str, label: str) -> str:
             f"{label} must be an origin such as 'https://app.example.com', "
             f"without path or trailing slash (got {origin!r})"
         )
-    default_port = ":443" if parts.scheme == "https" else ":80"
-    return f"{parts.scheme}://{parts.netloc.removesuffix(default_port)}"
+    return normalized
 
 
 def hash_token(token: str) -> str:
