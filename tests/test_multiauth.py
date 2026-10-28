@@ -6310,11 +6310,11 @@ class TestDPoP:
 
         monkeypatch.setattr(pyjwt, "PyJWK", counting)
         monkeypatch.setattr("fastapi_multiauth.sources.dpop._KEY_CACHE_SIZE", 2)
-        ec, ec_2, ed = (_EC_KEY, "ES256"), (_EC_KEY_2, "ES256"), (_ED_KEY, "EdDSA")
+        p256, p256_2, ed = (_EC_KEY, "ES256"), (_EC_KEY_2, "ES256"), (_ED_KEY, "EdDSA")
         for keys, calls in [
-            ([ec, ec, ec], 1),
-            ([ec, ec_2, ec, ec_2], 2),
-            ([ec, ec_2, ed, ec], 4),
+            ([p256, p256, p256], 1),
+            ([p256, p256_2, p256, p256_2], 2),
+            ([p256, p256_2, ed, p256], 4),
         ]:
             parsed.clear()
             client = _client(self._source())
@@ -6324,21 +6324,27 @@ class TestDPoP:
                 assert response.status_code == 200, alg
             assert len(parsed) == calls, keys
 
-        # A key that does not parse takes no slot from the cached ones.
+        # A key that does not parse, or whose proof does not verify, takes
+        # no slot from the cached ones.
         parsed.clear()
         client = _client(self._source())
         token, token_2 = self._token(), self._token(_EC_KEY_2)
         malformed = self._proof(token, jwk={**_public_jwk(_EC_KEY), "x": "AAAA"})
+        forged = [
+            self._proof(token, jwk=_public_jwk(ec.generate_private_key(ec.SECP256R1())))
+            for _ in range(3)
+        ]
         for bound, proof, status in [
             (token, self._proof(token), 200),
             (token_2, self._proof(token_2, _EC_KEY_2), 200),
             (token, malformed, 401),
             (token, malformed, 401),
+            *[(token, proof, 401) for proof in forged],
             (token, self._proof(token), 200),
             (token_2, self._proof(token_2, _EC_KEY_2), 200),
         ]:
             assert self._get(client, bound, proof).status_code == status
-        assert len(parsed) == 4
+        assert len(parsed) == 7
 
     def test_thumbprint_matches_rfc_7638(self):
         jwk = {
