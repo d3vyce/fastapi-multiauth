@@ -5894,6 +5894,13 @@ class TestIntrospectionValidator:
             ({}, self._active(nbf=now + 60), 401),
             ({}, self._active(nbf=None), 401),
             ({}, self._active(nbf=now - 60), 200),
+            ({}, self._active(typ="Refresh"), 401),
+            ({}, self._active(typ="Offline"), 401),
+            ({}, self._active(typ="ID"), 401),
+            ({}, self._active(typ="Bearer"), 200),
+            ({}, self._active(token_use="refresh_token"), 401),
+            ({}, self._active(token_use="access_token"), 200),
+            ({}, self._active(token_type="Bearer"), 200),
         ]:
             route.respond(json=answer)
             client = _auth_client(self._validator(**kwargs))

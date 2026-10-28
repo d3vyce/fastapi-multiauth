@@ -48,7 +48,7 @@ Some providers issue opaque tokens instead of JWTs, or let you choose them becau
 --8<-- "docs_src/jwt/introspection.py"
 ```
 
-The route receives the provider's answer, which carries the same fields as JWT claims (`sub`, `scope`, `exp`...), so scopes, `fresh()` and `stepped_up()` work the same way. No extra is needed.
+The route receives the provider's answer, which carries the same fields as JWT claims (`sub`, `scope`, `exp`...), so scopes, `fresh()` and `stepped_up()` work the same way. No extra is needed. Answers describing a refresh or ID token (Keycloak's `typ`, Ory Hydra's `token_use`) are refused.
 
 Active answers are cached for `cache_ttl` seconds (60 by default), never past the token's `exp`. A revoked token therefore keeps working for up to a minute; set `cache_ttl=0` to ask on every request. Inactive answers are not cached, so a client sending junk tokens costs one request to the provider each: rate-limit the routes. If the provider is down, requests get a 503.
 
