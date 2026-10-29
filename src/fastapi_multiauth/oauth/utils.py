@@ -1,6 +1,5 @@
 """Pure OAuth helpers: state, PKCE, and the authorization redirect (no I/O)."""
 
-import base64
 import hashlib
 import hmac
 import json
@@ -117,7 +116,7 @@ def oauth_encode_state(url: str, state_token: str) -> str:
         state_token: CSRF token from `oauth_generate_state_token()`.
     """
     payload = json.dumps({"n": state_token, "d": url}, separators=(",", ":"))
-    return base64.urlsafe_b64encode(payload.encode()).decode()
+    return b64url_encode(payload.encode())
 
 
 def _destination_allowed(destination: str, allowed_hosts: Sequence[str]) -> bool:
