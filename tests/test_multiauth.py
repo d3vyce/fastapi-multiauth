@@ -1882,6 +1882,7 @@ class TestFetchUserinfo:
             (httpx.Response(500), "failed to fetch"),
             (httpx.ReadTimeout("read timed out"), None),
             (httpx.Response(200, content=b"<html>not json</html>"), "not valid JSON"),
+            (httpx.Response(200, json=["sub"]), "not a JSON object"),
         ]:
             route.mock(side_effect=[response])
             with pytest.raises(OAuthUserinfoError, match=match):

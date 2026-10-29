@@ -141,8 +141,6 @@ async def oauth_resolve_provider_urls(
         error_cls=OAuthDiscoveryError,
         description="OIDC discovery document",
     )
-    if not isinstance(cfg, dict):
-        raise OAuthDiscoveryError("OIDC discovery document is not a JSON object")
     _validate_issuer(discovery_url, cfg.get("issuer"))
 
     def _optional(key: str) -> str | None:
@@ -260,7 +258,8 @@ async def oauth_fetch_userinfo(
 
     Raises:
         ValueError: If `userinfo_url` is not HTTPS.
-        OAuthUserinfoError: If the request fails or does not return JSON.
+        OAuthUserinfoError: If the request fails or does not return a JSON
+            object.
     """
     _require_https(userinfo_url, "OAuth userinfo_url")
     return await _get_json(

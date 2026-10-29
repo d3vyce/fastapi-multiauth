@@ -179,7 +179,7 @@ class _JWKSKeySet:
             error_cls=_JWKSFetchError,
             description="JWKS document",
         )
-        if not isinstance(document, dict) or not isinstance(document.get("keys"), list):
+        if not isinstance(document.get("keys"), list):
             raise _JWKSFetchError("JWKS document has no 'keys' list")
         keys: dict[str, Any] = {}
         for entry in document["keys"]:
