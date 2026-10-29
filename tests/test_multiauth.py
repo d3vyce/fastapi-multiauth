@@ -2609,6 +2609,7 @@ class TestJWTValidatorScopes:
             ("scope", {"scope": "read write admin"}, 200),
             ("scope", {"scope": "read"}, 403),
             ("scp", {"scp": ["read", "admin"]}, 200),
+            ("scp", {"scp": ["read", None]}, 403),
             ("roles", {"roles": ["viewer"]}, 403),
             ("scope", {}, 403),  # no scope claim at all
         ]:
