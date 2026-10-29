@@ -100,6 +100,11 @@ from fastapi_multiauth.sources.dpop import _jwk_thumbprint
 from fastapi_multiauth.utils import step_up_challenge
 
 
+def _cookie_header(cookies: dict[str, str]) -> dict[str, str]:
+    """The `Cookie` header carrying `cookies` on a single request."""
+    return {"Cookie": "; ".join(f"{name}={value}" for name, value in cookies.items())}
+
+
 def _app(*routes_setup_fns):
     """Build a minimal FastAPI test app."""
     app = FastAPI()
@@ -310,11 +315,14 @@ class TestBearerTokenAuth:
 class TestCookieAuth:
     def test_authenticates_the_cookie(self):
         client = _client(APIKeyCookieAuth("session", cookie_validator))
-        response = client.get("/me", cookies={"session": VALID_COOKIE})
+        response = client.get("/me", headers=_cookie_header({"session": VALID_COOKIE}))
         assert response.status_code == 200
         assert response.json() == {"session": VALID_COOKIE}
         assert client.get("/me").status_code == 401
-        assert client.get("/me", cookies={"session": "wrong"}).status_code == 401
+        assert (
+            client.get("/me", headers=_cookie_header({"session": "wrong"})).status_code
+            == 401
+        )
 
         async def session_validator(value: str, *, scope: str) -> dict:
             if value != VALID_COOKIE:
@@ -322,7 +330,7 @@ class TestCookieAuth:
             return {"session": value, "scope": scope}
 
         client = _client(APIKeyCookieAuth("session", session_validator, scope="read"))
-        response = client.get("/me", cookies={"session": VALID_COOKIE})
+        response = client.get("/me", headers=_cookie_header({"session": VALID_COOKIE}))
         assert response.json() == {"session": VALID_COOKIE, "scope": "read"}
 
     @pytest.mark.anyio
@@ -417,7 +425,7 @@ class TestMultiAuth:
         assert response.json() == {"user": "alice"}
 
         # No Authorization header — falls through to cookie
-        response = client.get("/me", cookies={"session": VALID_COOKIE})
+        response = client.get("/me", headers=_cookie_header({"session": VALID_COOKIE}))
         assert response.status_code == 200
         assert response.json() == {"session": VALID_COOKIE}
 
@@ -437,8 +445,10 @@ class TestMultiAuth:
         # Bearer credential present but wrong — should NOT try cookie
         response = client.get(
             "/me",
-            headers={"Authorization": "Bearer wrong"},
-            cookies={"session": VALID_COOKIE},
+            headers={
+                "Authorization": "Bearer wrong",
+                **_cookie_header({"session": VALID_COOKIE}),
+            },
         )
         assert response.status_code == 401
         assert second_called == []  # cookie validator was never called
@@ -538,7 +548,7 @@ class TestRequire:
 
         cookie = APIKeyCookieAuth("session", scoped_validator)
         response = _client(cookie.require(scope="admin")).get(
-            "/me", cookies={"session": VALID_COOKIE}
+            "/me", headers=_cookie_header({"session": VALID_COOKIE})
         )
         assert response.status_code == 200
         assert response.json() == {"session": VALID_COOKIE, "scope": "admin"}
@@ -683,12 +693,15 @@ class TestCookieAuthSigned:
             other_name._sign(VALID_COOKIE),
             VALID_COOKIE,
         ]:
-            response = client.get("/me", cookies={"session": forged})
+            response = client.get("/me", headers=_cookie_header({"session": forged}))
             assert response.status_code == 401, forged
 
         # A present-but-empty cookie is treated as absent, not validated.
         assert client.get("/me", headers={"Cookie": "session="}).status_code == 401
-        assert client.get("/me", cookies={"session": signed}).status_code == 200
+        assert (
+            client.get("/me", headers=_cookie_header({"session": signed})).status_code
+            == 200
+        )
 
     def test_expired_signed_cookie_returns_401(self):
         """A signed cookie older than ttl is rejected; a fresh one accepted."""
@@ -698,11 +711,11 @@ class TestCookieAuthSigned:
         client = _client(auth)
         signed = auth._sign(VALID_COOKIE)
 
-        response = client.get("/me", cookies={"session": signed})
+        response = client.get("/me", headers=_cookie_header({"session": signed}))
         assert response.status_code == 200
 
         with patch("time.time", return_value=time.time() + 61):
-            response = client.get("/me", cookies={"session": signed})
+            response = client.get("/me", headers=_cookie_header({"session": signed}))
         assert response.status_code == 401
 
 
@@ -779,15 +792,23 @@ class TestCookieSessionId:
     def test_unusable_cookie_reads_as_none(self):
         client = _sid_client(self._auth())
         for cookies in [{}, {"session": "forged"}, {"session": ""}]:
-            assert client.get("/whoami", cookies=cookies).json()["sid"] is None
-            assert client.get("/logout", cookies=cookies).json()["sid"] is None
+            assert (
+                client.get("/whoami", headers=_cookie_header(cookies)).json()["sid"]
+                is None
+            )
+            assert (
+                client.get("/logout", headers=_cookie_header(cookies)).json()["sid"]
+                is None
+            )
         assert self._auth().delete_cookie(Response()) is None
 
         # The salt differs, so pre-upgrade cookies fail closed instead of parsing.
         legacy = APIKeyCookieAuth(
             "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
         )
-        response = client.get("/me", cookies={"session": legacy._sign(VALID_COOKIE)})
+        response = client.get(
+            "/me", headers=_cookie_header({"session": legacy._sign(VALID_COOKIE)})
+        )
         assert response.status_code == 401
 
         with _sid_client(self._auth(ttl=60)) as client:
@@ -885,10 +906,16 @@ class TestCookieKeyRotation:
             "session", cookie_validator, secret_key=[self.NEW], secure=False
         )
         old_cookie = {"session": old_auth._sign(VALID_COOKIE)}
-        assert _client(rotated).get("/me", cookies=old_cookie).status_code == 200
-        assert _client(new_only).get("/me", cookies=old_cookie).status_code == 401
+        assert (
+            _client(rotated).get("/me", headers=_cookie_header(old_cookie)).status_code
+            == 200
+        )
+        assert (
+            _client(new_only).get("/me", headers=_cookie_header(old_cookie)).status_code
+            == 401
+        )
         response = _client(new_only).get(
-            "/me", cookies={"session": rotated._sign(VALID_COOKIE)}
+            "/me", headers=_cookie_header({"session": rotated._sign(VALID_COOKIE)})
         )
         assert response.status_code == 200
 
@@ -980,7 +1007,10 @@ class TestSecurityScopes:
         for path in ["/bearer", "/multi", "/sync", "/unscoped"]:
             assert client.get(path, headers=bearer_header).status_code == 200
         assert (
-            client.get("/cookie", cookies={"session": VALID_COOKIE}).status_code == 200
+            client.get(
+                "/cookie", headers=_cookie_header({"session": VALID_COOKIE})
+            ).status_code
+            == 200
         )
         assert (
             client.get("/api-key", headers={"X-API-Key": VALID_TOKEN}).status_code
@@ -1018,25 +1048,25 @@ class TestSecurityScopes:
 
     def test_scopes_declared_without_scopes_param_raises(self):
         """Fail closed: validator can't receive scopes → RuntimeError, not silent authz skip."""
-        for auth, kwargs in [
+        for auth, headers in [
             (
                 HTTPBearerAuth(simple_validator),
-                {"headers": {"Authorization": f"Bearer {VALID_TOKEN}"}},
+                {"Authorization": f"Bearer {VALID_TOKEN}"},
             ),
             (
                 APIKeyCookieAuth("session", cookie_validator),
-                {"cookies": {"session": VALID_COOKIE}},
+                _cookie_header({"session": VALID_COOKIE}),
             ),
             (
                 APIKeyHeaderAuth("X-API-Key", simple_validator),
-                {"headers": {"X-API-Key": VALID_TOKEN}},
+                {"X-API-Key": VALID_TOKEN},
             ),
             (
                 MultiAuth(HTTPBearerAuth(simple_validator)),
-                {"headers": {"Authorization": f"Bearer {VALID_TOKEN}"}},
+                {"Authorization": f"Bearer {VALID_TOKEN}"},
             ),
             # AuthSource.authenticate_scoped default raises when scopes are declared.
-            (_HeaderAuth(secret="s3cr3t"), {"headers": {"X-Token": "s3cr3t"}}),
+            (_HeaderAuth(secret="s3cr3t"), {"X-Token": "s3cr3t"}),
         ]:
 
             def setup(app: FastAPI, auth=auth):
@@ -1046,7 +1076,7 @@ class TestSecurityScopes:
 
             client = TestClient(_app(setup))
             with pytest.raises(RuntimeError, match="security scopes"):
-                client.get("/admin", **kwargs)
+                client.get("/admin", headers=headers)
 
     def test_scopes_kwarg_rejected(self):
         """'scopes' is reserved for route-declared scopes — fail at startup."""
@@ -1217,7 +1247,9 @@ class TestRequestForwarding:
         assert response.json() == {"user": {"user": "alice"}, "who": "bearer"}
         response = client.get("/sync", headers=bearer_header)
         assert response.json() == {"user": {"user": "alice"}, "who": "sync"}
-        response = client.get("/cookie", cookies={"session": VALID_COOKIE})
+        response = client.get(
+            "/cookie", headers=_cookie_header({"session": VALID_COOKIE})
+        )
         assert response.json() == {"user": {"session": VALID_COOKIE}, "who": "cookie"}
 
     def test_request_and_scopes_are_injected_together(self):
@@ -1970,7 +2002,7 @@ class TestPathParity:
     credential skipped by MultiAuth on source A could fall through to B.
     """
 
-    def _statuses(self, source, *, headers=None, cookies=None):
+    def _statuses(self, source, *, headers=None):
         def direct(app: FastAPI):
             @app.get("/me")
             async def me(user=Security(source)):
@@ -1981,12 +2013,8 @@ class TestPathParity:
             async def me(user=Security(MultiAuth(source))):
                 return user
 
-        direct_resp = TestClient(_app(direct)).get(
-            "/me", headers=headers, cookies=cookies
-        )
-        multi_resp = TestClient(_app(multi)).get(
-            "/me", headers=headers, cookies=cookies
-        )
+        direct_resp = TestClient(_app(direct)).get("/me", headers=headers)
+        multi_resp = TestClient(_app(multi)).get("/me", headers=headers)
         return direct_resp, multi_resp
 
     def test_bearer_parity(self):
@@ -3404,13 +3432,20 @@ class TestFreshness:
         client = self._client(auth)
         signed = auth._sign(VALID_COOKIE)
 
-        response = client.get("/sensitive", cookies={"session": signed})
+        response = client.get("/sensitive", headers=_cookie_header({"session": signed}))
         assert response.status_code == 200
         assert response.json() == {"user": {"session": VALID_COOKIE}}
 
         with self._later():
-            response = client.get("/sensitive", cookies={"session": signed})
-            assert client.get("/me", cookies={"session": signed}).status_code == 200
+            response = client.get(
+                "/sensitive", headers=_cookie_header({"session": signed})
+            )
+            assert (
+                client.get(
+                    "/me", headers=_cookie_header({"session": signed})
+                ).status_code
+                == 200
+            )
 
         assert response.status_code == 401
         assert response.json()["detail"] == "Insufficient user authentication"
@@ -3427,10 +3462,18 @@ class TestFreshness:
         client = self._client(auth)
         signed = auth._sign(f"sid123.{VALID_COOKIE}")
 
-        assert client.get("/sensitive", cookies={"session": signed}).status_code == 200
+        assert (
+            client.get(
+                "/sensitive", headers=_cookie_header({"session": signed})
+            ).status_code
+            == 200
+        )
         with self._later():
             assert (
-                client.get("/sensitive", cookies={"session": signed}).status_code == 401
+                client.get(
+                    "/sensitive", headers=_cookie_header({"session": signed})
+                ).status_code
+                == 401
             )
 
     def test_the_re_auth_loop_restores_freshness(self):
@@ -3459,7 +3502,9 @@ class TestFreshness:
         """A credential that does not validate is refused as invalid: re-auth
         would not help it."""
         client = self._client(self._cookie())
-        response = client.get("/sensitive", cookies={"session": "forged"})
+        response = client.get(
+            "/sensitive", headers=_cookie_header({"session": "forged"})
+        )
         assert response.status_code == 401
         assert response.json()["detail"] == "Unauthorized"
 
@@ -3597,12 +3642,16 @@ class TestFreshness:
             auth.require(role="admin").fresh(300),
         ]:
             client = TestClient(_app(self._routes(auth, composed)))
-            response = client.get("/sensitive", cookies={"session": signed})
+            response = client.get(
+                "/sensitive", headers=_cookie_header({"session": signed})
+            )
             assert response.json() == {
                 "user": {"session": VALID_COOKIE, "role": "admin"}
             }
             with self._later():
-                response = client.get("/sensitive", cookies={"session": signed})
+                response = client.get(
+                    "/sensitive", headers=_cookie_header({"session": signed})
+                )
                 assert response.status_code == 401
 
     def test_openapi_still_declares_the_scheme(self):
@@ -3633,7 +3682,9 @@ class TestFreshness:
         signed = auth._sign(VALID_COOKIE)
 
         with self._later():
-            response = client.get("/sensitive", cookies={"session": signed})
+            response = client.get(
+                "/sensitive", headers=_cookie_header({"session": signed})
+            )
 
         assert response.json() == {"reauth_within": 300}
 
@@ -3645,10 +3696,18 @@ class TestFreshness:
         client = self._client(MultiAuth(cookie, other))
         signed = cookie._sign(VALID_COOKIE)
 
-        assert client.get("/sensitive", cookies={"session": signed}).status_code == 200
+        assert (
+            client.get(
+                "/sensitive", headers=_cookie_header({"session": signed})
+            ).status_code
+            == 200
+        )
         with self._later():
             assert (
-                client.get("/sensitive", cookies={"session": signed}).status_code == 401
+                client.get(
+                    "/sensitive", headers=_cookie_header({"session": signed})
+                ).status_code
+                == 401
             )
 
         # A probe can date every source, so fresh() accepts the mix.
@@ -4922,7 +4981,7 @@ class TestSteppedUp:
         )
         dep = auth.stepped_up(["gold"], acr=lambda user: user["acr"])
         response = _client(dep).get(
-            "/me", cookies={"session": auth._sign(VALID_COOKIE)}
+            "/me", headers=_cookie_header({"session": auth._sign(VALID_COOKIE)})
         )
         assert response.status_code == 401
         assert response.json() == {"detail": "Insufficient user authentication"}
@@ -5032,7 +5091,9 @@ class TestSteppedUp:
         auth = self._gold(MultiAuth(self._bearer("gold"), cookie))
         client = _client(auth)
         assert client.get("/me", headers=self.BEARER).status_code == 200
-        response = client.get("/me", cookies={"session": cookie._sign(VALID_COOKIE)})
+        response = client.get(
+            "/me", headers=_cookie_header({"session": cookie._sign(VALID_COOKIE)})
+        )
         assert response.status_code == 401
 
     def test_reads_acr_off_jwt_claims(self):
@@ -5111,7 +5172,9 @@ class TestCookieAssurance:
         response = Response()
         sid = auth.set_cookie(response, "user.42:v3", acr="urn:mfa.v2", amr=["hwk"])
         client = _client(auth.stepped_up(["urn:mfa.v2"]))
-        response = client.get("/me", cookies={"session": _cookie_value(response)})
+        response = client.get(
+            "/me", headers=_cookie_header({"session": _cookie_value(response)})
+        )
         assert response.json() == {"session": "user.42:v3", "sid": sid}
 
     def test_a_cookie_from_before_acr_and_amr_is_refused(self):
@@ -5132,7 +5195,9 @@ class TestCookieAssurance:
             session_id=True,
             secure=False,
         )
-        response = _client(sid_auth).get("/me", cookies={"session": legacy_sid})
+        response = _client(sid_auth).get(
+            "/me", headers=_cookie_header({"session": legacy_sid})
+        )
         assert response.status_code == 401
 
     def test_the_guards_reuse_the_verified_cookie(self, monkeypatch):
@@ -5152,7 +5217,9 @@ class TestCookieAssurance:
             auth.set_cookie(response, VALID_COOKIE, acr=acr)
             unsigned.clear()
             cookies = {"session": _cookie_value(response)}
-            assert client.get("/me", cookies=cookies).status_code == status, acr
+            assert (
+                client.get("/me", headers=_cookie_header(cookies)).status_code == status
+            ), acr
             assert len(unsigned) == 1, acr
 
     def test_an_override_without_the_request_still_meets_the_guards(self):
@@ -5176,7 +5243,9 @@ class TestCookieAssurance:
             response = Response()
             auth.set_cookie(response, VALID_COOKIE, acr=acr)
             cookies = {"session": _cookie_value(response)}
-            assert client.get("/me", cookies=cookies).status_code == status, acr
+            assert (
+                client.get("/me", headers=_cookie_header(cookies)).status_code == status
+            ), acr
 
     def test_the_level_cannot_be_forged(self):
         auth = _signed_cookie_auth()
@@ -5210,10 +5279,14 @@ class TestCookieAssurance:
         )
         dep = auth.stepped_up(["mfa"], acr=lambda user: user["acr"])
         cookie = {"session": auth._sign(VALID_COOKIE)}
-        assert _client(dep).get("/me", cookies=cookie).status_code == 200
+        assert (
+            _client(dep).get("/me", headers=_cookie_header(cookie)).status_code == 200
+        )
 
         dep = MultiAuth(auth).stepped_up(["mfa"])
-        assert _client(dep).get("/me", cookies=cookie).status_code == 401
+        assert (
+            _client(dep).get("/me", headers=_cookie_header(cookie)).status_code == 401
+        )
 
     def test_misuse_is_refused(self):
         unsigned = APIKeyCookieAuth("session", cookie_validator)
@@ -6600,7 +6673,7 @@ class TestSecurityLogging:
         auth = APIKeyCookieAuth(
             "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False, ttl=60
         )
-        _client(auth).get("/me", cookies={"session": SECRET_CREDENTIAL})
+        _client(auth).get("/me", headers=_cookie_header({"session": SECRET_CREDENTIAL}))
         record = self._assert_refusal(
             "fastapi_multiauth.sources.cookie",
             "APIKeyCookieAuth",
@@ -6612,7 +6685,7 @@ class TestSecurityLogging:
         self.caplog.clear()
         cookie = auth._sign(VALID_COOKIE)
         with patch("time.time", return_value=time.time() + 120):
-            _client(auth).get("/me", cookies={"session": cookie})
+            _client(auth).get("/me", headers=_cookie_header({"session": cookie}))
         self._assert_refusal(
             "fastapi_multiauth.sources.cookie", "APIKeyCookieAuth", "expired", 401
         )
