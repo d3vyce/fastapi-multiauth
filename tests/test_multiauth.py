@@ -2755,6 +2755,12 @@ class TestJWTValidatorJWKS:
             httpx.Response(200, json={"keys": []}),
             httpx.Response(200, json={"keys": [_jwk(_RSA_KEY_1, "key1", use="enc")]}),
             httpx.Response(200, json={"keys": [{"kty": "RSA", "kid": "key1"}]}),
+            httpx.Response(200, json={"keys": [{"kty": ["RSA"], "kid": "key1"}]}),
+            httpx.Response(200, json={"keys": [{"kty": "EC", "crv": ["P-256"]}]}),
+            httpx.Response(
+                200, json={"keys": [{**_jwk(_RSA_KEY_1, "key1"), "kid": ["key1"]}]}
+            ),
+            httpx.Response(200, content=b'{"keys": "\xff"}'),
         ]:
             route.reset()
             route.side_effect = [
