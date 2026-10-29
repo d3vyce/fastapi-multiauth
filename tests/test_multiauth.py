@@ -105,6 +105,11 @@ def _cookie_header(cookies: dict[str, str]) -> dict[str, str]:
     return {"Cookie": "; ".join(f"{name}={value}" for name, value in cookies.items())}
 
 
+def _openapi(client: TestClient) -> dict[str, Any]:
+    """The OpenAPI schema of the app behind `client`."""
+    return cast(FastAPI, client.app).openapi()
+
+
 def _app(*routes_setup_fns):
     """Build a minimal FastAPI test app."""
     app = FastAPI()
@@ -2340,7 +2345,7 @@ class TestSchemeDescription:
 
     @staticmethod
     def _scheme(auth, name: str) -> dict:
-        return _client(auth).app.openapi()["components"]["securitySchemes"][name]
+        return _openapi(_client(auth))["components"]["securitySchemes"][name]
 
     def test_description_is_published(self):
         """A default None must not surface as \"description\": null."""
@@ -3765,7 +3770,7 @@ class TestOAuth2Sources:
         )
         assert client.get("/me").status_code == 401
 
-        schemes = client.app.openapi()["components"]["securitySchemes"]
+        schemes = _openapi(client)["components"]["securitySchemes"]
         assert schemes["OAuth2PasswordBearer"] == {
             "type": "oauth2",
             "flows": {"password": {"scopes": self.SCOPES, "tokenUrl": "/token"}},
@@ -3781,7 +3786,7 @@ class TestOAuth2Sources:
         )
 
         client = _client(auth)
-        scheme = client.app.openapi()["components"]["securitySchemes"][
+        scheme = _openapi(client)["components"]["securitySchemes"][
             "OAuth2AuthorizationCodeBearer"
         ]
         assert scheme["type"] == "oauth2"
@@ -3801,9 +3806,7 @@ class TestOAuth2Sources:
         )
 
         client = _client(auth)
-        assert client.app.openapi()["components"]["securitySchemes"][
-            "OpenIdConnect"
-        ] == {
+        assert _openapi(client)["components"]["securitySchemes"]["OpenIdConnect"] == {
             "type": "openIdConnect",
             "openIdConnectUrl": "https://idp.example/.well-known/openid-configuration",
         }
