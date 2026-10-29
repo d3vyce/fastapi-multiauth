@@ -87,7 +87,7 @@ async def oauth_callback(request: Request, code: str, state: str | None = None):
             redirect_uri=REDIRECT_URI,
             code_verifier=flow.get("verifier"),
         )
-        if endpoints.issuer is None or endpoints.jwks_uri is None:
+        if endpoints.jwks_uri is None:
             raise OAuthError("the provider does not support OpenID Connect")
         claims = await oauth_validate_id_token(
             token.get("id_token", ""),
