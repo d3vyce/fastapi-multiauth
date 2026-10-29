@@ -4,10 +4,11 @@
 
 | Version | Supported |
 |---------|-----------|
-| latest 0.x release | ✅ |
-| older releases | ❌ |
+| latest 1.x minor release | ✅ |
+| older 1.x minor releases | ❌ |
+| 0.x and release candidates | ❌ |
 
-Until 1.0, only the latest released minor version receives security fixes.
+Security fixes ship as a patch release of the latest 1.x minor version. Upgrade to it to receive them.
 
 ## Reporting a Vulnerability
 
