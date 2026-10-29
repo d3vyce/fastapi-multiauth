@@ -1,6 +1,6 @@
 [project]
 name = "fastapi-multiauth"
-version = "1.0.0rc2"
+version = "1.0.0"
 description = "Composable authentication sources for FastAPI: bring your own validator, combine multiple schemes, correct OpenAPI by construction"
 readme = "README.md"
 license = "MIT"
@@ -11,7 +11,7 @@ authors = [
 ]
 keywords = ["fastapi", "authentication", "security", "oauth", "api-key", "bearer", "cookie"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Framework :: AsyncIO",
     "Framework :: FastAPI",
     "Intended Audience :: Developers",
