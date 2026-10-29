@@ -98,9 +98,6 @@ convention = "google"
 testpaths = ["tests"]
 pythonpath = ["."]
 anyio_mode = "auto"
-filterwarnings = [
-    "ignore::DeprecationWarning",
-]
 
 [tool.coverage.run]
 source = ["src/fastapi_multiauth"]
