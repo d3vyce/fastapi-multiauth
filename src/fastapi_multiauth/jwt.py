@@ -75,9 +75,10 @@ def _import_pyjwt() -> Any:
 def _default_alg(entry: dict[str, Any]) -> str | None:
     """Best-effort default algorithm for a JWKS entry without `alg`."""
     kty = entry.get("kty")
-    if kty == "EC":
-        return _CRV_DEFAULT_ALG.get(entry.get("crv", ""))
-    return _KTY_DEFAULT_ALG.get(kty or "")
+    table, key = (
+        (_CRV_DEFAULT_ALG, entry.get("crv")) if kty == "EC" else (_KTY_DEFAULT_ALG, kty)
+    )
+    return table.get(key) if isinstance(key, str) else None
 
 
 class _JWKSKeySet:
@@ -184,6 +185,9 @@ class _JWKSKeySet:
         for entry in document["keys"]:
             if not isinstance(entry, dict):
                 continue
+            kid = entry.get("kid")
+            if kid is not None and not isinstance(kid, str):
+                continue
             if entry.get("use") not in (None, "sig"):
                 continue
             if "alg" not in entry:
@@ -200,11 +204,11 @@ class _JWKSKeySet:
                 # provider's JWKS must not take down every login.
                 logger.warning(
                     "skipping unloadable JWKS entry %r: %s",
-                    entry.get("kid"),
+                    kid,
                     type(exc).__name__,
                 )
                 continue
-            keys[entry.get("kid") or ""] = key
+            keys[kid or ""] = key
         if not keys:
             raise _JWKSFetchError(
                 f"JWKS document has no usable signing key "
