@@ -215,8 +215,6 @@ class IntrospectionValidator:
                 data={"token": token, "token_type_hint": "access_token"},
                 client=self._client,
             )
-            if not isinstance(response, dict):
-                raise _IntrospectionUnavailable("response is not a JSON object")
         except _IntrospectionUnavailable as exc:
             cause = exc.__cause__
             code = (

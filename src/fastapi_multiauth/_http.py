@@ -34,8 +34,8 @@ async def _request_json(
     headers: dict[str, str] | None = None,
     data: dict[str, str] | None = None,
     client: httpx.AsyncClient | None = None,
-) -> Any:
-    """Send a request and decode the JSON body, mapping failures to `error_cls`."""
+) -> dict[str, Any]:
+    """Send a request and decode the JSON object body, mapping failures to `error_cls`."""
     async with (
         contextlib.nullcontext(client)
         if client is not None
@@ -44,11 +44,14 @@ async def _request_json(
         try:
             resp = await http.request(method, url, headers=headers, data=data)
             resp.raise_for_status()
-            return resp.json()
+            body = resp.json()
         except httpx.HTTPError as exc:
             raise error_cls(f"failed to fetch {description}: {exc}") from exc
         except ValueError as exc:
             raise error_cls(f"{description} is not valid JSON") from exc
+    if not isinstance(body, dict):
+        raise error_cls(f"{description} is not a JSON object")
+    return body
 
 
 async def _get_json(
@@ -59,8 +62,8 @@ async def _get_json(
     description: str,
     headers: dict[str, str] | None = None,
     client: httpx.AsyncClient | None = None,
-) -> Any:
-    """GET `url` and decode the JSON body, mapping failures to `error_cls`."""
+) -> dict[str, Any]:
+    """GET `url` and decode the JSON object body, mapping failures to `error_cls`."""
     return await _request_json(
         "GET",
         url,
