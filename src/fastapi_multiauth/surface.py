@@ -108,11 +108,6 @@ def _is_optional(source: AuthSource | MultiAuth | SecurityBase) -> bool | None:
     return None if auto_error is None else not auto_error
 
 
-def _may_admit_anonymous(requirement: SchemeRequirement) -> bool:
-    """Say whether `requirement` fails to refuse a credential-less request."""
-    return requirement.optional is not False
-
-
 _Resolution = tuple[
     type["AuthSource | MultiAuth | SecurityBase"],
     tuple["AuthSource | SecurityBase", ...],
@@ -214,7 +209,7 @@ def auth_surface(app: FastAPI) -> list[RouteAuth]:
                     scope for unit in units for req in unit for scope in req.scopes
                 ),
                 unguarded=all(
-                    any(_may_admit_anonymous(req) for req in unit) for unit in units
+                    any(req.optional is not False for req in unit) for unit in units
                 ),
                 include_in_schema=bool(getattr(route, "include_in_schema", False)),
             )

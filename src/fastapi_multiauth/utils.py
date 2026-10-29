@@ -298,12 +298,10 @@ def granted_scopes(claims: dict[str, Any], claim: str) -> set[str]:
 
 def claims_jkt(identity: Any) -> Any:
     """The `cnf.jkt` of an identity that is the token's claims, `None` when absent."""
-    if not isinstance(identity, dict) and not isinstance(identity, Mapping):
+    if not isinstance(identity, Mapping):
         return None
     cnf = identity.get("cnf")
-    if cnf is None or (not isinstance(cnf, dict) and not isinstance(cnf, Mapping)):
-        return None
-    return cnf.get("jkt")
+    return cnf.get("jkt") if isinstance(cnf, Mapping) else None
 
 
 def finite_number(value: Any) -> float | None:
