@@ -292,7 +292,7 @@ def granted_scopes(claims: dict[str, Any], claim: str) -> set[str]:
     if isinstance(value, str):
         return set(value.split())
     if isinstance(value, (list, tuple)):
-        return {str(item) for item in value}
+        return {item for item in value if isinstance(item, str)}
     return set()
 
 
