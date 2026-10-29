@@ -34,6 +34,7 @@ from fastapi import (
     routing,
 )
 from fastapi.openapi.models import APIKey, APIKeyIn
+from fastapi.requests import HTTPConnection
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer
 from fastapi.security.base import SecurityBase
@@ -73,7 +74,7 @@ from fastapi_multiauth import (
     verify_token_hash,
 )
 from fastapi_multiauth._http import DEFAULT_TIMEOUT
-from fastapi_multiauth.abc import _DocOnlyScheme, _override_accepts_request
+from fastapi_multiauth.abc import _DocOnlyScheme
 from fastapi_multiauth.exceptions import UnauthorizedError
 from fastapi_multiauth.oauth import (
     OAuthDiscoveryError,
@@ -1264,24 +1265,8 @@ class TestRequestForwarding:
             assert client.get("/me").json() == {"session": VALID_COOKIE, "sid": minted}
         assert received == [(VALID_COOKIE, minted, True)]
 
-    def test_override_signatures_seen_by_dispatch(self):
-        """A custom source written before this feature keeps its original call shape."""
-        # A callable with no inspectable signature is assumed current, not stale.
-        assert _override_accepts_request(cast(Callable[..., Any], object())) is True
-
-        class _StaleAuth(_HeaderAuth):
-            async def authenticate_scoped(  # ty: ignore[invalid-method-override]
-                self, credential: str, scopes: list[str]
-            ) -> dict:
-                return await self.authenticate(credential)
-
-        auth = _StaleAuth("s3cr3t")
-        assert auth._scoped_takes_request is False
-        response = _client(auth).get("/me", headers={"X-Token": "s3cr3t"})
-        assert response.status_code == 200
-        assert response.json() == {"token": "s3cr3t"}
-
-        # **kwargs is a current signature: the injected request lands in it.
+    def test_override_receives_the_request(self):
+        """An authenticate_scoped() override is handed the request as a keyword."""
         received: list[Any] = []
 
         class _KwargsAuth(_HeaderAuth):
@@ -1292,7 +1277,6 @@ class TestRequestForwarding:
                 return await self.authenticate(credential)
 
         auth = _KwargsAuth("s3cr3t")
-        assert auth._scoped_takes_request is True
         response = _client(auth).get("/me", headers={"X-Token": "s3cr3t"})
         assert response.status_code == 200
         assert response.json() == {"token": "s3cr3t"}
@@ -1311,17 +1295,6 @@ class TestRequestForwarding:
         assert await bearer.authenticate(VALID_TOKEN) == {"user": "alice"}
         assert await bearer.authenticate_scoped(VALID_TOKEN, []) == {"user": "alice"}
         assert seen == [None, None]
-
-        # authenticate() honours the same old call shape dispatch() does.
-        class _StaleBearer(HTTPBearerAuth):
-            async def authenticate_scoped(  # ty: ignore[invalid-method-override]
-                self, credential: str, scopes: list[str]
-            ) -> dict:
-                return {"user": credential}
-
-        auth = _StaleBearer(simple_validator)
-        assert auth._scoped_takes_request is False
-        assert await auth.authenticate(VALID_TOKEN) == {"user": VALID_TOKEN}
 
     def test_request_kwarg_rejected(self):
         """'request' is reserved for the injected Request — fail at startup."""
@@ -5185,13 +5158,17 @@ class TestCookieAssurance:
     def test_an_override_without_the_request_still_meets_the_guards(self):
         """Without the request, the guards verify the cookie again."""
 
-        class _StaleCookieAuth(APIKeyCookieAuth):
-            async def authenticate_scoped(  # ty: ignore[invalid-method-override]
-                self, credential: str, scopes: list[str]
+        class _RequestlessCookieAuth(APIKeyCookieAuth):
+            async def authenticate_scoped(
+                self,
+                credential: str,
+                scopes: list[str],
+                *,
+                request: HTTPConnection | None = None,
             ) -> Any:
                 return await super().authenticate_scoped(credential, scopes)
 
-        auth = _StaleCookieAuth(
+        auth = _RequestlessCookieAuth(
             "session", cookie_validator, secret_key=COOKIE_SECRET, secure=False
         )
         client = _client(auth.fresh(300).stepped_up(["mfa"]))
