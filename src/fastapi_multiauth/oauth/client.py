@@ -28,8 +28,9 @@ TokenEndpointAuthMethod = Literal["client_secret_post", "client_secret_basic"]
 class OIDCEndpoints(NamedTuple):
     """Endpoints read from a provider's discovery document.
 
-    Every URL has been checked to be HTTPS (loopback hosts excepted).
-    Optional fields are `None` when the provider does not advertise them.
+    Every URL has been checked to be HTTPS (loopback hosts excepted), and
+    `issuer` to match the discovery URL. Optional fields are `None` when the
+    provider does not advertise them.
     """
 
     authorization_endpoint: str
@@ -37,10 +38,10 @@ class OIDCEndpoints(NamedTuple):
     userinfo_endpoint: str | None
     jwks_uri: str | None
     end_session_endpoint: str | None
-    issuer: str | None
+    issuer: str
 
 
-def _validate_issuer(discovery_url: str, issuer: Any) -> None:
+def _validate_issuer(discovery_url: str, issuer: Any) -> str:
     """Check the discovery document claims the issuer it was fetched from."""
     if not isinstance(issuer, str) or not issuer:
         raise OAuthDiscoveryError(
@@ -62,6 +63,7 @@ def _validate_issuer(discovery_url: str, issuer: Any) -> None:
             f"discovery document issuer {issuer!r} is not served by "
             f"{origin!r}, the origin the document was fetched from"
         )
+    return issuer
 
 
 @functools.lru_cache(maxsize=1)
@@ -141,7 +143,7 @@ async def oauth_resolve_provider_urls(
         error_cls=OAuthDiscoveryError,
         description="OIDC discovery document",
     )
-    _validate_issuer(discovery_url, cfg.get("issuer"))
+    issuer = _validate_issuer(discovery_url, cfg.get("issuer"))
 
     def _optional(key: str) -> str | None:
         url = cfg.get(key)
@@ -156,7 +158,7 @@ async def oauth_resolve_provider_urls(
             userinfo_endpoint=_optional("userinfo_endpoint"),
             jwks_uri=_optional("jwks_uri"),
             end_session_endpoint=_optional("end_session_endpoint"),
-            issuer=cfg.get("issuer"),
+            issuer=issuer,
         )
     except KeyError as exc:
         raise OAuthDiscoveryError(
