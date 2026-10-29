@@ -4,7 +4,7 @@ import copy
 import inspect
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, Self
 
@@ -50,40 +50,15 @@ def _reject_reserved_kwargs(kwargs: dict[str, Any]) -> None:
             )
 
 
-def _signature_params(
-    fn: Callable[..., Any],
-) -> Mapping[str, inspect.Parameter] | None:
-    """The parameters of `fn`, `None` when it has no inspectable signature."""
-    try:
-        return inspect.signature(fn).parameters
-    except (TypeError, ValueError):
-        return None
-
-
 def _accepts_kwarg(fn: Callable[..., Any], name: str) -> bool:
     """Return whether `fn` declares a `name` parameter, `False` when uninspectable."""
-    parameters = _signature_params(fn)
-    if parameters is None:
+    try:
+        param = inspect.signature(fn).parameters.get(name)
+    except (TypeError, ValueError):
         return False
-    param = parameters.get(name)
     return param is not None and param.kind in (
         inspect.Parameter.POSITIONAL_OR_KEYWORD,
         inspect.Parameter.KEYWORD_ONLY,
-    )
-
-
-def _override_accepts_request(method: Callable[..., Any]) -> bool:
-    """Whether an `authenticate_scoped` override can be handed the request."""
-    parameters = _signature_params(method)
-    if parameters is None:  # not introspectable: take the override at its word
-        return True
-    return any(
-        (
-            param.name == "request"
-            and param.kind is not inspect.Parameter.POSITIONAL_ONLY
-        )
-        or param.kind is inspect.Parameter.VAR_KEYWORD
-        for param in parameters.values()
     )
 
 
@@ -257,9 +232,6 @@ class AuthSource(ABC):
             cls._logger = logging.getLogger(cls.__module__)
 
     def __init__(self, scheme: Any = None) -> None:
-        self._scoped_takes_request = _override_accepts_request(
-            type(self).authenticate_scoped
-        )
         self.scheme = _DocOnlyScheme(scheme) if scheme is not None else None
         if self.scheme is not None:
             _carry_scheme(self, self.scheme)
@@ -326,14 +298,6 @@ class AuthSource(ABC):
         """Whether route-declared scopes reach an actual check in this source."""
         return type(self).authenticate_scoped is not AuthSource.authenticate_scoped
 
-    async def _call_scoped(
-        self, credential: str, scopes: list[str], *, request: HTTPConnection | None
-    ) -> Any:
-        """Call `authenticate_scoped()`, honouring overrides predating `request`."""
-        if self._scoped_takes_request:
-            return await self.authenticate_scoped(credential, scopes, request=request)
-        return await self.authenticate_scoped(credential, scopes)
-
     async def _authenticate_with_challenge(
         self,
         credential: str,
@@ -347,7 +311,9 @@ class AuthSource(ABC):
         invalid, not as stale. Every outcome is logged.
         """
         try:
-            identity = await self._call_scoped(credential, scopes, request=request)
+            identity = await self.authenticate_scoped(
+                credential, scopes, request=request
+            )
             await self._enforce_step_up(credential, identity, request)
         except HTTPException as exc:
             add_challenge(exc, self.www_authenticate())
@@ -667,7 +633,7 @@ class ValidatedAuthSource(AuthSource):
         self, credential: str, *, request: HTTPConnection | None = None
     ) -> Any:
         """Validate a credential and return the identity, ignoring route scopes."""
-        return await self._call_scoped(credential, [], request=request)
+        return await self.authenticate_scoped(credential, [], request=request)
 
     async def authenticate_scoped(
         self,
