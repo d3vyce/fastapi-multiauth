@@ -1,7 +1,6 @@
 """Shared HTTP transport hygiene for the OAuth and JWT modules."""
 
 import contextlib
-import json
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -48,7 +47,7 @@ async def _request_json(
             return resp.json()
         except httpx.HTTPError as exc:
             raise error_cls(f"failed to fetch {description}: {exc}") from exc
-        except json.JSONDecodeError as exc:
+        except ValueError as exc:
             raise error_cls(f"{description} is not valid JSON") from exc
 
 
