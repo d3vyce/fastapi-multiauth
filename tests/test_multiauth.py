@@ -3668,11 +3668,28 @@ class TestFreshness:
         with pytest.raises(ValueError, match="already has a freshness window"):
             self._cookie().fresh(60).fresh(300)
 
-        auth = MultiAuth(self._cookie().fresh(60), self._dated_bearer(time.time()))
+        def proven_at(identity):
+            return identity["proven_at"]
+
+        bearer = self._dated_bearer(time.time())
+        auth = MultiAuth(
+            self._cookie().fresh(60), bearer.fresh(60, authenticated_at=proven_at)
+        )
         with pytest.raises(
             ValueError, match="APIKeyCookieAuth already has a freshness window"
         ):
-            auth.fresh(300, authenticated_at=lambda identity: identity["proven_at"])
+            auth.fresh(300, authenticated_at=proven_at)
+
+    def test_a_guard_on_only_some_sources_is_refused(self):
+        """An unguarded source would let its credentials through unchecked."""
+        bearer = self._dated_bearer(time.time())
+        with pytest.raises(ValueError, match=r"only some sources have fresh\(\)"):
+            MultiAuth(self._cookie().fresh(60), bearer)
+        with pytest.raises(
+            ValueError, match=r"only some sources have stepped_up\(\): HTTPBearer"
+        ):
+            MultiAuth(self._cookie().stepped_up(["mfa"]), bearer)
+        MultiAuth(self._cookie(), bearer)
 
     def test_fresh_and_optional_are_refused_in_either_order(self):
         for auth in [self._cookie(), MultiAuth(self._cookie())]:
