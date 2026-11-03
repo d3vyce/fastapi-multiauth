@@ -3985,6 +3985,30 @@ class TestOAuth2Sources:
         assert client.get("/known", headers=header).status_code == 200
         assert seen == [["admin", "billing"]]
 
+    def test_an_empty_catalogue_publishes_no_scope(self):
+        """scopes={} is a claim too: no route scope is in it."""
+
+        def scoped(credential: str, scopes: list[str]) -> dict:
+            return {"scopes": scopes}
+
+        auth = OAuth2PasswordBearerAuth(scoped, token_url="/token", scopes={})
+        header = {"Authorization": f"Bearer {VALID_TOKEN}"}
+        for guard in (auth, MultiAuth(auth)):
+
+            def setup(app: FastAPI, guard=guard):
+                @app.get("/scoped")
+                async def scoped_route(user=Security(guard, scopes=["admin"])):
+                    return user
+
+                @app.get("/plain")
+                async def plain(user=Security(guard)):
+                    return user
+
+            client = TestClient(_app(setup))
+            with pytest.raises(RuntimeError, match="its catalogue lists nothing"):
+                client.get("/scoped", headers=header)
+            assert client.get("/plain", headers=header).json() == {"scopes": []}
+
     def test_a_source_without_a_catalogue_accepts_any_scope(self):
         """No catalogue is no claim: the other sources keep working unchanged."""
 

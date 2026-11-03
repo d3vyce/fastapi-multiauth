@@ -547,7 +547,7 @@ class AuthSource(ABC):
     def _reject_undeclared_scopes(self, scopes: list[str]) -> None:
         """Refuse a route declaring scopes this source never published."""
         catalogue = self._scope_catalogue
-        if not catalogue:
+        if catalogue is None:
             return
         unknown = [scope for scope in scopes if scope not in catalogue]
         if unknown:
