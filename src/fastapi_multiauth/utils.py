@@ -11,7 +11,7 @@ import secrets
 import string
 import time
 import zlib
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any, TypeVar
@@ -223,6 +223,34 @@ def refusal(exc: _HTTPError, reason: str) -> _HTTPError:
     """Tag `exc` with the reason code logged when it refuses a request."""
     setattr(exc, _REFUSAL_REASON, reason)
     return exc
+
+
+_RECORDED = "fastapi_multiauth.replay_recorded"
+
+
+async def first_use(
+    replay_check: Callable[[str, float], Awaitable[Any]],
+    key: str,
+    expires_at: float,
+    request: HTTPConnection | None,
+) -> bool:
+    """Record `key` with `replay_check`, `False` when another request used it.
+
+    A key this request already recorded with the same `replay_check` passes:
+    FastAPI runs a dependency once per set of scopes, so one request can
+    check the same proof twice. Another check never shares the memo, or a
+    DPoP `jti` could pose as a webhook's key.
+    """
+    recorded = (
+        request.scope.setdefault(_RECORDED, set()) if request is not None else set()
+    )
+    entry = (replay_check, key)
+    if entry in recorded:
+        return True
+    if not await replay_check(key, expires_at):
+        return False
+    recorded.add(entry)
+    return True
 
 
 def refusal_reason(exc: HTTPException) -> str:

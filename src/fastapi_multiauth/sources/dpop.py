@@ -25,6 +25,7 @@ from ..utils import (
     claims_jkt,
     ensure_async,
     finite_number,
+    first_use,
     normalize_origin,
     refusal,
     require_nonnegative_seconds,
@@ -217,8 +218,8 @@ class HTTPDPoPAuth(ValidatedAuthSource):
             bound.encode(), thumbprint.encode()
         ):
             raise self._proof_error("dpop_key_mismatch")
-        if self._replay_check is not None and not await self._replay_check(
-            jti, iat + self._proof_max_age + self._leeway
+        if self._replay_check is not None and not await first_use(
+            self._replay_check, jti, iat + self._proof_max_age + self._leeway, request
         ):
             raise self._proof_error("dpop_replay")
         return identity
