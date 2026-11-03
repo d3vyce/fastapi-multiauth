@@ -1851,6 +1851,13 @@ class TestExchangeCode:
 
     @pytest.mark.anyio
     @respx.mock
+    async def test_empty_code_verifier_rejected_before_the_request(self):
+        with pytest.raises(ValueError, match="code_verifier is empty"):
+            await self._exchange(code_verifier="")
+        assert len(respx.calls) == 0
+
+    @pytest.mark.anyio
+    @respx.mock
     async def test_required_scopes(self):
         route = respx.post(self.TOKEN_URL)
         route.respond(json={"access_token": "tok123", "scope": "openid email profile"})
