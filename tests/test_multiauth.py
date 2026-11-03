@@ -97,7 +97,7 @@ from fastapi_multiauth.oauth import (
 )
 from fastapi_multiauth.oauth.id_token import _key_set as _id_key_set
 from fastapi_multiauth.sources.dpop import _jwk_thumbprint
-from fastapi_multiauth.utils import step_up_challenge
+from fastapi_multiauth.utils import ensure_async, first_use, step_up_challenge
 
 
 def _cookie_header(cookies: dict[str, str]) -> dict[str, str]:
@@ -5752,6 +5752,25 @@ class TestHMACSignatureAuth:
         headers = {"X-Signature": f"sha256={signature2}", "X-Timestamp": t2}
         assert client.post("/hook", content=body, headers=headers).status_code == 200
 
+    def test_a_request_checked_twice_is_not_a_replay(self):
+        seen, remember = _replay_store()
+        source = HMACSignatureAuth(
+            WEBHOOK_SECRET, replay_check=remember, **self.GENERIC
+        )
+        app = FastAPI()
+
+        @app.post("/hook", dependencies=[Depends(source, use_cache=False)])
+        async def hook(body: bytes = Depends(source, use_cache=False)):
+            return {"size": len(body)}
+
+        client = TestClient(app)
+        body = b"payment.succeeded"
+        t, signature = self._stamped(body)
+        headers = {"X-Signature": f"sha256={signature}", "X-Timestamp": t}
+        assert client.post("/hook", content=body, headers=headers).status_code == 200
+        assert len(seen) == 1
+        assert client.post("/hook", content=body, headers=headers).status_code == 401
+
     def test_a_replay_is_refused_whichever_rotated_key_signed_it(self):
         _, remember = _replay_store()
         new_secret = "rotated-webhook-secret-16-bytes"
@@ -6441,6 +6460,36 @@ class TestDPoP:
 
         bearer = _client(HTTPBearerAuth(jwt_validator))
         assert self._get(bearer, _hs_token(), None, scheme="Bearer").status_code == 200
+
+    def test_a_proof_checked_twice_in_one_request_is_not_a_replay(self):
+        seen, remember = _replay_store()
+        source = self._source(replay_check=remember)
+        router = APIRouter(dependencies=[Depends(source)])
+
+        @router.get("/me")
+        async def me(user=Security(source, scopes=["read"])):
+            return user
+
+        app = FastAPI()
+        app.include_router(router)
+        client = TestClient(app)
+        token = self._token(scope="read")
+        proof = self._proof(token)
+        assert self._get(client, token, proof).status_code == 200
+        assert len(seen) == 1
+        assert self._get(client, token, proof).status_code == 401
+
+    @pytest.mark.anyio
+    async def test_a_key_recorded_by_one_check_is_still_checked_by_another(self):
+        request = _request()
+        seen, dpop_check = _replay_store()
+        _, webhook_check = _replay_store()
+        webhook_check("shared-key", 0)
+        assert await first_use(ensure_async(dpop_check), "shared-key", 0, request)
+        assert seen == {"shared-key"}
+        assert not await first_use(
+            ensure_async(webhook_check), "shared-key", 0, request
+        )
 
     def test_replays_are_refused(self, caplog):
         caplog.set_level(logging.WARNING, logger="fastapi_multiauth")

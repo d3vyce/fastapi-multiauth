@@ -16,6 +16,7 @@ from fastapi_multiauth.exceptions import UnauthorizedError
 from ..abc import AuthSource, _unenforceable_scopes_error
 from ..utils import (
     ensure_async,
+    first_use,
     normalize_secret_keys,
     refusal,
     require_positive_seconds,
@@ -274,7 +275,9 @@ class HMACSignatureAuth(AuthSource):
                     message = hashlib.sha256(self._replay_namespace)
                     message.update(signed_prefix)
                     message.update(body)
-                    if not await self._replay_check(message.hexdigest(), expires_at):
+                    if not await first_use(
+                        self._replay_check, message.hexdigest(), expires_at, request
+                    ):
                         raise refusal(UnauthorizedError(), "replay")
                 return body
         raise refusal(UnauthorizedError(), "invalid_signature")
