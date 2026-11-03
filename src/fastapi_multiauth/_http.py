@@ -55,7 +55,7 @@ async def _request_json(
             body = resp.json()
         except httpx.HTTPError as exc:
             raise error_cls(f"failed to fetch {description}: {exc}") from exc
-        except ValueError as exc:
+        except (ValueError, RecursionError) as exc:
             raise error_cls(f"{description} is not valid JSON") from exc
     if not isinstance(body, dict):
         raise error_cls(f"{description} is not a JSON object")

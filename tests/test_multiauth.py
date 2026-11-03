@@ -1553,6 +1553,7 @@ class TestResolveProviderUrls:
             (httpx.ConnectTimeout("connection timed out"), "failed to fetch"),
             (httpx.Response(200, content=b"<html>not json</html>"), "not valid JSON"),
             (httpx.Response(200, content=b'{"issuer": "\xff"}'), "not valid JSON"),
+            (httpx.Response(200, content=b"[" * 100_000), "not valid JSON"),
             (httpx.Response(200, json=["not", "an", "object"]), "not a JSON object"),
             (
                 httpx.Response(200, json=no_token_endpoint),
