@@ -2022,8 +2022,11 @@ class TestDecodeStateOpenRedirectGuard:
             ("javascript:alert(1)", self.APP),
             ("dashboard", self.APP),
             ("http://[::1", self.APP),
+            ("https://evil.example.com@app.example.com/x", self.APP),
+            ("https://app.example.com@evil.example.com/x", self.APP),
         ]:
             assert self._decode(destination, allowed) == "/fallback", destination
+        assert self._decode("/profile/@alice", self.APP) == "/profile/@alice"
 
         # Secure by default: absolute destinations need an explicit allowlist.
         assert self._decode("https://anywhere.example.com/x") == "/fallback"
