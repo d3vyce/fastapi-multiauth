@@ -132,7 +132,9 @@ def _destination_allowed(destination: str, allowed_hosts: Sequence[str]) -> bool
         return False
     if not parsed.scheme and not parsed.netloc:
         return destination.startswith("/") and not destination.startswith("//")
-    if parsed.scheme not in ("http", "https"):
+    # "https://allowed@evil" or the reverse: user info only serves to
+    # disguise the host, and parsers disagree on odd forms of it.
+    if parsed.scheme not in ("http", "https") or "@" in parsed.netloc:
         return False
     return parsed.hostname in allowed_hosts
 
