@@ -197,7 +197,8 @@ async def oauth_exchange_code(
         client_secret: Your application's client secret.
         redirect_uri: The redirect URI sent with the authorization request.
         required_scopes: Space-separated scopes the grant must include.
-        code_verifier: PKCE verifier from `oauth_generate_pkce_pair()`.
+        code_verifier: PKCE verifier from `oauth_generate_pkce_pair()`. An
+            empty string is refused: it would silently drop PKCE.
         token_endpoint_auth_method: Send the client credentials in the
             request body (`client_secret_post`) or as HTTP Basic
             (`client_secret_basic`).
@@ -211,11 +212,16 @@ async def oauth_exchange_code(
         `oauth_validate_id_token()` checks it.
 
     Raises:
-        ValueError: If `token_url` is not HTTPS.
+        ValueError: If `token_url` is not HTTPS, or `code_verifier` is empty.
         OAuthExchangeError: If the provider refuses or the request fails,
             the token is not a bearer token, or a required scope is missing.
     """
     _require_https(token_url, "OAuth token_url")
+    if code_verifier == "":
+        raise ValueError(
+            "code_verifier is empty: pass the verifier stored with the "
+            "authorization request, or None when PKCE is not used"
+        )
 
     oauth_client = _oauth2_client_class()(
         client_id, client_secret, token_url, timeout, token_endpoint_auth_method, client
