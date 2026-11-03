@@ -4172,6 +4172,27 @@ class TestAuthSurface:
         paths = [route.path for route in auth_surface(_app())]
         assert paths == [], f"only endpoint routes belong in the surface: {paths}"
 
+    def test_routes_fastapi_does_not_manage_are_reported_unguarded(self):
+        """add_route(), websocket_route() and mounts run no dependency at all."""
+
+        async def endpoint(request):
+            return JSONResponse({})
+
+        app = _app()
+        app.add_route("/raw", endpoint, methods=["POST"])
+        app.router.add_websocket_route("/raw-ws", endpoint)
+        app.mount("/static", FastAPI())
+        surface = {route.path: route for route in auth_surface(app)}
+        assert set(surface) == {"/raw", "/raw-ws", "/static"}
+        assert surface["/raw"].methods == ("POST",)
+        assert surface["/raw-ws"].methods == ()
+        for route in surface.values():
+            assert route.unguarded is True
+            assert route.alternatives == ()
+
+        moved = FastAPI(docs_url="/api-docs", redoc_url=None, openapi_url="/schema")
+        assert [route.path for route in auth_surface(moved)] == []
+
     def test_a_route_hidden_from_the_schema_is_still_reported(self):
         """The OpenAPI document omits it, which is why the walk uses app.routes."""
         auth = self._oauth()

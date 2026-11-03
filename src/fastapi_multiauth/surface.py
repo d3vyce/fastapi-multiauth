@@ -190,19 +190,32 @@ def auth_surface(app: FastAPI) -> list[RouteAuth]:
             inspected; call this on them separately.
 
     Returns:
-        One `RouteAuth` per route, in registration order. Routes without
-        dependencies, such as `/docs`, are skipped.
+        One `RouteAuth` per route, in registration order, but FastAPI's own
+        documentation and schema routes. A route FastAPI does not manage,
+        such as `app.add_route()` or a mount, runs no dependency, so it is
+        reported unguarded.
     """
     surface: list[RouteAuth] = []
+    docs_paths = {
+        url
+        for url in (
+            app.openapi_url,
+            app.docs_url,
+            app.redoc_url,
+            app.swagger_ui_oauth2_redirect_url,
+        )
+        if url
+    }
     for route in _routes_of(app):
+        path = getattr(route, "path", None) or ""
         dependant = getattr(route, "dependant", None)
-        if dependant is None:
+        if dependant is None and path in docs_paths:
             continue
-        units = _auth_units(dependant)
+        units = _auth_units(dependant) if dependant is not None else []
         alternatives = tuple(itertools.product(*units)) if units else ()
         surface.append(
             RouteAuth(
-                path=getattr(route, "path", None) or "",
+                path=path,
                 methods=tuple(sorted(getattr(route, "methods", None) or ())),
                 alternatives=alternatives,
                 scopes=_dedupe(
@@ -211,7 +224,8 @@ def auth_surface(app: FastAPI) -> list[RouteAuth]:
                 unguarded=all(
                     any(req.optional is not False for req in unit) for unit in units
                 ),
-                include_in_schema=bool(getattr(route, "include_in_schema", False)),
+                include_in_schema=dependant is not None
+                and bool(getattr(route, "include_in_schema", False)),
             )
         )
     return surface
