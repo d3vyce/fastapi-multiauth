@@ -46,7 +46,7 @@ Call `sign_in` from your login route once the password matches: the session star
 `session.acr_of(request)` and `session.amr_of(request)` read the current cookie's level and methods. Both are signed with the value, so the client cannot raise its own level, and a cookie set without them never passes `stepped_up()`.
 
 !!! warning "Step up every source of a `MultiAuth`"
-    A source left out of the guard is never checked: `MultiAuth(bearer, session.stepped_up(["mfa"]))` lets any bearer token through. When sources read the level differently, guard each one: `MultiAuth(bearer.stepped_up(["mfa"], acr=read_acr), session.stepped_up(["mfa"]))`.
+    A source left out of the guard would never be checked, so `MultiAuth(bearer, session.stepped_up(["mfa"]))` raises a `ValueError`. When sources read the level differently, guard each one: `MultiAuth(bearer.stepped_up(["mfa"], acr=read_acr), session.stepped_up(["mfa"]))`.
 
 ## Good to know
 

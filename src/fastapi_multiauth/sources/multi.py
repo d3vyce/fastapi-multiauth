@@ -50,6 +50,8 @@ class MultiAuth:
 
     Raises:
         TypeError: If a source is not an `AuthSource`, or is a `MultiAuth`.
+        ValueError: If only some sources carry a `fresh()` or `stepped_up()`
+            guard: the others would let their credentials through unchecked.
     """
 
     _optional: bool = False
@@ -65,6 +67,18 @@ class MultiAuth:
                 raise TypeError(
                     "MultiAuth sources must be AuthSource instances, "
                     f"got {type(source).__name__}{hint}"
+                )
+        for guard, attribute in (("fresh", "_freshness"), ("stepped_up", "_assurance")):
+            unguarded = [
+                type(source).__name__
+                for source in sources
+                if getattr(source, attribute) is None
+            ]
+            if unguarded and len(unguarded) < len(sources):
+                raise ValueError(
+                    f"only some sources have {guard}(): {', '.join(unguarded)} "
+                    "would let its credentials through unchecked. Call "
+                    f"{guard}() on every source, or on the MultiAuth"
                 )
         self._sources = sources
 
@@ -236,10 +250,19 @@ class MultiAuth:
         return await self.dispatch(kwargs["request"], kwargs["security_scopes"].scopes)
 
     def require(self, **kwargs: Any) -> "MultiAuth":
-        """Return a copy passing extra keyword arguments to every validator."""
+        """Return a copy passing extra keyword arguments to every validator.
+
+        Raises:
+            TypeError: If a source has no `require()`: its credentials would
+                pass without the requirement.
+        """
+        for source in self._sources:
+            if not hasattr(source, "require"):
+                raise TypeError(
+                    f"{type(source).__name__} has no require(): its credentials "
+                    "would pass without the requirement. Call require() on the "
+                    "other sources before combining them, or give it a require()"
+                )
         return self._with_sources(
-            cast(Any, source).require(**kwargs)
-            if hasattr(source, "require")
-            else source
-            for source in self._sources
+            cast(Any, source).require(**kwargs) for source in self._sources
         )
