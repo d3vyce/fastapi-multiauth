@@ -37,7 +37,7 @@ A timestamp must be part of `signed_message`, or anyone could replay a request w
 
 A signature proves who sent the body, not that it is the first time you see it. With a timestamp, a request older than `tolerance` (300 seconds by default) is refused, but a copy replayed within that window still passes. GitHub sends no timestamp at all. Make your handler idempotent, or deduplicate on the event id the sender provides, such as `X-GitHub-Delivery`.
 
-With a timestamp, `replay_check` records each verified signature so it cannot be sent twice. Make it atomic across your workers, e.g. Redis `SET NX` with the expiry it receives. Without a timestamp the constructor refuses it: signatures would have to be kept forever.
+With a timestamp, `replay_check` records each verified request so it cannot be sent twice, whichever of your keys signed it. Make it atomic across your workers, e.g. Redis `SET NX` with the expiry it receives. Two webhook sources never share a key, but give each kind of replay check its own namespace, such as a key prefix, rather than mixing them with DPoP proofs or other records. Without a timestamp the constructor refuses it: signatures would have to be kept forever.
 
 ## Rotating a secret
 

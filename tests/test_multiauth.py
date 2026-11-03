@@ -5516,6 +5516,19 @@ def _hmac_hex(secret: str, message: bytes) -> str:
     return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
 
 
+def _replay_store() -> tuple[set[str], Callable[[str, float], bool]]:
+    """An in-memory replay_check and the keys it has recorded."""
+    seen: set[str] = set()
+
+    def first_seen(key: str, expires_at: float) -> bool:
+        if key in seen:
+            return False
+        seen.add(key)
+        return True
+
+    return seen, first_seen
+
+
 class TestHMACSignatureAuth:
     """Signed webhooks: HMAC-SHA256 of the raw body, timestamp optional."""
 
@@ -5724,13 +5737,52 @@ class TestHMACSignatureAuth:
         assert tampered.status_code == 401
         assert seen == {}
         assert client.post("/hook", content=body, headers=headers).status_code == 200
-        assert seen == {signature: int(t) + 300}
+        recorded = hashlib.sha256(
+            b"24:APIKeyHeader_X-Signature:" + f"{t}.".encode() + body
+        ).hexdigest()
+        assert seen == {recorded: int(t) + 300}
         caplog.clear()
         assert client.post("/hook", content=body, headers=headers).status_code == 401
         assert [r.auth_reason for r in caplog.records] == ["replay"]
         t2, signature2 = self._stamped(body, int(t) + 1)
         headers = {"X-Signature": f"sha256={signature2}", "X-Timestamp": t2}
         assert client.post("/hook", content=body, headers=headers).status_code == 200
+
+    def test_a_replay_is_refused_whichever_rotated_key_signed_it(self):
+        _, remember = _replay_store()
+        new_secret = "rotated-webhook-secret-16-bytes"
+        source = HMACSignatureAuth(
+            [WEBHOOK_SECRET, new_secret], replay_check=remember, **self.STRIPE
+        )
+        client = self._client(source)
+        body = b"payment.succeeded"
+        t, old = self._stamped(body)
+        new = _hmac_hex(new_secret, f"{t}.".encode() + body)
+        for header, expected in [
+            (f"t={t},v1={old},v1={new}", 200),
+            (f"t={t},v1={new}", 401),
+            (f"t={t},v1={old}", 401),
+        ]:
+            response = client.post(
+                "/hook", content=body, headers={"Stripe-Signature": header}
+            )
+            assert response.status_code == expected, header
+
+    def test_sources_sharing_a_replay_store_never_share_a_key(self):
+        _, remember = _replay_store()
+        sources = [
+            HMACSignatureAuth(
+                WEBHOOK_SECRET, replay_check=remember, scheme_name=name, **self.STRIPE
+            )
+            for name in ["Billing", "Shipping"]
+        ]
+        body = b"payment.succeeded"
+        t, signature = self._stamped(body)
+        header = {"Stripe-Signature": f"t={t},v1={signature}"}
+        for source in sources:
+            client = self._client(source)
+            assert client.post("/hook", content=body, headers=header).status_code == 200
+            assert client.post("/hook", content=body, headers=header).status_code == 401
 
     def test_misuse_is_refused(self):
         source = HMACSignatureAuth(WEBHOOK_SECRET, **self.GITHUB)
