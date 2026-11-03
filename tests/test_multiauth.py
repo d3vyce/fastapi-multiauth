@@ -74,7 +74,7 @@ from fastapi_multiauth import (
     verify_token_checksum,
     verify_token_hash,
 )
-from fastapi_multiauth._http import DEFAULT_TIMEOUT
+from fastapi_multiauth._http import DEFAULT_TIMEOUT, _require_https
 from fastapi_multiauth.abc import _DocOnlyScheme
 from fastapi_multiauth.exceptions import UnauthorizedError
 from fastapi_multiauth.oauth import (
@@ -1555,6 +1555,7 @@ class TestResolveProviderUrls:
             (httpx.ConnectTimeout("connection timed out"), "failed to fetch"),
             (httpx.Response(200, content=b"<html>not json</html>"), "not valid JSON"),
             (httpx.Response(200, content=b'{"issuer": "\xff"}'), "not valid JSON"),
+            (httpx.Response(200, content=b"[" * 100_000), "not valid JSON"),
             (httpx.Response(200, json=["not", "an", "object"]), "not a JSON object"),
             (
                 httpx.Response(200, json=no_token_endpoint),
@@ -1626,6 +1627,24 @@ class TestOAuthHttpsEnforcement:
             oauth_resolve_provider_urls.cache_clear()
             with pytest.raises(OAuthDiscoveryError, match=f"{endpoint} must use https"):
                 await oauth_resolve_provider_urls(DISCOVERY_URL)
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_loopback_endpoint_in_remote_discovery_document_rejected(self):
+        route = respx.get(DISCOVERY_URL)
+        for endpoint in ["token_endpoint", "userinfo_endpoint", "jwks_uri"]:
+            for url in ["http://127.0.0.1:8080/x", "http://localhost/x"]:
+                route.respond(json=_discovery_doc(**{endpoint: url}))
+                oauth_resolve_provider_urls.cache_clear()
+                with pytest.raises(
+                    OAuthDiscoveryError, match=f"{endpoint} must use https"
+                ):
+                    await oauth_resolve_provider_urls(DISCOVERY_URL)
+
+    def test_url_without_host_rejected(self):
+        for url in ["https://", "https:///token", "https:token"]:
+            with pytest.raises(ValueError, match="token_url must use https"):
+                _require_https(url, "OAuth token_url")
 
     @pytest.mark.anyio
     @respx.mock
@@ -1834,6 +1853,22 @@ class TestExchangeCode:
 
     @pytest.mark.anyio
     @respx.mock
+    async def test_empty_code_verifier_rejected_before_the_request(self):
+        with pytest.raises(ValueError, match="code_verifier is empty"):
+            await self._exchange(code_verifier="")
+        assert len(respx.calls) == 0
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_response_without_access_token_rejected(self):
+        route = respx.post(self.TOKEN_URL)
+        for doc in [{}, {"access_token": ""}, {"access_token": 5}]:
+            route.respond(json=doc)
+            with pytest.raises(OAuthExchangeError, match="no access_token"):
+                await self._exchange()
+
+    @pytest.mark.anyio
+    @respx.mock
     async def test_required_scopes(self):
         route = respx.post(self.TOKEN_URL)
         route.respond(json={"access_token": "tok123", "scope": "openid email profile"})
@@ -1989,8 +2024,11 @@ class TestDecodeStateOpenRedirectGuard:
             ("javascript:alert(1)", self.APP),
             ("dashboard", self.APP),
             ("http://[::1", self.APP),
+            ("https://evil.example.com@app.example.com/x", self.APP),
+            ("https://app.example.com@evil.example.com/x", self.APP),
         ]:
             assert self._decode(destination, allowed) == "/fallback", destination
+        assert self._decode("/profile/@alice", self.APP) == "/profile/@alice"
 
         # Secure by default: absolute destinations need an explicit allowlist.
         assert self._decode("https://anywhere.example.com/x") == "/fallback"
