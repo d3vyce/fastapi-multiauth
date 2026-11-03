@@ -1858,6 +1858,15 @@ class TestExchangeCode:
 
     @pytest.mark.anyio
     @respx.mock
+    async def test_response_without_access_token_rejected(self):
+        route = respx.post(self.TOKEN_URL)
+        for doc in [{}, {"access_token": ""}, {"access_token": 5}]:
+            route.respond(json=doc)
+            with pytest.raises(OAuthExchangeError, match="no access_token"):
+                await self._exchange()
+
+    @pytest.mark.anyio
+    @respx.mock
     async def test_required_scopes(self):
         route = respx.post(self.TOKEN_URL)
         route.respond(json={"access_token": "tok123", "scope": "openid email profile"})
