@@ -23,7 +23,7 @@ Passwords are stored as salted scrypt hashes and compared with `hmac.compare_dig
 | `secret_key` | `None` | At least 32 bytes. Without it the cookie is **not signed**. |
 | `ttl` | `86400` | Lifetime in seconds. |
 | `secure` | `True` | Turn off only for local HTTP development. |
-| `samesite` | `"lax"` | `"strict"` or `"none"`. |
+| `samesite` | `"lax"` | `"strict"` or `"none"`, which needs `secure=True`. |
 | `session_id` | `False` | See [revocable sessions](#revocable-sessions). |
 | `csrf` | `False` | Refuse requests from other origins. See [CSRF](#csrf). |
 | `trusted_origins` | `()` | Other origins `csrf` lets through. |
