@@ -236,10 +236,19 @@ class MultiAuth:
         return await self.dispatch(kwargs["request"], kwargs["security_scopes"].scopes)
 
     def require(self, **kwargs: Any) -> "MultiAuth":
-        """Return a copy passing extra keyword arguments to every validator."""
+        """Return a copy passing extra keyword arguments to every validator.
+
+        Raises:
+            TypeError: If a source has no `require()`: its credentials would
+                pass without the requirement.
+        """
+        for source in self._sources:
+            if not hasattr(source, "require"):
+                raise TypeError(
+                    f"{type(source).__name__} has no require(): its credentials "
+                    "would pass without the requirement. Call require() on the "
+                    "other sources before combining them, or give it a require()"
+                )
         return self._with_sources(
-            cast(Any, source).require(**kwargs)
-            if hasattr(source, "require")
-            else source
-            for source in self._sources
+            cast(Any, source).require(**kwargs) for source in self._sources
         )
