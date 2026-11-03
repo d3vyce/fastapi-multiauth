@@ -91,9 +91,10 @@ class HMACSignatureAuth(AuthSource):
             e.g. `"v0:{timestamp}:{body}"`. Defaults to `{timestamp}.{body}`
             with a timestamp, `{body}` without.
         tolerance: How far the timestamp may be from now, in seconds.
-        replay_check: Sync or async callable recording a verified signature
+        replay_check: Sync or async callable recording a verified request
             until the epoch time it receives, returning `False` if it was
-            already recorded. Needs a timestamp.
+            already recorded. It receives a SHA-256 digest of the signed
+            message, the same whichever key signed it. Needs a timestamp.
         scheme_name: Name of the security scheme in OpenAPI, `APIKeyHeader_{header}` by default.
         description: Description of the security scheme in OpenAPI.
 
@@ -263,12 +264,13 @@ class HMACSignatureAuth(AuthSource):
             mac.update(body)
             digest = mac.hexdigest()
             if any(hmac.compare_digest(digest, c) for c in candidates):
-                if (
-                    self._replay_check is not None
-                    and expires_at is not None
-                    and not await self._replay_check(digest, expires_at)
-                ):
-                    raise refusal(UnauthorizedError(), "replay")
+                if self._replay_check is not None and expires_at is not None:
+                    # One key per request, not per signature: with several keys
+                    # in rotation, each signature would let one more copy through.
+                    message = hashlib.sha256(signed_prefix)
+                    message.update(body)
+                    if not await self._replay_check(message.hexdigest(), expires_at):
+                        raise refusal(UnauthorizedError(), "replay")
                 return body
         raise refusal(UnauthorizedError(), "invalid_signature")
 
