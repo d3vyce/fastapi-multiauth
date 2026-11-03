@@ -80,6 +80,13 @@ def _sign_in(client: TestClient, session, value: str) -> None:
     _adopt_cookie(client, response)
 
 
+def _sign_in_long_ago(client: TestClient, session, value: str, monkeypatch) -> None:
+    real_time = time.time
+    monkeypatch.setattr(time, "time", lambda: real_time() - 3600)
+    _sign_in(client, session, value)
+    monkeypatch.setattr(time, "time", real_time)
+
+
 def test_bearer_issue():
     from docs_src.bearer_tokens.issue import session
 
@@ -276,13 +283,7 @@ def test_step_up_fresh(monkeypatch):
     client = _client("step_up.fresh", base_url=HTTPS)
     from docs_src.step_up.fresh import session
 
-    response = Response()
-    real_time = time.time
-    monkeypatch.setattr(time, "time", lambda: real_time() - 3600)
-    session.set_cookie(response, "alice:0")
-    monkeypatch.setattr(time, "time", real_time)
-    name, value = response.headers["set-cookie"].split(";", 1)[0].split("=", 1)
-    client.cookies.set(name, value)
+    _sign_in_long_ago(client, session, "alice:0", monkeypatch)
 
     body = {"password": "new-password"}
     stale = client.post("/me/password", json=body)
@@ -296,6 +297,33 @@ def test_step_up_fresh(monkeypatch):
     assert client.post("/me/password", json=body).status_code == 200
     assert other_device.post("/me/re-auth", json=body).status_code == 401
     assert client.post("/me/re-auth", json=body).status_code == 200
+
+
+def test_step_up_conditional(monkeypatch):
+    from docs_src.step_up.conditional import ROLES, SESSIONS, session
+
+    monkeypatch.setitem(ROLES, "bob", "member")
+    monkeypatch.setitem(SESSIONS, "alice", {"laptop", "phone"})
+    client = _client("step_up.conditional", base_url=HTTPS)
+    _sign_in_long_ago(client, session, "alice", monkeypatch)
+
+    member = {"username": "bob", "role": "member"}
+    admin = {"username": "bob", "role": "admin"}
+    bob = _client("step_up.conditional", base_url=HTTPS)
+    _sign_in(bob, session, "bob")
+    assert bob.post("/users/role", json=admin).status_code == 403
+    assert client.post("/users/role", json=member).status_code == 200
+    assert client.post("/users/role", json=admin).status_code == 401
+    assert client.delete("/me/sessions").status_code == 401
+    assert "alice" in SESSIONS
+
+    script = _client("step_up.conditional", base_url=HTTPS)
+    assert script.post("/users/role", json=admin, headers=_bearer("deploy-token")).status_code == 200
+    assert ROLES["bob"] == "admin"
+
+    _sign_in(client, session, "alice")
+    assert client.delete("/me/sessions").status_code == 200
+    assert "alice" not in SESSIONS
 
 
 def test_step_up_acr(provider):

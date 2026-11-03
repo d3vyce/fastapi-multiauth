@@ -11,6 +11,7 @@ from fastapi import Response
 from fastapi.requests import HTTPConnection
 from fastapi.security import APIKeyCookie
 from itsdangerous import BadSignature, SignatureExpired, TimestampSigner
+from itsdangerous.encoding import base64_decode, bytes_to_int, want_bytes
 
 from fastapi_multiauth.exceptions import ForbiddenError, UnauthorizedError
 
@@ -289,9 +290,12 @@ class APIKeyCookieAuth(ValidatedAuthSource):
     ) -> float | None:
         """`authenticated_at()`, reusing what `authenticate_scoped()` verified."""
         opened = self._opened_for(credential, request)
-        if opened is None or opened.signed_at is None:
+        if opened is None or self._signer is None:
             return self.authenticated_at(credential)
-        return opened.signed_at
+        if opened.signed_at is not None:
+            return opened.signed_at
+        stamp = credential.encode().rsplit(want_bytes(self._signer.sep), 2)[1]
+        return float(bytes_to_int(base64_decode(stamp)))
 
     def _credential_acr(
         self, credential: str, request: HTTPConnection | None
@@ -404,9 +408,7 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         else:
             opened = self._open(credential, dated=self._freshness is not None)
             plain = opened.value
-            if request is not None and (
-                self._freshness is not None or self._assurance is not None
-            ):
+            if request is not None:
                 request.scope[_OPENED] = (self._signer, credential, opened)
         if self._csrf:
             self._check_origin(request)

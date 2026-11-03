@@ -23,6 +23,21 @@ bearer.fresh(max_age=300, authenticated_at=lambda claims: claims.get("auth_time"
 !!! warning
     Only issue a new credential on a real login. Refreshing it silently on a timer makes the user look fresh forever.
 
+## Conditional freshness: `ensure_fresh()`
+
+When only the handler knows whether it needs a recent login, check after authentication:
+
+```python
+--8<-- "docs_src/step_up/conditional.py"
+```
+
+`session.ensure_fresh(request, max_age=300)` refuses the request as `fresh()` does, from what `session` recorded when it authenticated it: the validator does not run again. Here only a promotion to `admin` needs a recent login, and `session.authenticated(request)` spares callers using a token. To check whichever source was used instead, call `auth.ensure_fresh(...)` on the `MultiAuth`, with an `authenticated_at=` reader for the sources that cannot date their credentials.
+
+On a route already guarded by `Security(session)`, add `Depends(session.fresh_guard(max_age=300))`.
+
+!!! warning "Declare the guard after the auth dependency"
+    It reads what authentication recorded, so it must run second. FastAPI runs a route's `dependencies=[...]` before its parameters: a guard there refuses every request.
+
 ## Strong login: `stepped_up()`
 
 `stepped_up()` asks *how* the user logged in, from the token's `acr` claim:
@@ -52,5 +67,5 @@ Call `sign_in` from your login route once the password matches: the session star
 
 - `fresh()` and `stepped_up()` can be chained, and work on `MultiAuth` too, passing the same reader to every source, a signed cookie included.
 - With `session_id=True`, the step-up `set_cookie` returns a new session id: move your stored session to it.
-- Neither works with `optional()`.
+- Neither works with `optional()`. `ensure_fresh()` answers a request without the source's credential with a 401, and raises a `RuntimeError` when the source did not authenticate the credential the request carries.
 - Refusals raise [`StaleCredentialError`][fastapi_multiauth.StaleCredentialError] or [`InsufficientAuthenticationError`][fastapi_multiauth.InsufficientAuthenticationError].

@@ -3,7 +3,7 @@
 import copy
 import inspect
 import logging
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from typing import Annotated, Any, Self, cast
 
 from fastapi import Depends
@@ -13,12 +13,16 @@ from fastapi.security import SecurityScopes
 from fastapi_multiauth.exceptions import UnauthorizedError
 
 from ..abc import (
+    _AUTHENTICATED,
     AuthSource,
     _anonymous_scopes_error,
     _carry_scheme,
+    _Freshness,
+    _freshness_window,
     _step_up_optional_error,
     _step_up_optional_guard,
     _unenforceable_scopes_error,
+    _wiring_error,
 )
 from ..utils import challenge_headers, log_decision
 
@@ -203,6 +207,82 @@ class MultiAuth:
             source.stepped_up(acr_values, acr=acr) for source in self._sources
         )
 
+    def authenticated(self, request: HTTPConnection) -> bool:
+        """Whether one of the sources, or a copy of it, authenticated `request`."""
+        return any(source.authenticated(request) for source in self._sources)
+
+    async def ensure_fresh(
+        self,
+        request: HTTPConnection,
+        max_age: float,
+        *,
+        authenticated_at: Callable[..., Any] | None = None,
+        leeway: float = 0.0,
+    ) -> None:
+        """Run `AuthSource.ensure_fresh()` on the source that authenticated `request`.
+
+        Every source must date its credentials unless `authenticated_at` is given.
+        For "a token, or a recent cookie", call the cookie source's own instead.
+
+        Raises:
+            StaleCredentialError: As `AuthSource.ensure_fresh()`.
+            UnauthorizedError: If the request carries no credential for any source.
+            RuntimeError: If it carries one no source here authenticated.
+            ValueError: As `AuthSource.ensure_fresh()`, naming the source at fault.
+        """
+        await self._ensure_fresh(
+            request,
+            _freshness_window(
+                self._sources, max_age, authenticated_at, leeway, "ensure_fresh()"
+            ),
+        )
+
+    def fresh_guard(
+        self,
+        max_age: float,
+        *,
+        authenticated_at: Callable[..., Any] | None = None,
+        leeway: float = 0.0,
+    ) -> Callable[[HTTPConnection], Awaitable[None]]:
+        """Return a dependency running `ensure_fresh()`, as `AuthSource.fresh_guard()`.
+
+        Raises:
+            ValueError: As `ensure_fresh()`.
+        """
+        window = _freshness_window(
+            self._sources, max_age, authenticated_at, leeway, "fresh_guard()"
+        )
+
+        async def guard(request: HTTPConnection) -> None:
+            await self._ensure_fresh(request, window)
+
+        return guard
+
+    async def _ensure_fresh(self, request: HTTPConnection, window: _Freshness) -> None:
+        """Check `window` against the source that authenticated `request`."""
+        records = request.scope.get(_AUTHENTICATED) or {}
+        for source in self._sources:
+            record = records.get(source._record_key())
+            if record is not None:
+                await source._check_record(request, record, window)
+                return
+        for source in self._sources:
+            if await source.extract(request) is not None:
+                raise _wiring_error(self)
+        raise self._missing_credential()
+
+    def _missing_credential(self) -> UnauthorizedError:
+        """Log and build the 401 for a request no source found a credential in."""
+        log_decision(
+            logger,
+            logging.INFO,
+            "missing_credential",
+            source="MultiAuth",
+            scheme=None,
+            status=401,
+        )
+        return UnauthorizedError(headers=challenge_headers(self.www_authenticate()))
+
     def _with_sources(self, sources: Iterable[AuthSource]) -> "MultiAuth":
         """A new `MultiAuth` over `sources`, carrying this one's flags."""
         clone = MultiAuth(*sources)
@@ -235,15 +315,7 @@ class MultiAuth:
                 logger, logging.DEBUG, "anonymous", source="MultiAuth", scheme=None
             )
             return None
-        log_decision(
-            logger,
-            logging.INFO,
-            "missing_credential",
-            source="MultiAuth",
-            scheme=None,
-            status=401,
-        )
-        raise UnauthorizedError(headers=challenge_headers(self.www_authenticate()))
+        raise self._missing_credential()
 
     async def __call__(self, **kwargs: Any) -> Any:
         """Run as a FastAPI dependency."""

@@ -33,6 +33,8 @@ from fastapi_multiauth.utils import (
 
 logger = logging.getLogger(__name__)
 
+_AUTHENTICATED = "fastapi_multiauth.authenticated"
+
 _RESERVED_KWARGS = {
     "scopes": "injected from the route by Security(..., scopes=[...])",
     "session_id": "injected by APIKeyCookieAuth(session_id=True)",
@@ -97,6 +99,40 @@ def _step_up_optional_error(owner: object, guard: str) -> ValueError:
     return ValueError(
         f"{type(owner).__name__} cannot be both optional() and {guard}: an "
         "anonymous caller has proven no factor at all"
+    )
+
+
+def _wiring_error(owner: object) -> RuntimeError:
+    """Error for `ensure_fresh()` on a credential `owner` did not authenticate."""
+    return RuntimeError(
+        f"{type(owner).__name__}.ensure_fresh() runs on a request carrying "
+        "its credential, but it did not authenticate it: declare "
+        "fresh_guard() after the auth dependency, or check authenticated() "
+        "first when another source may have been used"
+    )
+
+
+def _freshness_window(
+    sources: Sequence["AuthSource"],
+    max_age: float,
+    authenticated_at: Callable[..., Any] | None,
+    leeway: float,
+    caller: str,
+) -> "_Freshness":
+    """A checked freshness window, valid for every one of `sources`."""
+    require_positive_seconds(max_age, "max_age")
+    require_nonnegative_seconds(leeway, "leeway")
+    if authenticated_at is None:
+        for source in sources:
+            if not source._dates_credentials():
+                raise ValueError(
+                    f"{type(source).__name__} cannot date a credential: "
+                    f"{caller} needs authenticated_at=..."
+                )
+    return _Freshness(
+        max_age=max_age,
+        leeway=leeway,
+        read=ensure_async(authenticated_at) if authenticated_at else None,
     )
 
 
@@ -222,6 +258,8 @@ class AuthSource(ABC):
     _assurance: _Assurance | None = None
     _csrf: bool | None = None
     """Whether cross-origin requests are refused, `None` when the source does not say."""
+    _lineage: object | None = None
+    """Shared by a source and its copies, to recognise what any of them authenticated."""
     _logger: ClassVar[logging.Logger] = logger
     """Where this source logs its decisions: its module's logger."""
 
@@ -232,6 +270,7 @@ class AuthSource(ABC):
             cls._logger = logging.getLogger(cls.__module__)
 
     def __init__(self, scheme: Any = None) -> None:
+        self._lineage = object()
         self.scheme = _DocOnlyScheme(scheme) if scheme is not None else None
         if self.scheme is not None:
             _carry_scheme(self, self.scheme)
@@ -303,7 +342,7 @@ class AuthSource(ABC):
         credential: str,
         scopes: list[str],
         *,
-        request: HTTPConnection | None = None,
+        request: HTTPConnection,
     ) -> Any:
         """Authenticate, attaching this source's challenge to any 401 raised.
 
@@ -319,9 +358,18 @@ class AuthSource(ABC):
             add_challenge(exc, self.www_authenticate())
             self._log(logging.WARNING, refusal_reason(exc), exc.status_code)
             raise
+        records = request.scope.get(_AUTHENTICATED)
+        if records is None:
+            records = request.scope[_AUTHENTICATED] = {}
+        records[self._record_key()] = (self, credential, identity)
         if self._logger.isEnabledFor(logging.DEBUG):
             self._log(logging.DEBUG, "authenticated")
         return identity
+
+    def _missing_credential(self) -> UnauthorizedError:
+        """Log and build the 401 for a request carrying no credential for this source."""
+        self._log(logging.INFO, "missing_credential", 401)
+        return UnauthorizedError(headers=challenge_headers(self.www_authenticate()))
 
     def _log(self, level: int, reason: str, status: int | None = None) -> None:
         """Log one decision of this source."""
@@ -394,8 +442,6 @@ class AuthSource(ABC):
                 either is not finite, the copy is `optional()` or already has
                 a window, or the credential cannot be dated.
         """
-        require_positive_seconds(max_age, "max_age")
-        require_nonnegative_seconds(leeway, "leeway")
         if self._optional:
             raise _step_up_optional_error(self, "fresh()")
         if self._freshness is not None:
@@ -403,18 +449,113 @@ class AuthSource(ABC):
                 f"{type(self).__name__} already has a freshness window: call "
                 "fresh() once, on the source or on the MultiAuth"
             )
-        if authenticated_at is None and not self._dates_credentials():
-            raise ValueError(
-                f"{type(self).__name__} cannot date a credential: "
-                "fresh() needs authenticated_at=..."
-            )
         clone = copy.copy(self)
-        clone._freshness = _Freshness(
-            max_age=max_age,
-            leeway=leeway,
-            read=ensure_async(authenticated_at) if authenticated_at else None,
+        clone._freshness = _freshness_window(
+            (self,), max_age, authenticated_at, leeway, "fresh()"
         )
         return clone
+
+    def authenticated(self, request: HTTPConnection) -> bool:
+        """Whether this source, or a copy of it, authenticated `request`.
+
+        Lets a route served by several sources tell which one was used, e.g.
+        to check freshness only for a cookie session.
+        """
+        return self._record_key() in request.scope.get(_AUTHENTICATED, ())
+
+    def _record_key(self) -> object:
+        """Where this source records what it authenticated in the request scope."""
+        return self._lineage or self
+
+    async def ensure_fresh(
+        self,
+        request: HTTPConnection,
+        max_age: float,
+        *,
+        authenticated_at: Callable[..., Any] | None = None,
+        leeway: float = 0.0,
+    ) -> None:
+        """Refuse `request` if this source authenticated it more than `max_age` ago.
+
+        The `fresh()` check, for a handler that only knows once the body is
+        parsed whether it needs a recent login. It reads what this source
+        recorded when it authenticated the request: the validator never runs again.
+
+        Args:
+            request: The request this source authenticated.
+            max_age: Freshness window in seconds.
+            authenticated_at: As in `fresh()`, applied to the recorded identity.
+            leeway: As in `fresh()`.
+
+        Raises:
+            StaleCredentialError: If the credential is too old or cannot be
+                dated, with the same `max_age` and challenge as `fresh()`.
+            UnauthorizedError: If the request carries no credential for this source.
+            RuntimeError: If it carries one this source did not authenticate.
+            ValueError: As `fresh()`, for the arguments.
+        """
+        await self._ensure_fresh(
+            request,
+            _freshness_window(
+                (self,), max_age, authenticated_at, leeway, "ensure_fresh()"
+            ),
+        )
+
+    def fresh_guard(
+        self,
+        max_age: float,
+        *,
+        authenticated_at: Callable[..., Any] | None = None,
+        leeway: float = 0.0,
+    ) -> Callable[[HTTPConnection], Awaitable[None]]:
+        """Return a dependency running `ensure_fresh()`, for a whole route.
+
+        Unlike `fresh()`, it adds a check after the route's own auth
+        dependency instead of replacing it, so the validator runs once. It
+        must come after that dependency: a parameter after it, or later in
+        the same `dependencies=[...]` list.
+
+        Raises:
+            ValueError: As `fresh()`, for the arguments.
+        """
+        window = _freshness_window(
+            (self,), max_age, authenticated_at, leeway, "fresh_guard()"
+        )
+
+        async def guard(request: HTTPConnection) -> None:
+            await self._ensure_fresh(request, window)
+
+        return guard
+
+    async def _ensure_fresh(self, request: HTTPConnection, window: _Freshness) -> None:
+        """Refuse `request` outside `window`, from what authentication recorded."""
+        record = request.scope.get(_AUTHENTICATED, {}).get(self._record_key())
+        if record is None:
+            if await self.extract(request) is not None:
+                raise _wiring_error(self)
+            raise self._missing_credential()
+        await self._check_record(request, record, window)
+
+    async def _check_record(
+        self,
+        request: HTTPConnection,
+        record: tuple["AuthSource", str, Any],
+        window: _Freshness,
+    ) -> None:
+        """Refuse the recorded authentication when it falls outside `window`."""
+        source, credential, identity = record
+        if not await self._is_fresh(window, credential, identity, request):
+            assurance = source._assurance
+            exc = refusal(
+                self._challenge_error(
+                    StaleCredentialError,
+                    window.max_age,
+                    assurance.acr_values if assurance else None,
+                ),
+                "stale",
+            )
+            self._log(logging.WARNING, "stale", exc.status_code)
+            raise exc
 
     def authenticated_acr(self, credential: str) -> Any:
         """Return the `acr` a credential was proven at, for `stepped_up()`.
@@ -531,8 +672,19 @@ class AuthSource(ABC):
         self, error_cls: type[InsufficientAuthenticationError]
     ) -> InsufficientAuthenticationError:
         """The refusal, its challenge listing every step-up requirement."""
-        max_age = self._freshness.max_age if self._freshness else None
-        acr_values = self._assurance.acr_values if self._assurance else None
+        return self._challenge_error(
+            error_cls,
+            self._freshness.max_age if self._freshness else None,
+            self._assurance.acr_values if self._assurance else None,
+        )
+
+    def _challenge_error(
+        self,
+        error_cls: type[InsufficientAuthenticationError],
+        max_age: float | None,
+        acr_values: tuple[str, ...] | None,
+    ) -> InsufficientAuthenticationError:
+        """A step-up refusal asking for `max_age` and `acr_values`."""
         return error_cls(
             headers=step_up_challenge(
                 self.www_authenticate(),
@@ -575,8 +727,7 @@ class AuthSource(ABC):
             if self._optional:
                 self._log(logging.DEBUG, "anonymous")
                 return None
-            self._log(logging.INFO, "missing_credential", 401)
-            raise UnauthorizedError(headers=challenge_headers(self.www_authenticate()))
+            raise self._missing_credential()
         return await self._authenticate_with_challenge(
             credential, scopes, request=request
         )

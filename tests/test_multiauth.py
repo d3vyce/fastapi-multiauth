@@ -13,6 +13,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import StrEnum
+from operator import itemgetter
 from typing import Any, ClassVar, cast
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
@@ -3804,6 +3805,268 @@ class TestFreshness:
         response = self._get(client)
         assert response.status_code == 401
         assert response.headers["WWW-Authenticate"] == self.STEP_UP
+
+
+class TestEnsureFresh:
+    """ensure_fresh() and fresh_guard(): the fresh() check, after authentication."""
+
+    _later = staticmethod(TestFreshness._later)
+
+    @staticmethod
+    def _cookie_request(auth: APIKeyCookieAuth, **set_cookie: Any) -> Request:
+        response = Response()
+        auth.set_cookie(response, VALID_COOKIE, **set_cookie)
+        return _request(cookie=f"session={_cookie_value(response)}")
+
+    @staticmethod
+    def _counted_session() -> tuple[APIKeyCookieAuth, list[str]]:
+        """A cookie source recording each value its validator receives."""
+        calls: list[str] = []
+
+        async def validate(value: str) -> dict:
+            calls.append(value)
+            return {"session": value}
+
+        return APIKeyCookieAuth(
+            "session", validate, secret_key=COOKIE_SECRET, secure=False
+        ), calls
+
+    @pytest.mark.anyio
+    async def test_refuses_as_fresh_does(self):
+        session = _signed_cookie_auth()
+        request, guarded = self._cookie_request(session), self._cookie_request(session)
+        await session.dispatch(request, [])
+        await session.ensure_fresh(request, 300)
+        with self._later(600), pytest.raises(StaleCredentialError) as stale:
+            await session.ensure_fresh(request, 300)
+        with self._later(600), pytest.raises(StaleCredentialError) as expected:
+            await session.fresh(300).dispatch(guarded, [])
+        assert stale.value.max_age == expected.value.max_age == 300
+        assert stale.value.headers == expected.value.headers
+
+    @pytest.mark.anyio
+    async def test_a_session_id_and_a_level_keep_the_timestamp(self):
+        session = APIKeyCookieAuth(
+            "session", sid_validator, secret_key=COOKIE_SECRET, session_id=True
+        )
+        request = self._cookie_request(session, acr="mfa", amr=["pwd", "otp"])
+        await session.dispatch(request, [])
+        await session.ensure_fresh(request, 300)
+        with self._later(600), pytest.raises(StaleCredentialError):
+            await session.ensure_fresh(request, 300)
+
+    @pytest.mark.anyio
+    async def test_leeway_applies_both_ways(self):
+        session = _signed_cookie_auth()
+        request = self._cookie_request(session)
+        await session.dispatch(request, [])
+        for shift, passes in [(305, True), (315, False), (-5, True), (-15, False)]:
+            with self._later(shift):
+                if passes:
+                    await session.ensure_fresh(request, 300, leeway=10)
+                else:
+                    with pytest.raises(StaleCredentialError):
+                        await session.ensure_fresh(request, 300, leeway=10)
+
+    @pytest.mark.anyio
+    async def test_arguments_are_checked_as_fresh_checks_them(self):
+        session, bearer = _signed_cookie_auth(), HTTPBearerAuth(simple_validator)
+        for max_age, leeway in [(0, 0.0), (math.inf, 0.0), (1, -1.0)]:
+            with pytest.raises(ValueError):
+                await session.ensure_fresh(_request(), max_age, leeway=leeway)
+        with pytest.raises(
+            ValueError, match=r"ensure_fresh\(\) needs authenticated_at"
+        ):
+            await bearer.ensure_fresh(_request(), 300)
+        with pytest.raises(ValueError, match=r"fresh_guard\(\) needs authenticated_at"):
+            bearer.fresh_guard(300)
+
+    @pytest.mark.anyio
+    async def test_never_runs_the_validator_or_unsigns_again(self):
+        session, calls = self._counted_session()
+        request = self._cookie_request(session)
+        unsign = patch.object(
+            APIKeyCookieAuth,
+            "_unsign",
+            autospec=True,
+            side_effect=APIKeyCookieAuth._unsign,
+        )
+        with unsign as counted:
+            await session.dispatch(request, [])
+            await session.ensure_fresh(request, 300)
+        assert counted.call_count == 1
+        assert calls == [VALID_COOKIE]
+
+    @pytest.mark.anyio
+    async def test_no_credential_for_the_source_is_a_401(self, caplog):
+        caplog.set_level(logging.INFO, logger="fastapi_multiauth")
+        request = _request(x_api_key=VALID_TOKEN)
+        await APIKeyHeaderAuth("X-API-Key", simple_validator).dispatch(request, [])
+        with pytest.raises(UnauthorizedError):
+            await _signed_cookie_auth().ensure_fresh(request, 300)
+        assert caplog.records[-1].auth_reason == "missing_credential"
+        bearer = HTTPBearerAuth(simple_validator)
+        with pytest.raises(UnauthorizedError) as refused:
+            await bearer.ensure_fresh(request, 300, authenticated_at=time.time)
+        assert refused.value.headers == {"WWW-Authenticate": "Bearer"}
+
+    @pytest.mark.anyio
+    async def test_a_credential_it_did_not_authenticate_is_a_wiring_error(self):
+        session = _signed_cookie_auth()
+        request = _request(
+            authorization=f"Bearer {VALID_TOKEN}",
+            cookie=f"session={session._sign(VALID_COOKIE)}",
+        )
+        await MultiAuth(HTTPBearerAuth(simple_validator), session).dispatch(request, [])
+        assert not session.authenticated(request)
+        with pytest.raises(RuntimeError, match="did not authenticate it"):
+            await session.ensure_fresh(request, 300)
+
+    @pytest.mark.anyio
+    async def test_a_stale_refusal_keeps_the_required_level(self):
+        session = _signed_cookie_auth()
+        request = self._cookie_request(session, acr="mfa")
+        await session.stepped_up(["mfa"]).dispatch(request, [])
+        with self._later(600), pytest.raises(StaleCredentialError) as stale:
+            await session.ensure_fresh(request, 300)
+        assert (stale.value.max_age, stale.value.acr_values) == (300, ("mfa",))
+
+    @pytest.mark.anyio
+    async def test_a_subclass_without_the_base_constructor_still_records(self):
+        class Bare(_HeaderAuth):
+            def __init__(self) -> None:
+                self.scheme = None
+                self._secret = "s3cr3t"
+
+        source, request = Bare(), _request(x_token="s3cr3t")
+        await source.dispatch(request, [])
+        assert source.authenticated(request)
+        assert not Bare().authenticated(request)
+
+    @pytest.mark.anyio
+    async def test_a_bearer_is_dated_from_its_identity(self, caplog):
+        caplog.set_level(logging.WARNING, logger="fastapi_multiauth")
+        bearer = TestFreshness._dated_bearer(time.time() - 600)
+        request = _request(authorization=f"Bearer {VALID_TOKEN}")
+        await bearer.dispatch(request, [])
+        with pytest.raises(StaleCredentialError) as stale:
+            await bearer.ensure_fresh(
+                request, 300, authenticated_at=itemgetter("proven_at")
+            )
+        assert stale.value.headers == {"WWW-Authenticate": TestFreshness.STEP_UP}
+        assert [r.auth_reason for r in caplog.records] == ["stale"]
+        with pytest.raises(StaleCredentialError):
+            await bearer.ensure_fresh(request, 900, authenticated_at=lambda _: None)
+
+    def test_a_handler_checks_only_when_it_needs_to(self):
+        session = _signed_cookie_auth()
+
+        def setup(app: FastAPI):
+            @app.get("/settings")
+            async def settings(
+                request: Request, sensitive: bool = False, user=Security(session)
+            ):
+                if sensitive:
+                    await session.ensure_fresh(request, 300)
+                return user
+
+        client = TestClient(_app(setup))
+        cookie = _cookie_header({"session": session._sign(VALID_COOKIE)})
+        with self._later(600):
+            assert client.get("/settings", headers=cookie).status_code == 200
+            response = client.get("/settings?sensitive=true", headers=cookie)
+        assert response.status_code == 401
+        assert "WWW-Authenticate" not in response.headers
+
+    def test_a_guard_after_the_auth_runs_the_validator_once(self):
+        session, calls = self._counted_session()
+
+        def setup(app: FastAPI):
+            @app.get("/layered")
+            async def layered(
+                user=Security(session), _=Depends(session.fresh_guard(300))
+            ):
+                return user
+
+            @app.get(
+                "/listed",
+                dependencies=[Security(session), Depends(session.fresh_guard(300))],
+            )
+            async def listed():
+                return {}
+
+        client = TestClient(_app(setup))
+        cookie = _cookie_header({"session": session._sign(VALID_COOKIE)})
+        assert client.get("/layered", headers=cookie).status_code == 200
+        assert calls == [VALID_COOKIE]
+        assert client.get("/listed", headers=cookie).status_code == 200
+        with self._later(600):
+            assert client.get("/layered", headers=cookie).status_code == 401
+
+    def test_a_guard_before_the_auth_is_a_wiring_error(self):
+        """FastAPI runs dependencies=[...] before the route's parameters."""
+        session = _signed_cookie_auth()
+
+        def setup(app: FastAPI):
+            @app.get("/", dependencies=[Depends(session.fresh_guard(300))])
+            async def backwards(user=Security(session)):
+                return user
+
+        client = TestClient(_app(setup))
+        with pytest.raises(RuntimeError, match="declare fresh_guard"):
+            client.get(
+                "/", headers=_cookie_header({"session": session._sign(VALID_COOKIE)})
+            )
+
+    @pytest.mark.anyio
+    async def test_multiauth_checks_the_source_that_was_used(self):
+        session = _signed_cookie_auth()
+        multi = MultiAuth(TestFreshness._dated_bearer(time.time() - 600), session)
+        with pytest.raises(ValueError, match="HTTPBearerAuth cannot date"):
+            await multi.ensure_fresh(_request(), 300)
+
+        def proven_at(identity):
+            return identity.get("proven_at", time.time())
+
+        token, cookie = (
+            _request(authorization=f"Bearer {VALID_TOKEN}"),
+            self._cookie_request(session),
+        )
+        for request in (token, cookie):
+            await multi.dispatch(request, [])
+            assert multi.authenticated(request)
+        with pytest.raises(StaleCredentialError):
+            await multi.ensure_fresh(token, 300, authenticated_at=proven_at)
+        await multi.fresh_guard(900, authenticated_at=proven_at)(token)
+        await multi.ensure_fresh(cookie, 300, authenticated_at=proven_at)
+
+    @pytest.mark.anyio
+    async def test_multiauth_refuses_requests_it_did_not_authenticate(self, caplog):
+        caplog.set_level(logging.INFO, logger="fastapi_multiauth")
+        multi = MultiAuth(HTTPBearerAuth(simple_validator), _signed_cookie_auth())
+        with pytest.raises(UnauthorizedError):
+            await multi.ensure_fresh(_request(), 300, authenticated_at=time.time)
+        assert caplog.records[-1].auth_source == "MultiAuth"
+        other = _request(authorization=f"Bearer {VALID_TOKEN}")
+        await HTTPBearerAuth(simple_validator).dispatch(other, [])
+        with pytest.raises(RuntimeError, match="MultiAuth.ensure_fresh"):
+            await multi.ensure_fresh(other, 300, authenticated_at=time.time)
+
+    @pytest.mark.anyio
+    async def test_a_token_or_a_recent_cookie(self):
+        session = _signed_cookie_auth()
+        multi = MultiAuth(HTTPBearerAuth(simple_validator), session)
+
+        async def check(request: Request) -> None:
+            await multi.dispatch(request, [])
+            if session.authenticated(request):
+                await session.ensure_fresh(request, 300)
+
+        cookie = self._cookie_request(session)
+        with self._later(600):
+            await check(_request(authorization=f"Bearer {VALID_TOKEN}"))
+            with pytest.raises(StaleCredentialError):
+                await check(cookie)
 
 
 class TestFreshnessWithJWT:
