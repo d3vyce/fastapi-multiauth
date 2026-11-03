@@ -23,7 +23,6 @@ session = APIKeyCookieAuth(
     name="__Host-session",
     validator=validate_session,
     secret_key=SECRET_KEY,
-    csrf=True,
     trusted_origins=["https://app.example.com"],
 )
 

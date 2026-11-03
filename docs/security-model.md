@@ -11,7 +11,7 @@ What the library takes care of, and what stays with you. To report a vulnerabili
 - **Tampering**: cookies are signed (HMAC-SHA256), JWTs and ID tokens are verified, OAuth `state` is checked against CSRF.
 - **Confusion between sources**: a cookie signed for one cookie name is never accepted under another, and a JWKS-backed `JWTValidator` requires an `audience`.
 - **Downgrades**: OAuth, OIDC and JWKS URLs must be HTTPS, and `HS*` algorithms are refused against a provider's keys.
-- **Cross-site requests**: with [`csrf=True`](guide/cookie-sessions.md#csrf), a cookie source refuses requests sent from another origin.
+- **Cross-site requests**: a cookie source [refuses requests sent from another origin](guide/cookie-sessions.md#csrf) unless you pass `csrf=False`.
 - **Stolen tokens**: a [DPoP](guide/jwt-and-oauth2.md#sender-constrained-tokens-dpop)-bound token is refused without a fresh proof signed by its key.
 - **Forged webhooks**: [`HMACSignatureAuth`](guide/webhooks.md) checks the sender's signature over the raw body, and refuses an old timestamp when the sender sends one.
 - **Replayed one-time codes**: [`totp_verify`][fastapi_multiauth.totp_verify] refuses a code from a time step already used, given the `last_step` you [stored atomically](recipes/two-factor.md).
@@ -26,7 +26,7 @@ What the library takes care of, and what stays with you. To report a vulnerabili
 - **HTTPS** for your own app.
 - **TOTP secrets.** Encrypt them at rest: unlike a password, a TOTP secret cannot be stored as a hash. See the [two-factor recipe](recipes/two-factor.md).
 - **Rate limiting** on login, one-time code and token endpoints, with failed codes capped per account. Refusals are [logged](guide/logging.md) so you can act on them.
-- **CSRF** on cookie-authenticated routes, unless you turn on [`csrf=True`](guide/cookie-sessions.md#csrf). Either way, keep `GET` routes free of side effects.
+- **CSRF** on cookie-authenticated routes where you pass [`csrf=False`](guide/cookie-sessions.md#csrf). Either way, keep `GET` routes free of side effects.
 
 ## Good to know
 
@@ -42,5 +42,5 @@ What the library takes care of, and what stays with you. To report a vulnerabili
 | --- | --- |
 | 401 | no credential, or an invalid one; carries a `WWW-Authenticate` challenge where the scheme has one |
 | 401 `insufficient_user_authentication` | valid, but authenticated too long ago or too weakly ([step-up](guide/step-up.md)) |
-| 403 | authenticated, but not allowed, or sent from another origin ([`csrf=True`](guide/cookie-sessions.md#csrf)) |
+| 403 | authenticated, but not allowed, or sent from another origin ([CSRF](guide/cookie-sessions.md#csrf)) |
 | 503 | a provider's keys cannot be fetched and none are cached, or its introspection endpoint is down; clients should retry |

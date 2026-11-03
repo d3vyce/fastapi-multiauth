@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from . import idp
+from .browser import browser
 
 HTTPS = "https://testserver"
 
@@ -19,7 +20,7 @@ def _bearer(token: str) -> dict[str, str]:
 def test_sessions_and_tokens():
     from docs_src.recipes.sessions_and_tokens import app
 
-    client = TestClient(app, base_url=HTTPS)
+    client = browser(app, base_url=HTTPS)
     token = client.get("/me", headers=_bearer("user_alice-script-token"))
     assert token.json() == {"name": "alice"}
     assert client.get("/me").status_code == 401
@@ -30,7 +31,7 @@ def test_sessions_and_tokens():
 def test_personal_access_tokens():
     from docs_src.recipes.personal_access_tokens import app, session
 
-    client = TestClient(app, base_url=HTTPS)
+    client = browser(app, base_url=HTTPS)
     from fastapi import Response
 
     response = Response()
@@ -53,7 +54,7 @@ def test_role_gated_routes():
     from docs_src.recipes.role_gated_routes import app, session
 
     def login(username: str) -> TestClient:
-        client = TestClient(app, base_url=HTTPS)
+        client = browser(app, base_url=HTTPS)
         response = Response()
         session.set_cookie(response, username)
         name, value = response.headers["set-cookie"].split(";", 1)[0].split("=", 1)
@@ -67,8 +68,8 @@ def test_role_gated_routes():
 def test_sign_out_everywhere():
     from docs_src.recipes.sign_out_everywhere import app
 
-    laptop = TestClient(app, base_url=HTTPS, headers={"user-agent": "laptop"})
-    phone = TestClient(app, base_url=HTTPS, headers={"user-agent": "phone"})
+    laptop = browser(app, base_url=HTTPS, headers={"user-agent": "laptop"})
+    phone = browser(app, base_url=HTTPS, headers={"user-agent": "phone"})
     assert laptop.post("/login", params={"username": "alice"}).status_code == 422
     wrong = {"username": "alice", "password": "nope"}
     assert laptop.post("/login", json=wrong).status_code == 401
@@ -90,7 +91,7 @@ def test_sign_out_everywhere():
 def test_oidc_sign_in(provider):
     from docs_src.recipes.oidc_sign_in import CLIENT_ID, app
 
-    client = TestClient(app, base_url="https://app.example.com", follow_redirects=False)
+    client = browser(app, base_url="https://app.example.com", follow_redirects=False)
     login = client.get("/oauth/login", params={"next": "/dashboard"})
     query = parse_qs(urlsplit(login.headers["location"]).query)
     assert query["code_challenge_method"] == ["S256"]
@@ -112,7 +113,7 @@ def test_oidc_sign_in(provider):
 def test_oidc_sign_in_refuses_forged_state(provider):
     from docs_src.recipes.oidc_sign_in import app
 
-    client = TestClient(app, base_url="https://app.example.com", follow_redirects=False)
+    client = browser(app, base_url="https://app.example.com", follow_redirects=False)
     client.get("/oauth/login")
     forged = client.get("/oauth/callback", params={"code": "abc", "state": "forged"})
     assert forged.headers["location"] == "/login?error=oauth"
@@ -123,7 +124,7 @@ def test_websocket_tickets():
 
     from docs_src.recipes.websocket_tickets import app, session
 
-    client = TestClient(app, base_url=HTTPS)
+    client = browser(app, base_url=HTTPS)
     response = Response()
     session.set_cookie(response, "alice")
     name, value = response.headers["set-cookie"].split(";", 1)[0].split("=", 1)
@@ -152,7 +153,7 @@ def test_two_factor(monkeypatch):
     monkeypatch.setattr(time, "time", lambda: now[0])
     good = {"username": "alice", "password": "wonderland"}
 
-    laptop = TestClient(app, base_url=HTTPS)
+    laptop = browser(app, base_url=HTTPS)
     assert laptop.post("/login", json=good).json() == {"mfa_required": False}
     assert laptop.post("/payouts").status_code == 401
     authenticator = pyotp.parse_uri(laptop.post("/2fa/enroll").json()["uri"])
@@ -163,12 +164,12 @@ def test_two_factor(monkeypatch):
     assert len(recovery_codes) == 10
     assert laptop.post("/payouts").json() == {"approved_by": "alice"}
 
-    phone = TestClient(app, base_url=HTTPS)
+    phone = browser(app, base_url=HTTPS)
     assert phone.post("/login", json=good).json() == {"mfa_required": True}
     pending = phone.cookies["__Host-mfa-pending"]
     assert phone.post("/payouts").status_code == 401
     assert phone.post("/2fa/confirm", json={"code": "000000"}).status_code == 401
-    forged = TestClient(app, base_url=HTTPS)
+    forged = browser(app, base_url=HTTPS)
     forged.cookies.set("__Host-session", pending)
     assert forged.post("/2fa/confirm", json={"code": "000000"}).status_code == 401
 
@@ -184,7 +185,7 @@ def test_two_factor(monkeypatch):
     assert phone.post("/payouts").json() == {"approved_by": "alice"}
     assert phone.post("/login/verify", json=fresh_code).status_code == 401
 
-    tablet = TestClient(app, base_url=HTTPS)
+    tablet = browser(app, base_url=HTTPS)
     tablet.post("/login", json=good)
     used = {"code": recovery_codes[0].upper()}
     assert tablet.post("/login/verify", json=used).json() == {
