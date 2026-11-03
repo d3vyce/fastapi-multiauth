@@ -899,6 +899,11 @@ class TestCookieConfig:
             with pytest.raises(ValueError, match="__Host-"):
                 APIKeyCookieAuth("__HOST-session", cookie_validator, **kwargs)
 
+    def test_samesite_none_requires_secure(self):
+        APIKeyCookieAuth("session", cookie_validator, samesite="none")
+        with pytest.raises(ValueError, match='samesite="none" requires secure=True'):
+            APIKeyCookieAuth("session", cookie_validator, samesite="none", secure=False)
+
 
 class TestCookieKeyRotation:
     """secret_key rotation: first key signs, every key verifies."""

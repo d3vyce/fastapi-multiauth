@@ -31,10 +31,15 @@ _OPENED = "fastapi_multiauth.cookie"
 SameSite = Literal["lax", "strict", "none"]
 
 
-def _check_name_prefix(
-    name: str, *, secure: bool, domain: str | None, path: str
+def _check_attributes(
+    name: str, *, secure: bool, samesite: str, domain: str | None, path: str
 ) -> None:
-    """Refuse settings that make browsers drop a `__Secure-`/`__Host-` cookie."""
+    """Refuse settings that make browsers drop the cookie."""
+    if samesite == "none" and not secure:
+        raise ValueError(
+            'samesite="none" requires secure=True: browsers drop a SameSite=None '
+            "cookie without the Secure attribute"
+        )
     lowered = name.lower()
     if lowered.startswith(("__secure-", "__host-")) and not secure:
         raise ValueError(
@@ -148,8 +153,9 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         **kwargs: Keyword arguments passed to the validator on every call.
 
     Raises:
-        ValueError: On an invalid configuration, such as a short key or a
-            `__Host-` name with settings a browser would refuse.
+        ValueError: On an invalid configuration, such as a short key, a
+            `__Host-` name or `samesite="none"` with settings a browser
+            would refuse.
     """
 
     def __init__(
@@ -172,7 +178,9 @@ class APIKeyCookieAuth(ValidatedAuthSource):
     ) -> None:
         if ttl <= 0:
             raise ValueError("ttl must be a positive number of seconds")
-        _check_name_prefix(name, secure=secure, domain=domain, path=path)
+        _check_attributes(
+            name, secure=secure, samesite=samesite, domain=domain, path=path
+        )
         self._name = name
         self._secret_keys = (
             []
