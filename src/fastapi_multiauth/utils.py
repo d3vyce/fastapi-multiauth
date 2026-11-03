@@ -12,6 +12,7 @@ import string
 import time
 import zlib
 from collections.abc import Callable, Mapping, Sequence
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any, TypeVar
 from urllib.parse import urlsplit
@@ -302,6 +303,16 @@ def claims_jkt(identity: Any) -> Any:
         return None
     cnf = identity.get("cnf")
     return cnf.get("jkt") if isinstance(cnf, Mapping) else None
+
+
+verified_jkt: ContextVar[Any] = ContextVar(
+    "fastapi_multiauth.verified_jkt", default=None
+)
+"""The `cnf.jkt` of the claims a library validator verified last in this context.
+
+Set before `claims_to_identity` runs, so a bearer source still sees the
+binding when the identity no longer carries the claims.
+"""
 
 
 def finite_number(value: Any) -> float | None:

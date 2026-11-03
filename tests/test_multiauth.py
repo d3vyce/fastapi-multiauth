@@ -6361,6 +6361,31 @@ class TestDPoP:
             response = self._get(_client(source), bound, None, scheme="Bearer")
             assert response.status_code == expected
 
+    @respx.mock
+    def test_bearer_sources_refuse_a_bound_token_hidden_by_claims_to_identity(self):
+        def to_user(claims):
+            return {"id": claims["sub"]}
+
+        token = self._token()
+        introspection = TestIntrospectionValidator
+        respx.post(introspection.URL).respond(
+            json=introspection._active(cnf={"jkt": "bound"})
+        )
+        jwt_validator = JWTValidator(secret=JWT_SECRET, claims_to_identity=to_user)
+        for validator in [
+            jwt_validator,
+            introspection()._validator(claims_to_identity=to_user),
+        ]:
+            bearer = HTTPBearerAuth(validator)
+            response = self._get(_client(bearer), token, None, scheme="Bearer")
+            assert response.status_code == 401, type(validator).__name__
+            allowed = HTTPBearerAuth(validator, allow_dpop_bound=True)
+            response = self._get(_client(allowed), token, None, scheme="Bearer")
+            assert response.json() == {"id": "user-1"}
+
+        bearer = _client(HTTPBearerAuth(jwt_validator))
+        assert self._get(bearer, _hs_token(), None, scheme="Bearer").status_code == 200
+
     def test_replays_are_refused(self, caplog):
         caplog.set_level(logging.WARNING, logger="fastapi_multiauth")
         seen: dict[str, float] = {}

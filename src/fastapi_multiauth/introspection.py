@@ -16,6 +16,7 @@ from ._http import DEFAULT_TIMEOUT, _request_json, _require_https
 from .exceptions import UnauthorizedError
 from .jwt import AnyAudience
 from .utils import (
+    claims_jkt,
     ensure_async,
     finite_number,
     hash_token,
@@ -23,6 +24,7 @@ from .utils import (
     require_nonnegative_seconds,
     require_scopes,
     service_unavailable,
+    verified_jkt,
 )
 
 logger = logging.getLogger(__name__)
@@ -175,6 +177,7 @@ class IntrospectionValidator:
         claims = answer.copy()
         if scopes:
             require_scopes(claims, self._scopes_claim, scopes)
+        verified_jkt.set(claims_jkt(claims))
         if self._claims_to_identity is not None:
             return await self._claims_to_identity(claims)
         return claims
