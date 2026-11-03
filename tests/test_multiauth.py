@@ -507,20 +507,24 @@ class TestMultiAuth:
         assert response.json() == {"user": "alice", "role": "admin"}
 
     def test_require_derives_new_sources(self):
-        """require() applies to sources with require(), skips those without."""
+        """require() applies to every source and leaves the originals alone."""
         from fastapi_multiauth.sources import MultiAuth as MultiAuthClass
 
         bearer = HTTPBearerAuth(role_validator, role="user")
-        header_auth = _HeaderAuth(secret="s3cr3t")
-        multi = MultiAuth(bearer, header_auth)
+        cookie = APIKeyCookieAuth("session", cookie_validator)
+        multi = MultiAuth(bearer, cookie)
         derived = multi.require(role="admin")
         assert isinstance(derived, MultiAuthClass)
         assert derived is not multi
-        # bearer got require() applied, header_auth passed through
         assert cast(HTTPBearerAuth, derived._sources[0])._kwargs == {"role": "admin"}
-        assert derived._sources[1] is header_auth
+        assert cast(APIKeyCookieAuth, derived._sources[1])._kwargs == {"role": "admin"}
         assert bearer._kwargs == {"role": "user"}
-        assert MultiAuth(header_auth).require(role="admin")._sources[0] is header_auth
+
+    def test_require_refuses_a_source_without_require(self):
+        """A source that cannot take the requirement would let its credentials through."""
+        multi = MultiAuth(HTTPBearerAuth(role_validator), _HeaderAuth(secret="s3cr3t"))
+        with pytest.raises(TypeError, match="_HeaderAuth has no require"):
+            multi.require(role="admin")
 
 
 class TestRequire:
