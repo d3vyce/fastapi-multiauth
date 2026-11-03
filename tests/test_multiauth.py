@@ -4829,7 +4829,7 @@ class TestTOTP:
 
     NOW: ClassVar[int] = 1_700_000_010
     STEP: ClassVar[int] = NOW // 30
-    SECRET: ClassVar[str] = "JBSWY3DPEHPK3PXP"
+    SECRET: ClassVar[str] = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
 
     @pytest.fixture(autouse=True)
     def _frozen_clock(self):
@@ -4883,21 +4883,27 @@ class TestTOTP:
 
     def test_secret_is_read_leniently_and_refused_when_not_base32(self):
         for spelling in [
-            "jbswy3dpehpk3pxp",
-            "JBSW Y3DP EHPK 3PXP",
-            "JBSWY3DPEHPK3PXP====",
+            "jbswy3dpehpk3pxpjbswy3dpehpk3pxp",
+            "JBSW Y3DP EHPK 3PXP JBSW Y3DP EHPK 3PXP",
+            "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP====",
         ]:
             assert totp_verify(spelling, self._code()) == self.STEP
-        for bad in ["", "not base32!", "JBSWY3DPEHPK3PX1"]:
+        for bad in ["", "not base32!", "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PX1"]:
             with pytest.raises(ValueError, match="base32"):
                 totp_verify(bad, self._code())
 
-    def test_secrets_shorter_than_80_bits_are_refused(self):
-        for short in ["AA", "JBSWY3DPEHPK3PX"]:
-            with pytest.raises(ValueError, match="at least 80 bits"):
-                totp_verify(short, "000000")
-            with pytest.raises(ValueError, match="at least 80 bits"):
+    def test_new_secrets_shorter_than_128_bits_are_refused(self):
+        for short in ["AA", "JBSWY3DPEHPK3PXP", "JBSWY3DPEHPK3PXPJBSWY3DPE"]:
+            with pytest.raises(ValueError, match="at least 128 bits, 26 characters"):
                 totp_provisioning_uri(short, "alice", "Acme")
+        assert totp_provisioning_uri("JBSWY3DPEHPK3PXPJBSWY3DPEH", "alice", "Acme")
+
+    def test_enrolled_secrets_from_80_bits_still_verify(self):
+        for short in ["AA", "JBSWY3DPEHPK3PX"]:
+            with pytest.raises(ValueError, match="at least 80 bits, 16 characters"):
+                totp_verify(short, "000000")
+        legacy = "JBSWY3DPEHPK3PXP"
+        assert totp_verify(legacy, pyotp.TOTP(legacy).at(self.NOW)) == self.STEP
 
     def test_window_must_be_a_non_negative_integer(self):
         for window in [-1, True, 1.5]:
@@ -4915,7 +4921,7 @@ class TestTOTP:
         uri = totp_provisioning_uri(self.SECRET, "alice@example.com", "Acme Corp")
         assert uri == (
             "otpauth://totp/Acme%20Corp:alice%40example.com"
-            "?secret=JBSWY3DPEHPK3PXP&issuer=Acme%20Corp"
+            "?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=Acme%20Corp"
         )
         for account, issuer in [
             ("a:b", "Acme"),

@@ -11,7 +11,8 @@ from urllib.parse import quote, urlencode
 _DIGITS = 6
 _PERIOD = 30
 _SECRET_BYTES = 20
-_MIN_SECRET_BYTES = 10
+_MIN_SECRET_BYTES = 16  # RFC 4226 R6: at least 128 bits
+_MIN_ENROLLED_SECRET_BYTES = 10
 
 
 def _compact_secret(secret: str) -> str:
@@ -19,17 +20,17 @@ def _compact_secret(secret: str) -> str:
     return "".join(secret.split()).upper().rstrip("=")
 
 
-def _decode_secret(secret: str) -> bytes:
+def _decode_secret(secret: str, min_bytes: int) -> bytes:
     """The key of a base32 secret, spaces and case ignored, padding optional."""
     compact = _compact_secret(secret)
     try:
         key = base64.b32decode(compact + "=" * (-len(compact) % 8))
     except ValueError:
         key = b""
-    if len(key) < _MIN_SECRET_BYTES:
+    if len(key) < min_bytes:
         raise ValueError(
-            f"secret must be a base32 string of at least {_MIN_SECRET_BYTES * 8} "
-            "bits, 16 characters"
+            f"secret must be a base32 string of at least {min_bytes * 8} bits, "
+            f"{-(-min_bytes * 8 // 5)} characters"
         )
     return key
 
@@ -69,11 +70,11 @@ def totp_provisioning_uri(secret: str, account: str, issuer: str) -> str:
         The provisioning URI.
 
     Raises:
-        ValueError: If `secret` is not base32 or shorter than 80 bits, or
+        ValueError: If `secret` is not base32 or shorter than 128 bits, or
             `account` or `issuer` is empty or contains a colon, the label's
             separator.
     """
-    _decode_secret(secret)
+    _decode_secret(secret, _MIN_SECRET_BYTES)
     for label, value in (("account", account), ("issuer", issuer)):
         if not value or ":" in value:
             raise ValueError(f"{label} must be non-empty and contain no colon")
@@ -114,11 +115,12 @@ def totp_verify(
 
     Raises:
         ValueError: If `secret` is not base32 or shorter than 80 bits, or
-            `window` is negative.
+            `window` is negative. Secrets enrolled from 80 bits up still
+            verify; `totp_provisioning_uri()` refuses new ones below 128.
     """
     if isinstance(window, bool) or not isinstance(window, int) or window < 0:
         raise ValueError("window must be a non-negative integer")
-    key = _decode_secret(secret)
+    key = _decode_secret(secret, _MIN_ENROLLED_SECRET_BYTES)
     code = "".join(code.split())
     if len(code) != _DIGITS or not (code.isascii() and code.isdigit()):
         return None
