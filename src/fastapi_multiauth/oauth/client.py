@@ -28,9 +28,9 @@ TokenEndpointAuthMethod = Literal["client_secret_post", "client_secret_basic"]
 class OIDCEndpoints(NamedTuple):
     """Endpoints read from a provider's discovery document.
 
-    Every URL has been checked to be HTTPS (loopback hosts excepted), and
-    `issuer` to match the discovery URL. Optional fields are `None` when the
-    provider does not advertise them.
+    Every URL has been checked to be HTTPS (loopback hosts excepted, for a
+    loopback discovery URL), and `issuer` to match the discovery URL. Optional
+    fields are `None` when the provider does not advertise them.
     """
 
     authorization_endpoint: str
@@ -134,7 +134,9 @@ async def oauth_resolve_provider_urls(
     Raises:
         ValueError: If `discovery_url` is not HTTPS.
         OAuthDiscoveryError: If the document cannot be fetched, is
-            malformed, lists a non-HTTPS endpoint, or names another issuer.
+            malformed, lists a non-HTTPS endpoint (plain-HTTP loopback
+            ones only pass from a loopback discovery URL), or names another
+            issuer.
     """
     _require_https(discovery_url, "OIDC discovery URL")
     cfg = await _get_json(
@@ -144,17 +146,20 @@ async def oauth_resolve_provider_urls(
         description="OIDC discovery document",
     )
     issuer = _validate_issuer(discovery_url, cfg.get("issuer"))
+    # Only a local provider may point at local plain-HTTP endpoints: a remote
+    # one would make the app send its secret in clear to a local service.
+    local = urlsplit(discovery_url).scheme == "http"
+
+    def _endpoint(key: str) -> str:
+        return _require_https(cfg[key], f"OIDC {key}", allow_loopback=local)
 
     def _optional(key: str) -> str | None:
-        url = cfg.get(key)
-        return None if url is None else _require_https(url, f"OIDC {key}")
+        return None if cfg.get(key) is None else _endpoint(key)
 
     try:
         return OIDCEndpoints(
-            authorization_endpoint=_require_https(
-                cfg["authorization_endpoint"], "OIDC authorization_endpoint"
-            ),
-            token_endpoint=_require_https(cfg["token_endpoint"], "OIDC token_endpoint"),
+            authorization_endpoint=_endpoint("authorization_endpoint"),
+            token_endpoint=_endpoint("token_endpoint"),
             userinfo_endpoint=_optional("userinfo_endpoint"),
             jwks_uri=_optional("jwks_uri"),
             end_session_endpoint=_optional("end_session_endpoint"),

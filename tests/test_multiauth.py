@@ -73,7 +73,7 @@ from fastapi_multiauth import (
     verify_token_checksum,
     verify_token_hash,
 )
-from fastapi_multiauth._http import DEFAULT_TIMEOUT
+from fastapi_multiauth._http import DEFAULT_TIMEOUT, _require_https
 from fastapi_multiauth.abc import _DocOnlyScheme
 from fastapi_multiauth.exceptions import UnauthorizedError
 from fastapi_multiauth.oauth import (
@@ -1619,6 +1619,24 @@ class TestOAuthHttpsEnforcement:
             oauth_resolve_provider_urls.cache_clear()
             with pytest.raises(OAuthDiscoveryError, match=f"{endpoint} must use https"):
                 await oauth_resolve_provider_urls(DISCOVERY_URL)
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_loopback_endpoint_in_remote_discovery_document_rejected(self):
+        route = respx.get(DISCOVERY_URL)
+        for endpoint in ["token_endpoint", "userinfo_endpoint", "jwks_uri"]:
+            for url in ["http://127.0.0.1:8080/x", "http://localhost/x"]:
+                route.respond(json=_discovery_doc(**{endpoint: url}))
+                oauth_resolve_provider_urls.cache_clear()
+                with pytest.raises(
+                    OAuthDiscoveryError, match=f"{endpoint} must use https"
+                ):
+                    await oauth_resolve_provider_urls(DISCOVERY_URL)
+
+    def test_url_without_host_rejected(self):
+        for url in ["https://", "https:///token", "https:token"]:
+            with pytest.raises(ValueError, match="token_url must use https"):
+                _require_https(url, "OAuth token_url")
 
     @pytest.mark.anyio
     @respx.mock

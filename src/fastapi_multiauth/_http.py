@@ -12,14 +12,22 @@ DEFAULT_TIMEOUT = 10.0
 """Default timeout (seconds) applied to every HTTP call made by this library."""
 
 
-def _require_https(url: str, description: str) -> str:
-    """Reject a URL that is not a string, or would send credentials over HTTP."""
+def _require_https(url: str, description: str, *, allow_loopback: bool = True) -> str:
+    """Reject a URL that is not a string, or would send credentials over HTTP.
+
+    Plain HTTP passes for a loopback host, for local development, unless
+    `allow_loopback` is off.
+    """
     if not isinstance(url, str):
         raise ValueError(f"{description} must be a string URL (got {url!r})")  # noqa: TRY004
     parsed = urlsplit(url)
-    if parsed.scheme == "https":
+    if parsed.scheme == "https" and parsed.hostname:
         return url
-    if parsed.scheme == "http" and parsed.hostname in _LOOPBACK_HOSTS:
+    if (
+        allow_loopback
+        and parsed.scheme == "http"
+        and parsed.hostname in _LOOPBACK_HOSTS
+    ):
         return url
     raise ValueError(f"{description} must use https:// (got {url!r})")
 
