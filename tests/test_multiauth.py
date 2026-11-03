@@ -5799,6 +5799,20 @@ class TestHMACSignatureAuth:
         headers = {"X-Signature": f"sha256={signature2}", "X-Timestamp": t2}
         assert client.post("/hook", content=body, headers=headers).status_code == 200
 
+    def test_a_malformed_signature_is_refused_before_the_body_is_read(self, caplog):
+        caplog.set_level(logging.WARNING, logger="fastapi_multiauth")
+        client = self._client(HMACSignatureAuth(WEBHOOK_SECRET, **self.GITHUB))
+        unread = AssertionError("the body must not be read")
+        with patch.object(Request, "body", side_effect=unread):
+            for signature in ["", "zz", "a" * 63, "a" * 65, "g" * 64]:
+                response = client.post(
+                    "/hook",
+                    content=b"x" * 1024,
+                    headers={"X-Hub-Signature-256": f"sha256={signature}"},
+                )
+                assert response.status_code == 401, signature
+        assert {r.auth_reason for r in caplog.records} == {"invalid_signature"}
+
     def test_a_request_checked_twice_is_not_a_replay(self):
         seen, remember = _replay_store()
         source = HMACSignatureAuth(
