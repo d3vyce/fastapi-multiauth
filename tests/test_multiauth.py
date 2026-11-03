@@ -99,6 +99,8 @@ from fastapi_multiauth.oauth import (
 from fastapi_multiauth.oauth.id_token import _key_set as _id_key_set
 from fastapi_multiauth.sources.dpop import _jwk_thumbprint
 from fastapi_multiauth.utils import (
+    ensure_async,
+    first_use,
     record_verified_jkt,
     step_up_challenge,
     verified_jkt,
@@ -5521,6 +5523,19 @@ def _hmac_hex(secret: str, message: bytes) -> str:
     return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
 
 
+def _replay_store() -> tuple[set[str], Callable[[str, float], bool]]:
+    """An in-memory replay_check and the keys it has recorded."""
+    seen: set[str] = set()
+
+    def first_seen(key: str, expires_at: float) -> bool:
+        if key in seen:
+            return False
+        seen.add(key)
+        return True
+
+    return seen, first_seen
+
+
 class TestHMACSignatureAuth:
     """Signed webhooks: HMAC-SHA256 of the raw body, timestamp optional."""
 
@@ -5729,13 +5744,85 @@ class TestHMACSignatureAuth:
         assert tampered.status_code == 401
         assert seen == {}
         assert client.post("/hook", content=body, headers=headers).status_code == 200
-        assert seen == {signature: int(t) + 300}
+        recorded = hashlib.sha256(
+            b"24:APIKeyHeader_X-Signature:" + f"{t}.".encode() + body
+        ).hexdigest()
+        assert seen == {recorded: int(t) + 300}
         caplog.clear()
         assert client.post("/hook", content=body, headers=headers).status_code == 401
         assert [r.auth_reason for r in caplog.records] == ["replay"]
         t2, signature2 = self._stamped(body, int(t) + 1)
         headers = {"X-Signature": f"sha256={signature2}", "X-Timestamp": t2}
         assert client.post("/hook", content=body, headers=headers).status_code == 200
+
+    def test_a_malformed_signature_is_refused_before_the_body_is_read(self, caplog):
+        caplog.set_level(logging.WARNING, logger="fastapi_multiauth")
+        client = self._client(HMACSignatureAuth(WEBHOOK_SECRET, **self.GITHUB))
+        unread = AssertionError("the body must not be read")
+        with patch.object(Request, "body", side_effect=unread):
+            for signature in ["", "zz", "a" * 63, "a" * 65, "g" * 64]:
+                response = client.post(
+                    "/hook",
+                    content=b"x" * 1024,
+                    headers={"X-Hub-Signature-256": f"sha256={signature}"},
+                )
+                assert response.status_code == 401, signature
+        assert {r.auth_reason for r in caplog.records} == {"invalid_signature"}
+
+    def test_a_request_checked_twice_is_not_a_replay(self):
+        seen, remember = _replay_store()
+        source = HMACSignatureAuth(
+            WEBHOOK_SECRET, replay_check=remember, **self.GENERIC
+        )
+        app = FastAPI()
+
+        @app.post("/hook", dependencies=[Depends(source, use_cache=False)])
+        async def hook(body: bytes = Depends(source, use_cache=False)):
+            return {"size": len(body)}
+
+        client = TestClient(app)
+        body = b"payment.succeeded"
+        t, signature = self._stamped(body)
+        headers = {"X-Signature": f"sha256={signature}", "X-Timestamp": t}
+        assert client.post("/hook", content=body, headers=headers).status_code == 200
+        assert len(seen) == 1
+        assert client.post("/hook", content=body, headers=headers).status_code == 401
+
+    def test_a_replay_is_refused_whichever_rotated_key_signed_it(self):
+        _, remember = _replay_store()
+        new_secret = "rotated-webhook-secret-16-bytes"
+        source = HMACSignatureAuth(
+            [WEBHOOK_SECRET, new_secret], replay_check=remember, **self.STRIPE
+        )
+        client = self._client(source)
+        body = b"payment.succeeded"
+        t, old = self._stamped(body)
+        new = _hmac_hex(new_secret, f"{t}.".encode() + body)
+        for header, expected in [
+            (f"t={t},v1={old},v1={new}", 200),
+            (f"t={t},v1={new}", 401),
+            (f"t={t},v1={old}", 401),
+        ]:
+            response = client.post(
+                "/hook", content=body, headers={"Stripe-Signature": header}
+            )
+            assert response.status_code == expected, header
+
+    def test_sources_sharing_a_replay_store_never_share_a_key(self):
+        _, remember = _replay_store()
+        sources = [
+            HMACSignatureAuth(
+                WEBHOOK_SECRET, replay_check=remember, scheme_name=name, **self.STRIPE
+            )
+            for name in ["Billing", "Shipping"]
+        ]
+        body = b"payment.succeeded"
+        t, signature = self._stamped(body)
+        header = {"Stripe-Signature": f"t={t},v1={signature}"}
+        for source in sources:
+            client = self._client(source)
+            assert client.post("/hook", content=body, headers=header).status_code == 200
+            assert client.post("/hook", content=body, headers=header).status_code == 401
 
     def test_misuse_is_refused(self):
         source = HMACSignatureAuth(WEBHOOK_SECRET, **self.GITHUB)
@@ -6400,6 +6487,36 @@ class TestDPoP:
             return seen
 
         assert contextvars.copy_context().run(verify_in_turn) == [None, "k", None]
+
+    def test_a_proof_checked_twice_in_one_request_is_not_a_replay(self):
+        seen, remember = _replay_store()
+        source = self._source(replay_check=remember)
+        router = APIRouter(dependencies=[Depends(source)])
+
+        @router.get("/me")
+        async def me(user=Security(source, scopes=["read"])):
+            return user
+
+        app = FastAPI()
+        app.include_router(router)
+        client = TestClient(app)
+        token = self._token(scope="read")
+        proof = self._proof(token)
+        assert self._get(client, token, proof).status_code == 200
+        assert len(seen) == 1
+        assert self._get(client, token, proof).status_code == 401
+
+    @pytest.mark.anyio
+    async def test_a_key_recorded_by_one_check_is_still_checked_by_another(self):
+        request = _request()
+        seen, dpop_check = _replay_store()
+        _, webhook_check = _replay_store()
+        webhook_check("shared-key", 0)
+        assert await first_use(ensure_async(dpop_check), "shared-key", 0, request)
+        assert seen == {"shared-key"}
+        assert not await first_use(
+            ensure_async(webhook_check), "shared-key", 0, request
+        )
 
     def test_replays_are_refused(self, caplog):
         caplog.set_level(logging.WARNING, logger="fastapi_multiauth")

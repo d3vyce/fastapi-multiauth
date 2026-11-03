@@ -16,6 +16,7 @@ from fastapi_multiauth.exceptions import UnauthorizedError
 from ..abc import AuthSource, _unenforceable_scopes_error
 from ..utils import (
     ensure_async,
+    first_use,
     normalize_secret_keys,
     refusal,
     require_positive_seconds,
@@ -24,6 +25,7 @@ from ..utils import (
 _MIN_SECRET_KEY_BYTES = 16
 _MAX_TIMESTAMP_DIGITS = 12
 _HEX_DIGITS = frozenset(string.hexdigits)
+_HEX_SHA256_LENGTH = 64
 _BODY = "{body}"
 _TIMESTAMP = "{timestamp}"
 
@@ -91,9 +93,11 @@ class HMACSignatureAuth(AuthSource):
             e.g. `"v0:{timestamp}:{body}"`. Defaults to `{timestamp}.{body}`
             with a timestamp, `{body}` without.
         tolerance: How far the timestamp may be from now, in seconds.
-        replay_check: Sync or async callable recording a verified signature
+        replay_check: Sync or async callable recording a verified request
             until the epoch time it receives, returning `False` if it was
-            already recorded. Needs a timestamp.
+            already recorded. It receives a SHA-256 digest of `scheme_name`
+            and the signed message, the same whichever key signed it. Needs
+            a timestamp.
         scheme_name: Name of the security scheme in OpenAPI, `APIKeyHeader_{header}` by default.
         description: Description of the security scheme in OpenAPI.
 
@@ -154,11 +158,14 @@ class HMACSignatureAuth(AuthSource):
         self._timestamped = timestamped
         self._tolerance = tolerance
         self._replay_check = ensure_async(replay_check) if replay_check else None
+        scheme_name = scheme_name or f"APIKeyHeader_{header}"
+        name = scheme_name.encode()
+        self._replay_namespace = b"%d:%s:" % (len(name), name)
         super().__init__(
             APIKeyHeader(
                 name=header,
                 auto_error=False,
-                scheme_name=scheme_name or f"APIKeyHeader_{header}",
+                scheme_name=scheme_name,
                 description=description,
             )
         )
@@ -245,6 +252,14 @@ class HMACSignatureAuth(AuthSource):
                 raise refusal(UnauthorizedError(), "expired")
             signed_prefix += timestamp.encode() + self._after
             expires_at = issued_at + self._tolerance
+        candidates = [
+            signature.lower()
+            for signature in signatures
+            if len(signature) == _HEX_SHA256_LENGTH
+            and _HEX_DIGITS.issuperset(signature)
+        ]
+        if not candidates:  # refused before the body is read
+            raise refusal(UnauthorizedError(), "invalid_signature")
         try:
             body = await request.body()
         except RuntimeError as exc:
@@ -253,22 +268,21 @@ class HMACSignatureAuth(AuthSource):
                 "already consumed it, as Form() and File() parameters do: take "
                 "the verified bytes from the source and parse them yourself"
             ) from exc
-        candidates = [
-            signature.lower()
-            for signature in signatures
-            if signature and _HEX_DIGITS.issuperset(signature)
-        ]
         for key in self._keys:
             mac = hmac.new(key, signed_prefix, hashlib.sha256)
             mac.update(body)
             digest = mac.hexdigest()
             if any(hmac.compare_digest(digest, c) for c in candidates):
-                if (
-                    self._replay_check is not None
-                    and expires_at is not None
-                    and not await self._replay_check(digest, expires_at)
-                ):
-                    raise refusal(UnauthorizedError(), "replay")
+                if self._replay_check is not None and expires_at is not None:
+                    # One key per request, not per signature: with several keys
+                    # in rotation, each signature would let one more copy through.
+                    message = hashlib.sha256(self._replay_namespace)
+                    message.update(signed_prefix)
+                    message.update(body)
+                    if not await first_use(
+                        self._replay_check, message.hexdigest(), expires_at, request
+                    ):
+                        raise refusal(UnauthorizedError(), "replay")
                 return body
         raise refusal(UnauthorizedError(), "invalid_signature")
 
