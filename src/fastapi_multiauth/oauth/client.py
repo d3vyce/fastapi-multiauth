@@ -214,7 +214,8 @@ async def oauth_exchange_code(
     Raises:
         ValueError: If `token_url` is not HTTPS, or `code_verifier` is empty.
         OAuthExchangeError: If the provider refuses or the request fails,
-            the token is not a bearer token, or a required scope is missing.
+            the response has no `access_token`, the token is not a bearer
+            token, or a required scope is missing.
     """
     _require_https(token_url, "OAuth token_url")
     if code_verifier == "":
@@ -232,6 +233,10 @@ async def oauth_exchange_code(
         )
     except _import_httpx_oauth().GetAccessTokenError as exc:
         raise OAuthExchangeError(str(exc)) from exc
+
+    access_token = token_data.get("access_token")
+    if not isinstance(access_token, str) or not access_token:
+        raise OAuthExchangeError("token response has no access_token")
 
     token_type = token_data.get("token_type", "bearer")
     if not isinstance(token_type, str) or token_type.lower() != "bearer":
