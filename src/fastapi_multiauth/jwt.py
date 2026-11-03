@@ -13,6 +13,7 @@ from ._imports import require_extra
 from .exceptions import UnauthorizedError
 from .utils import (
     ensure_async,
+    record_verified_jkt,
     refusal,
     require_nonnegative_seconds,
     require_scopes,
@@ -355,6 +356,7 @@ class JWTValidator:
             raise refusal(UnauthorizedError(), self._decode_reason(exc)) from None
         if scopes:
             require_scopes(claims, self._scopes_claim, scopes)
+        record_verified_jkt(claims)
         if self._claims_to_identity is not None:
             return await self._claims_to_identity(claims)
         return claims

@@ -1,6 +1,7 @@
 """Tests for fastapi_multiauth."""
 
 import base64
+import contextvars
 import hashlib
 import hmac
 import json
@@ -97,7 +98,11 @@ from fastapi_multiauth.oauth import (
 )
 from fastapi_multiauth.oauth.id_token import _key_set as _id_key_set
 from fastapi_multiauth.sources.dpop import _jwk_thumbprint
-from fastapi_multiauth.utils import step_up_challenge
+from fastapi_multiauth.utils import (
+    record_verified_jkt,
+    step_up_challenge,
+    verified_jkt,
+)
 
 
 def _cookie_header(cookies: dict[str, str]) -> dict[str, str]:
@@ -6360,6 +6365,41 @@ class TestDPoP:
         ]:
             response = self._get(_client(source), bound, None, scheme="Bearer")
             assert response.status_code == expected
+
+    @respx.mock
+    def test_bearer_sources_refuse_a_bound_token_hidden_by_claims_to_identity(self):
+        def to_user(claims):
+            return {"id": claims["sub"]}
+
+        token = self._token()
+        introspection = TestIntrospectionValidator
+        respx.post(introspection.URL).respond(
+            json=introspection._active(cnf={"jkt": "bound"})
+        )
+        jwt_validator = JWTValidator(secret=JWT_SECRET, claims_to_identity=to_user)
+        for validator in [
+            jwt_validator,
+            introspection()._validator(claims_to_identity=to_user),
+        ]:
+            bearer = HTTPBearerAuth(validator)
+            response = self._get(_client(bearer), token, None, scheme="Bearer")
+            assert response.status_code == 401, type(validator).__name__
+            allowed = HTTPBearerAuth(validator, allow_dpop_bound=True)
+            response = self._get(_client(allowed), token, None, scheme="Bearer")
+            assert response.json() == {"id": "user-1"}
+
+        bearer = _client(HTTPBearerAuth(jwt_validator))
+        assert self._get(bearer, _hs_token(), None, scheme="Bearer").status_code == 200
+
+    def test_the_recorded_binding_is_the_last_verified_one(self):
+        def verify_in_turn():
+            seen = []
+            for claims in [{"sub": "a"}, {"cnf": {"jkt": "k"}}, {"sub": "b"}]:
+                record_verified_jkt(claims)
+                seen.append(verified_jkt.get())
+            return seen
+
+        assert contextvars.copy_context().run(verify_in_turn) == [None, "k", None]
 
     def test_replays_are_refused(self, caplog):
         caplog.set_level(logging.WARNING, logger="fastapi_multiauth")
