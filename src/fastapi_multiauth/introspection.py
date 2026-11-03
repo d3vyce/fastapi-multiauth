@@ -19,6 +19,7 @@ from .utils import (
     ensure_async,
     finite_number,
     hash_token,
+    record_verified_jkt,
     refusal,
     require_nonnegative_seconds,
     require_scopes,
@@ -175,6 +176,7 @@ class IntrospectionValidator:
         claims = answer.copy()
         if scopes:
             require_scopes(claims, self._scopes_claim, scopes)
+        record_verified_jkt(claims)
         if self._claims_to_identity is not None:
             return await self._claims_to_identity(claims)
         return claims

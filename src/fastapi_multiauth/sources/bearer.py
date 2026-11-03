@@ -10,7 +10,7 @@ from fastapi.security import HTTPBearer
 from fastapi_multiauth.exceptions import UnauthorizedError
 
 from ..abc import ValidatedAuthSource
-from ..utils import authorization_credential, claims_jkt, refusal
+from ..utils import authorization_credential, claims_jkt, refusal, verified_jkt
 
 
 class _BearerSource(ValidatedAuthSource):
@@ -57,15 +57,22 @@ class _BearerSource(ValidatedAuthSource):
         """Validate the token, passing the route's scopes and request on.
 
         Raises:
-            UnauthorizedError: If the identity carries a `cnf.jkt` and
-                `allow_dpop_bound` is not set (`dpop_bound`).
+            UnauthorizedError: If the token is DPoP-bound (`cnf.jkt` in the
+                identity, or in the claims a `JWTValidator` or
+                `IntrospectionValidator` verified) and `allow_dpop_bound` is
+                not set (`dpop_bound`).
         """
         if self._prefix is not None and not credential.startswith(self._prefix):
             raise UnauthorizedError()
-        identity = await self._call_validator(
-            credential, scopes=scopes, request=request
-        )
-        if not self._allow_dpop_bound and claims_jkt(identity) is not None:
+        marker = verified_jkt.set(None)
+        try:
+            identity = await self._call_validator(
+                credential, scopes=scopes, request=request
+            )
+            bound = verified_jkt.get() or claims_jkt(identity)
+        finally:
+            verified_jkt.reset(marker)
+        if not self._allow_dpop_bound and bound is not None:
             raise refusal(UnauthorizedError(), "dpop_bound")
         return identity
 

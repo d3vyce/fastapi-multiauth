@@ -12,6 +12,7 @@ import string
 import time
 import zlib
 from collections.abc import Callable, Mapping, Sequence
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any, TypeVar
 from urllib.parse import urlsplit
@@ -298,10 +299,29 @@ def granted_scopes(claims: dict[str, Any], claim: str) -> set[str]:
 
 def claims_jkt(identity: Any) -> Any:
     """The `cnf.jkt` of an identity that is the token's claims, `None` when absent."""
-    if not isinstance(identity, Mapping):
+    if not isinstance(identity, (dict, Mapping)):
         return None
     cnf = identity.get("cnf")
-    return cnf.get("jkt") if isinstance(cnf, Mapping) else None
+    if cnf is None or not isinstance(cnf, (dict, Mapping)):
+        return None
+    return cnf.get("jkt")
+
+
+verified_jkt: ContextVar[Any] = ContextVar(
+    "fastapi_multiauth.verified_jkt", default=None
+)
+"""The `cnf.jkt` of the claims a library validator verified last in this context.
+
+Set before `claims_to_identity` runs, so a bearer source still sees the
+binding when the identity no longer carries the claims.
+"""
+
+
+def record_verified_jkt(claims: Mapping[str, Any]) -> None:
+    """Record the `cnf.jkt` of verified claims in `verified_jkt`."""
+    jkt = claims_jkt(claims) if "cnf" in claims else None
+    if jkt is not None or verified_jkt.get() is not None:
+        verified_jkt.set(jkt)
 
 
 def finite_number(value: Any) -> float | None:
