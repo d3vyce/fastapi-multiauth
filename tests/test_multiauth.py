@@ -514,20 +514,24 @@ class TestMultiAuth:
         assert response.json() == {"user": "alice", "role": "admin"}
 
     def test_require_derives_new_sources(self):
-        """require() applies to sources with require(), skips those without."""
+        """require() applies to every source and leaves the originals alone."""
         from fastapi_multiauth.sources import MultiAuth as MultiAuthClass
 
         bearer = HTTPBearerAuth(role_validator, role="user")
-        header_auth = _HeaderAuth(secret="s3cr3t")
-        multi = MultiAuth(bearer, header_auth)
+        cookie = APIKeyCookieAuth("session", cookie_validator)
+        multi = MultiAuth(bearer, cookie)
         derived = multi.require(role="admin")
         assert isinstance(derived, MultiAuthClass)
         assert derived is not multi
-        # bearer got require() applied, header_auth passed through
         assert cast(HTTPBearerAuth, derived._sources[0])._kwargs == {"role": "admin"}
-        assert derived._sources[1] is header_auth
+        assert cast(APIKeyCookieAuth, derived._sources[1])._kwargs == {"role": "admin"}
         assert bearer._kwargs == {"role": "user"}
-        assert MultiAuth(header_auth).require(role="admin")._sources[0] is header_auth
+
+    def test_require_refuses_a_source_without_require(self):
+        """A source that cannot take the requirement would let its credentials through."""
+        multi = MultiAuth(HTTPBearerAuth(role_validator), _HeaderAuth(secret="s3cr3t"))
+        with pytest.raises(TypeError, match="_HeaderAuth has no require"):
+            multi.require(role="admin")
 
 
 class TestRequire:
@@ -2305,6 +2309,16 @@ class TestOpenAPIDocumentation:
         assert schemes["APIKeyHeader_X-API-Key"]["name"] == "X-API-Key"
         assert schemes["APIKeyHeader_X-Org-Key"]["name"] == "X-Org-Key"
 
+    def test_a_first_source_without_a_scheme_keeps_the_others_documented(self):
+        auth = MultiAuth(_HeaderAuth(secret="s3cr3t"), HTTPBearerAuth(simple_validator))
+        assert self._declared(self._openapi(auth)) == {"HTTPBearer"}
+        client = _client(auth)
+        for headers in [
+            {"X-Token": "s3cr3t"},
+            {"Authorization": f"Bearer {VALID_TOKEN}"},
+        ]:
+            assert client.get("/me", headers=headers).status_code == 200, headers
+
 
 _DESCRIBED_SOURCES = [
     (lambda d: HTTPBasicAuth(simple_validator, description=d), "HTTPBasic"),
@@ -3628,11 +3642,28 @@ class TestFreshness:
         with pytest.raises(ValueError, match="already has a freshness window"):
             self._cookie().fresh(60).fresh(300)
 
-        auth = MultiAuth(self._cookie().fresh(60), self._dated_bearer(time.time()))
+        def proven_at(identity):
+            return identity["proven_at"]
+
+        bearer = self._dated_bearer(time.time())
+        auth = MultiAuth(
+            self._cookie().fresh(60), bearer.fresh(60, authenticated_at=proven_at)
+        )
         with pytest.raises(
             ValueError, match="APIKeyCookieAuth already has a freshness window"
         ):
-            auth.fresh(300, authenticated_at=lambda identity: identity["proven_at"])
+            auth.fresh(300, authenticated_at=proven_at)
+
+    def test_a_guard_on_only_some_sources_is_refused(self):
+        """An unguarded source would let its credentials through unchecked."""
+        bearer = self._dated_bearer(time.time())
+        with pytest.raises(ValueError, match=r"only some sources have fresh\(\)"):
+            MultiAuth(self._cookie().fresh(60), bearer)
+        with pytest.raises(
+            ValueError, match=r"only some sources have stepped_up\(\): HTTPBearer"
+        ):
+            MultiAuth(self._cookie().stepped_up(["mfa"]), bearer)
+        MultiAuth(self._cookie(), bearer)
 
     def test_fresh_and_optional_are_refused_in_either_order(self):
         for auth in [self._cookie(), MultiAuth(self._cookie())]:
