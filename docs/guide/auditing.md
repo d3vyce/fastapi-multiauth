@@ -13,7 +13,7 @@ icon: lucide/scan-eye
 Each [`RouteAuth`][fastapi_multiauth.RouteAuth] tells you:
 
 `unguarded`
-:   `True` when a request without any credential reaches the route.
+:   `True` when a request without any credential reaches the route. A route FastAPI does not manage, such as `app.add_route()` or a mount, runs no dependency, so it is always unguarded. Mounted apps are not inspected: call `auth_surface()` on them too.
 
 `alternatives`
 :   The ways in. Each entry is one way (OR); the schemes inside an entry must all pass (AND).
