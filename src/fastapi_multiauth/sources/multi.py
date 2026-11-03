@@ -109,7 +109,7 @@ class MultiAuth:
             type(source).__name__ for source in sources if not source._enforces_scopes()
         )
         self._catalogued = tuple(
-            source for source in sources if source._scope_catalogue
+            source for source in sources if source._scope_catalogue is not None
         )
 
     def www_authenticate(self) -> str | None:
