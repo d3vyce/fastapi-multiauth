@@ -25,6 +25,7 @@ from ..utils import (
 _MIN_SECRET_KEY_BYTES = 16
 _MAX_TIMESTAMP_DIGITS = 12
 _HEX_DIGITS = frozenset(string.hexdigits)
+_HEX_SHA256_LENGTH = 64
 _BODY = "{body}"
 _TIMESTAMP = "{timestamp}"
 
@@ -247,6 +248,14 @@ class HMACSignatureAuth(AuthSource):
                 raise refusal(UnauthorizedError(), "expired")
             signed_prefix += timestamp.encode() + self._after
             expires_at = issued_at + self._tolerance
+        candidates = [
+            signature.lower()
+            for signature in signatures
+            if len(signature) == _HEX_SHA256_LENGTH
+            and _HEX_DIGITS.issuperset(signature)
+        ]
+        if not candidates:  # refused before the body is read
+            raise refusal(UnauthorizedError(), "invalid_signature")
         try:
             body = await request.body()
         except RuntimeError as exc:
@@ -255,11 +264,6 @@ class HMACSignatureAuth(AuthSource):
                 "already consumed it, as Form() and File() parameters do: take "
                 "the verified bytes from the source and parse them yourself"
             ) from exc
-        candidates = [
-            signature.lower()
-            for signature in signatures
-            if signature and _HEX_DIGITS.issuperset(signature)
-        ]
         for key in self._keys:
             mac = hmac.new(key, signed_prefix, hashlib.sha256)
             mac.update(body)
