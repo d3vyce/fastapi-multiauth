@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from . import idp
+from .browser import browser
 
 HTTPS = "https://testserver"
 
@@ -20,7 +21,7 @@ def _bearer(token: str) -> dict[str, str]:
 
 
 def _client(module: str, **kwargs) -> TestClient:
-    return TestClient(importlib.import_module(f"docs_src.{module}").app, **kwargs)
+    return browser(importlib.import_module(f"docs_src.{module}").app, **kwargs)
 
 
 def test_quickstart():
@@ -133,9 +134,9 @@ def test_cookie_revocable():
 
 
 def test_cookie_csrf():
-    from docs_src.cookie_sessions.csrf import session
+    from docs_src.cookie_sessions.csrf import app, session
 
-    client = _client("cookie_sessions.csrf", base_url=HTTPS)
+    client = TestClient(app, base_url=HTTPS)
     _sign_in(client, session, "1")
     body = {"email": "alice@wonderland.example"}
     for headers in [

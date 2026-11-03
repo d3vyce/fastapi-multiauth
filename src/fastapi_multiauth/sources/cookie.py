@@ -140,7 +140,9 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         csrf: Refuse cross-origin requests with a 403, judged from the
             `Sec-Fetch-Site` and `Origin` headers browsers send. Applies to
             every method but `GET`, `HEAD` and `OPTIONS`, and to WebSocket
-            handshakes. A request carrying neither header is refused too.
+            handshakes. A request carrying neither header is refused too,
+            as is `authenticate()` called outside a request. On by default;
+            turn it off only for a cookie no browser carries.
         trusted_origins: Other origins the CSRF check lets through, such as
             `"https://app.example.com"`. Needs `csrf=True`.
         ttl: Lifetime in seconds, also checked server-side when signed.
@@ -165,7 +167,7 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         *,
         secret_key: str | Sequence[str] | None = None,
         session_id: bool = False,
-        csrf: bool = False,
+        csrf: bool = True,
         trusted_origins: Sequence[str] = (),
         ttl: int = 86400,
         secure: bool = True,

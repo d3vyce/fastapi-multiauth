@@ -26,9 +26,9 @@ class SchemeRequirement:
         optional: Whether a request without a credential passes, `None`
             when the scheme does not say. Always `False` inside a
             required `MultiAuth`.
-        csrf: Whether the scheme refuses cross-origin requests, as
-            `APIKeyCookieAuth(csrf=True)` does; `False` for a cookie without
-            the check, `None` when the scheme does not say.
+        csrf: Whether the scheme refuses cross-origin requests, as a
+            cookie source does; `False` for one with `csrf=False`, `None`
+            when the scheme does not say.
     """
 
     scheme_name: str | None
