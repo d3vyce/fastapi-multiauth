@@ -23,9 +23,9 @@ Passwords are stored as salted scrypt hashes and compared with `hmac.compare_dig
 | `secret_key` | `None` | At least 32 bytes. Without it the cookie is **not signed**. |
 | `ttl` | `86400` | Lifetime in seconds. |
 | `secure` | `True` | Turn off only for local HTTP development. |
-| `samesite` | `"lax"` | `"strict"` or `"none"`. |
+| `samesite` | `"lax"` | `"strict"` or `"none"`, which needs `secure=True`. |
 | `session_id` | `False` | See [revocable sessions](#revocable-sessions). |
-| `csrf` | `False` | Refuse requests from other origins. See [CSRF](#csrf). |
+| `csrf` | `True` | Refuse requests from other origins. See [CSRF](#csrf). |
 | `trusted_origins` | `()` | Other origins `csrf` lets through. |
 
 !!! info "Signed is not encrypted"
@@ -36,18 +36,18 @@ Passwords are stored as salted scrypt hashes and compared with `hmac.compare_dig
 
 ## CSRF
 
-Browsers send cookies with every request to your site, whoever triggered it. `samesite="lax"` blocks most cross-site requests but not all of them. Set `csrf=True` to refuse the rest:
+Browsers send cookies with every request to your site, whoever triggered it. `samesite="lax"` blocks most cross-site requests but not all of them, so a cookie source refuses the rest. List the other origins you trust, such as a frontend on its own domain:
 
 ```python
 --8<-- "docs_src/cookie_sessions/csrf.py"
 ```
 
-Every request except `GET`, `HEAD` and `OPTIONS` must now come from your own origin, or from one listed in `trusted_origins`, such as a frontend on its own domain. Anything else gets a **403** before your validator runs. A sibling subdomain counts as another origin.
+Every request except `GET`, `HEAD` and `OPTIONS` must come from your own origin, or from one listed in `trusted_origins`. Anything else gets a **403** before your validator runs. A sibling subdomain counts as another origin.
 
 The check reads `Sec-Fetch-Site`, which browsers set and pages cannot forge, and falls back to comparing `Origin` with the `Host` header for older browsers. Behind a proxy, keep the `Host` header intact or list your public origin in `trusted_origins`.
 
 !!! warning "Scripts and tests"
-    A request carrying neither header is refused too. Every browser released since 2020 sends one, so only non-browser clients are affected: send `Sec-Fetch-Site: same-origin` from your tests, and give scripts a bearer token instead of a cookie.
+    A request carrying neither header is refused too. Every browser released since 2020 sends one, so only non-browser clients are affected: send `Sec-Fetch-Site: same-origin` from your tests, and give scripts a bearer token instead of a cookie. `authenticate()` called outside a request is refused as well. Pass `csrf=False` only for a cookie no browser carries.
 
 `GET` routes are never checked, so keep them free of side effects.
 

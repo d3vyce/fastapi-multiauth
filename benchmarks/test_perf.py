@@ -166,7 +166,7 @@ def test_asgi_request_missing_credential(benchmark):
 
 def test_cookie_signed_verify(benchmark):
     """Signature and timestamp check on a signed cookie: itsdangerous."""
-    auth = APIKeyCookieAuth("session", validate, secret_key=COOKIE_SECRET)
+    auth = APIKeyCookieAuth("session", validate, secret_key=COOKIE_SECRET, csrf=False)
     cookie = _signed_cookie(auth, COOKIE_VALUE)
 
     identity = benchmark(lambda: drive(auth.authenticate(cookie)))

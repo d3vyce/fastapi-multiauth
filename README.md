@@ -82,7 +82,7 @@ Set `SECRET_KEY` to at least 32 random bytes, for example the output of `python 
 
 - **Every standard scheme**: bearer tokens with Stripe-style prefixes, signed cookie sessions, API keys, HTTP Basic, OAuth 2.0 and OpenID Connect.
 - **`MultiAuth`**: several schemes on one route, all documented in OpenAPI, plus `optional()` for routes that also serve anonymous callers.
-- **Stateless sessions**: HMAC-signed cookies with expiry, key rotation, opt-in revocable session ids, and `csrf=True` to refuse cross-origin requests.
+- **Stateless sessions**: HMAC-signed cookies with expiry, key rotation, opt-in revocable session ids, and cross-origin requests refused by default.
 - **Tokens done right**: secure generation, hash-only storage, checksums, `JWTValidator` for provider JWTs (JWKS, rotation, `aud`/`iss`), `IntrospectionValidator` for opaque ones, and `HTTPDPoPAuth` for tokens bound to the client's key.
 - **Signed webhooks**: `HMACSignatureAuth` checks the sender's signature over the raw body, with timestamp tolerance and secret rotation.
 - **Scopes and step-up**: fail-closed scope checks, and `fresh()` / `stepped_up()` with RFC 9470 challenges for sensitive routes.

@@ -25,4 +25,6 @@ Here are three ways to test it:
 `test_login_then_me`
 :   Session cookies are `Secure`, so the test client needs an `https://` base URL to send them back.
 
+A cookie source also refuses a request other than `GET`, `HEAD` or `OPTIONS` that carries neither `Sec-Fetch-Site` nor `Origin`, as a browser always sends one: build the client with `TestClient(app, headers={"Sec-Fetch-Site": "same-origin"})`. See [CSRF](cookie-sessions.md#csrf).
+
 To make sure no route is left unprotected, see the [audit recipe](../recipes/audit-routes.md).

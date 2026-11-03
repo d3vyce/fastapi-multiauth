@@ -8,4 +8,4 @@ People use the web app with a session cookie, scripts use an API token, and both
 
 - The bearer source comes first, so API calls never touch cookie parsing.
 - Only the token's hash is stored.
-- Cookie-authenticated `POST` routes need [CSRF protection](../guide/cookie-sessions.md#csrf); token-authenticated ones do not.
+- Cookie-authenticated `POST` routes get [CSRF protection](../guide/cookie-sessions.md#csrf); token-authenticated ones do not need it.
