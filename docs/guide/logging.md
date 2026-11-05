@@ -34,6 +34,7 @@ Records never contain the credential, its hash, or the identity. Correlate with 
 | `authenticated` | accepted |
 | `anonymous` | an `optional()` route served a caller without a credential |
 | `missing_credential` | no credential on a route that requires one |
+| `unclaimed_authorization` | a token no `MultiAuth` source takes, such as one without the expected prefix |
 | `invalid_signature` | a signed cookie, JWT or webhook failed its signature check |
 | `expired` | a signed cookie past its `ttl`, a JWT past its `exp`, or a webhook timestamp outside its `tolerance` |
 | `malformed` | a Basic header, JWT header or webhook signature header that does not parse |

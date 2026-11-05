@@ -30,6 +30,8 @@ class APIKeyHeaderAuth(ValidatedAuthSource):
         **kwargs: Any,
     ) -> None:
         self._name = name
+        if name.lower() == "authorization":
+            self.authorization_scheme = "*"
         super().__init__(
             validator,
             APIKeyHeader(

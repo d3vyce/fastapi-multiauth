@@ -151,6 +151,8 @@ class HMACSignatureAuth(AuthSource):
             )
         ]
         self._header = header
+        if header.lower() == "authorization":
+            self.authorization_scheme = "*"
         self._prefix = prefix
         self._signature_key = signature_key
         self._timestamp_key = timestamp_key

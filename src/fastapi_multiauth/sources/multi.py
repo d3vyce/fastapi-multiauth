@@ -24,7 +24,7 @@ from ..abc import (
     _unenforceable_scopes_error,
     _wiring_error,
 )
-from ..utils import challenge_headers, log_decision
+from ..utils import authorization_scheme, challenge_headers, log_decision
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,8 @@ class MultiAuth:
 
     Sources are tried in order, and the first one that finds a credential
     decides: an invalid credential is refused, not passed to the next
-    source. All sources appear in OpenAPI.
+    source. A token no source takes, such as one without the expected
+    prefix, is refused too. All sources appear in OpenAPI.
 
     Args:
         *sources: The sources to try, in order.
@@ -128,6 +129,11 @@ class MultiAuth:
         )
         self._catalogued = tuple(
             source for source in sources if source._scope_catalogue is not None
+        )
+        self._authorization_readers = tuple(
+            (index, source)
+            for index, source in enumerate(sources)
+            if source.authorization_scheme is not None
         )
 
     def www_authenticate(self) -> str | None:
@@ -269,19 +275,34 @@ class MultiAuth:
         for source in self._sources:
             if await source.extract(request) is not None:
                 raise _wiring_error(self)
-        raise self._missing_credential()
+        raise self._unauthorized("missing_credential", logging.INFO)
 
-    def _missing_credential(self) -> UnauthorizedError:
-        """Log and build the 401 for a request no source found a credential in."""
-        log_decision(
-            logger,
-            logging.INFO,
-            "missing_credential",
-            source="MultiAuth",
-            scheme=None,
-            status=401,
-        )
+    def _unauthorized(self, reason: str, level: int) -> UnauthorizedError:
+        """Log and build a 401 carrying every source's challenge."""
+        log_decision(logger, level, reason, source="MultiAuth", scheme=None, status=401)
         return UnauthorizedError(headers=challenge_headers(self.www_authenticate()))
+
+    async def _unclaimed_authorization(
+        self, request: HTTPConnection, taker: int
+    ) -> bool:
+        """Whether a source reads the `Authorization` header, yet none takes it.
+
+        `taker` is the index of the source that found a credential, which does
+        not read the header, or the number of sources when none found one.
+        """
+        if not self._authorization_readers:
+            return False
+        scheme = authorization_scheme(request)
+        if scheme is None:
+            return False
+        declined = False
+        for index, source in self._authorization_readers:
+            if source.authorization_scheme not in (scheme, "*"):
+                continue
+            if index > taker and await source.extract(request) is not None:
+                return False
+            declined = True
+        return declined
 
     def _with_sources(self, sources: Iterable[AuthSource]) -> "MultiAuth":
         """A new `MultiAuth` over `sources`, carrying this one's flags."""
@@ -307,15 +328,23 @@ class MultiAuth:
         for source in self._sources:
             credential = await source.extract(request)
             if credential is not None:
+                if source.authorization_scheme is None and (
+                    await self._unclaimed_authorization(
+                        request, self._sources.index(source)
+                    )
+                ):
+                    raise self._unauthorized("unclaimed_authorization", logging.WARNING)
                 return await source._authenticate_with_challenge(
                     credential, scopes, request=request
                 )
+        if await self._unclaimed_authorization(request, len(self._sources)):
+            raise self._unauthorized("unclaimed_authorization", logging.WARNING)
         if self._optional:
             log_decision(
                 logger, logging.DEBUG, "anonymous", source="MultiAuth", scheme=None
             )
             return None
-        raise self._missing_credential()
+        raise self._unauthorized("missing_credential", logging.INFO)
 
     async def __call__(self, **kwargs: Any) -> Any:
         """Run as a FastAPI dependency."""

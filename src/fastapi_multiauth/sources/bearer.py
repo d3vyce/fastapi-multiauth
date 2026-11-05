@@ -22,6 +22,7 @@ from ..utils import (
 class _BearerSource(ValidatedAuthSource):
     """Extraction shared by every source carrying an `Authorization: Bearer` token."""
 
+    authorization_scheme = "bearer"
     _prefix: str | None = None
 
     def __init__(

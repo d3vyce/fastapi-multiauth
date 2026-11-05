@@ -129,6 +129,7 @@ class HTTPDPoPAuth(ValidatedAuthSource):
 
     NO_REPLAY_CHECK: ClassVar[NoReplayCheck] = NoReplayCheck.NONE
     """Explicit `replay_check` opt-out."""
+    authorization_scheme = "dpop"
 
     def __init__(
         self,

@@ -15,6 +15,7 @@ icon: lucide/layers
 Sources are tried **in order**, and the first one that finds a credential decides:
 
 - If that credential is invalid, the request is refused. It does **not** fall through to the next source.
+- A token no source takes, such as one without the expected prefix, is refused too: the cookie sent alongside it is never used instead.
 - With no credential at all, the 401 lists every source's challenge.
 - All sources appear in `/docs`.
 

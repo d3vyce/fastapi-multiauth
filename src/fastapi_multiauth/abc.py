@@ -265,7 +265,8 @@ class AuthSource(ABC):
     Subclass it to read a credential the built-in sources do not handle.
     Implement `extract()` and `authenticate()`; override `www_authenticate()`,
     `authenticated_at()`, `authenticated_acr()` or `authenticate_scoped()`
-    when the source needs them.
+    when the source needs them, and set `authorization_scheme` on a source
+    that reads the `Authorization` header.
 
     Args:
         scheme: A `fastapi.security` scheme describing the source in OpenAPI.
@@ -273,6 +274,11 @@ class AuthSource(ABC):
     """
 
     scheme: SecurityBase | None
+    authorization_scheme: str | None = None
+    """The `Authorization` scheme this source reads, lowercased: `"*"` for any
+    scheme, `None` when it does not read the header. Under `MultiAuth`, a
+    header of a scheme a source reads, which no such source takes, is refused
+    instead of passing to a cookie or an API key."""
     _optional: bool = False
     _scope_catalogue: dict[str, str] | None = None
     """The scopes this source publishes to OpenAPI, `None` when it has none."""
