@@ -262,6 +262,8 @@ class AuthSource(ABC):
     """Shared by a source and its copies, to recognise what any of them authenticated."""
     _logger: ClassVar[logging.Logger] = logger
     """Where this source logs its decisions: its module's logger."""
+    _authorization_scheme: ClassVar[str | None] = None
+    """The `Authorization` scheme this source reads, lowercased, `None` when it reads none."""
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Log a library source under its own module's logger."""
