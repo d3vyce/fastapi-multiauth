@@ -2,7 +2,7 @@
 
 import secrets
 from collections.abc import Callable
-from typing import Any
+from typing import Any, ClassVar
 
 from fastapi.requests import HTTPConnection
 from fastapi.security import HTTPBearer
@@ -17,6 +17,7 @@ class _BearerSource(ValidatedAuthSource):
     """Extraction shared by every source carrying an `Authorization: Bearer` token."""
 
     _prefix: str | None = None
+    _authorization_scheme: ClassVar[str | None] = "bearer"
 
     def __init__(
         self,

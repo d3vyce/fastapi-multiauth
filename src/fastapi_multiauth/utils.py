@@ -434,6 +434,14 @@ def step_up_challenge(
     return challenge_headers(f"{challenge}{separator}{', '.join(params)}")
 
 
+def authorization_scheme(request: HTTPConnection) -> str | None:
+    """Return the lowercased scheme of the `Authorization` header, `None` when absent."""
+    authorization = request.headers.get("Authorization")
+    if not authorization:
+        return None
+    return authorization.partition(" ")[0].lower() or None
+
+
 def authorization_credential(request: HTTPConnection, scheme: str) -> str | None:
     """Extract the value of an `Authorization: <scheme> <value>` header.
 

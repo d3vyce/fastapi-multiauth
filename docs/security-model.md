@@ -9,7 +9,7 @@ What the library takes care of, and what stays with you. To report a vulnerabili
 ## What the library handles
 
 - **Tampering**: cookies are signed (HMAC-SHA256), JWTs and ID tokens are verified, OAuth `state` is checked against CSRF.
-- **Confusion between sources**: a cookie signed for one cookie name is never accepted under another, and a JWKS-backed `JWTValidator` requires an `audience`.
+- **Confusion between sources**: a cookie signed for one cookie name is never accepted under another, a token no `MultiAuth` source takes never falls back to the cookie sent alongside it, and a JWKS-backed `JWTValidator` requires an `audience`.
 - **Downgrades**: OAuth, OIDC and JWKS URLs must be HTTPS, and `HS*` algorithms are refused against a provider's keys.
 - **Cross-site requests**: a cookie source [refuses requests sent from another origin](guide/cookie-sessions.md#csrf) unless you pass `csrf=False`.
 - **Stolen tokens**: a [DPoP](guide/jwt-and-oauth2.md#sender-constrained-tokens-dpop)-bound token is refused without a fresh proof signed by its key.

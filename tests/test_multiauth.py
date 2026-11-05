@@ -466,6 +466,94 @@ class TestMultiAuth:
         assert response.status_code == 401
         assert second_called == []  # cookie validator was never called
 
+    @staticmethod
+    def _token_and_cookie(*, cookie_first: bool = False):
+        """A prefixed bearer for alice and a cookie for bob, and the cookie's calls."""
+        cookie_calls: list[str] = []
+
+        async def token_validator(token: str) -> dict:
+            if token != "user_alice":
+                raise UnauthorizedError()
+            return {"user": "alice"}
+
+        async def bob_cookie(value: str) -> dict:
+            cookie_calls.append(value)
+            return {"user": "bob"}
+
+        bearer = HTTPBearerAuth(token_validator, prefix="user_")
+        cookie = APIKeyCookieAuth("session", bob_cookie)
+        sources = (cookie, bearer) if cookie_first else (bearer, cookie)
+        return _client(MultiAuth(*sources)), cookie_calls
+
+    def test_token_wins_over_a_cookie_for_another_user(self):
+        client, _ = self._token_and_cookie()
+        response = client.get(
+            "/me",
+            headers={
+                "Authorization": "Bearer user_alice",
+                **_cookie_header({"session": "bob"}),
+            },
+        )
+        assert response.json() == {"user": "alice"}
+
+    def test_unclaimed_token_does_not_fall_back_to_the_cookie(self, caplog):
+        caplog.set_level(logging.WARNING, logger="fastapi_multiauth")
+        client, cookie_calls = self._token_and_cookie()
+        for authorization in ("Bearer pat_alice", "Bearer alice", "Bearer ", "bearer"):
+            caplog.clear()
+            response = client.get(
+                "/me",
+                headers={
+                    "Authorization": authorization,
+                    **_cookie_header({"session": "bob"}),
+                },
+            )
+            assert response.status_code == 401
+            assert response.headers["www-authenticate"] == "Bearer"
+            assert [(r.auth_reason, r.auth_status) for r in caplog.records] == [
+                ("unclaimed_authorization", 401)
+            ]
+        assert cookie_calls == []
+
+    def test_scheme_no_source_reads_falls_back_to_the_cookie(self):
+        client, _ = self._token_and_cookie()
+        for authorization in ("Basic YTpi", "Token user_alice"):
+            response = client.get(
+                "/me",
+                headers={
+                    "Authorization": authorization,
+                    **_cookie_header({"session": "bob"}),
+                },
+            )
+            assert response.json() == {"user": "bob"}
+
+        client = _client(
+            MultiAuth(
+                APIKeyHeaderAuth("X-API-Key", simple_validator),
+                APIKeyCookieAuth("session", cookie_validator),
+            )
+        )
+        response = client.get(
+            "/me",
+            headers={
+                "Authorization": "Bearer alice",
+                **_cookie_header({"session": VALID_COOKIE}),
+            },
+        )
+        assert response.json() == {"session": VALID_COOKIE}
+
+    def test_order_still_decides_between_two_accepted_credentials(self):
+        client, _ = self._token_and_cookie(cookie_first=True)
+        cookie = _cookie_header({"session": "bob"})
+        response = client.get(
+            "/me", headers={"Authorization": "Bearer user_alice", **cookie}
+        )
+        assert response.json() == {"user": "bob"}
+        response = client.get(
+            "/me", headers={"Authorization": "Bearer alice", **cookie}
+        )
+        assert response.status_code == 401
+
     def test_prefix_routes_to_correct_source(self):
         """Prefix-based dispatch: only the matching source's validator is called."""
         user_calls: list[str] = []
@@ -3286,6 +3374,17 @@ class TestOptionalAuth:
             "user": {"user": "alice"}
         }
         assert client.get("/maybe", headers={"X-API-Key": "wrong"}).status_code == 401
+
+    def test_multiauth_unclaimed_token_is_not_anonymous(self):
+        auth = MultiAuth(
+            HTTPBearerAuth(simple_validator, prefix="user_"),
+            APIKeyCookieAuth("session", cookie_validator),
+        )
+        client = TestClient(_app(self._routes(auth)))
+
+        response = client.get("/maybe", headers={"Authorization": "Bearer alice"})
+        assert response.status_code == 401
+        assert client.get("/maybe").json() == {"user": None}
 
     def test_scoped_optional_route_fails_for_every_caller(self):
         """An anonymous caller cannot satisfy scopes, so the combination is refused."""

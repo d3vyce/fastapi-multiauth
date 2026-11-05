@@ -2,7 +2,7 @@
 
 import base64
 from collections.abc import Callable
-from typing import Any
+from typing import Any, ClassVar
 
 from fastapi.requests import HTTPConnection
 from fastapi.security import HTTPBasic
@@ -42,6 +42,8 @@ class HTTPBasicAuth(ValidatedAuthSource):
         description: Description of the security scheme in OpenAPI.
         **kwargs: Keyword arguments passed to the validator on every call.
     """
+
+    _authorization_scheme: ClassVar[str | None] = "basic"
 
     def __init__(
         self,
