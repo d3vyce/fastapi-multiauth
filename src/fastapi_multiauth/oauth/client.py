@@ -259,6 +259,7 @@ async def oauth_fetch_userinfo(
     *,
     userinfo_url: str,
     access_token: str,
+    expected_sub: str | None = None,
     timeout: float = DEFAULT_TIMEOUT,
     client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
@@ -267,6 +268,11 @@ async def oauth_fetch_userinfo(
     Args:
         userinfo_url: HTTPS URL of the provider's userinfo endpoint.
         access_token: Access token from `oauth_exchange_code()`.
+        expected_sub: The `sub` of the validated ID token. The profile is
+            refused unless its own `sub` is the same, as [OIDC Core 5.3.2](https://openid.net/specs/openid-connect-core-1_0.html#UserInfoResponse)
+            requires: with a substituted access token, the provider would
+            answer with someone else's profile. An empty string never
+            matches; `None` skips the check.
         timeout: Request timeout in seconds, unless `client` is given.
         client: An `httpx.AsyncClient` to reuse. It is not closed, and its
             own settings apply.
@@ -276,11 +282,11 @@ async def oauth_fetch_userinfo(
 
     Raises:
         ValueError: If `userinfo_url` is not HTTPS.
-        OAuthUserinfoError: If the request fails or does not return a JSON
-            object.
+        OAuthUserinfoError: If the request fails, does not return a JSON
+            object, or the profile's `sub` is not `expected_sub`.
     """
     _require_https(userinfo_url, "OAuth userinfo_url")
-    return await _get_json(
+    profile = await _get_json(
         userinfo_url,
         timeout=timeout,
         error_cls=OAuthUserinfoError,
@@ -288,3 +294,8 @@ async def oauth_fetch_userinfo(
         headers={"Authorization": f"Bearer {access_token}"},
         client=client,
     )
+    if expected_sub is not None and (
+        not expected_sub or profile.get("sub") != expected_sub
+    ):
+        raise OAuthUserinfoError("userinfo sub does not match the ID token")
+    return profile

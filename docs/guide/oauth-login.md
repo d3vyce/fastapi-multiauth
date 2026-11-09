@@ -40,7 +40,8 @@ The state, nonce and PKCE verifier are kept in the server session (Starlette's `
 ```
 
 - `oauth_decode_state` refuses a callback this browser did not start, and only allows relative `next` URLs by default.
-- `oauth_validate_id_token` checks the ID token's signature, issuer, audience, expiry and nonce. Never trust an ID token before that.
+- `oauth_validate_id_token` checks the ID token's signature, issuer, audience, `azp`, expiry and nonce. Never trust an ID token before that.
+- When you also read the profile with `oauth_fetch_userinfo`, pass `expected_sub=claims["sub"]`: a profile fetched with a substituted access token is refused.
 - Every helper raises a subclass of [`OAuthError`][fastapi_multiauth.oauth.OAuthError], so one `except` covers the whole callback.
 
 The [OpenID Connect recipe](../recipes/oidc-sign-in.md) shows the full file.

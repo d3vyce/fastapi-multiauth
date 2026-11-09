@@ -67,8 +67,8 @@ async def oauth_validate_id_token(
         id_token: The `id_token` of the token response.
         issuer: Expected `iss`, compared exactly (`OIDCEndpoints.issuer`).
         jwks_uri: HTTPS URL of the provider's keys (`OIDCEndpoints.jwks_uri`).
-        client_id: Your client id: it must be in `aud`, and equal `azp`
-            when the token has one.
+        client_id: Your client id: it must be in `aud`, and equal `azp`,
+            which must be present when `aud` lists several audiences.
         nonce: The nonce sent with the login, compared in constant time.
             An empty string never matches; `None` skips the check.
         access_token: The access token issued alongside, checked against
@@ -122,6 +122,9 @@ async def oauth_validate_id_token(
         raise OAuthIDTokenError(f"ID token failed validation: {exc}") from exc
     claims = decoded["payload"]
     azp = claims.get("azp")
+    aud = claims["aud"]
+    if azp is None and isinstance(aud, list) and len(aud) > 1:
+        raise OAuthIDTokenError("ID token lists several audiences without azp")
     if azp is not None and azp != client_id:
         raise OAuthIDTokenError("ID token was issued to another client (azp)")
     if nonce is not None:
