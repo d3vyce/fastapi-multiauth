@@ -2,11 +2,12 @@
 
 import dataclasses
 import itertools
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 from fastapi import FastAPI, routing
 from fastapi.dependencies.models import Dependant
+from fastapi.dependencies.utils import get_dependant
 from fastapi.security.base import SecurityBase
 
 from .abc import AuthSource
@@ -29,6 +30,12 @@ class SchemeRequirement:
         csrf: Whether the scheme refuses cross-origin requests, as a
             cookie source does; `False` for one with `csrf=False`, `None`
             when the scheme does not say.
+        validated: Whether a validator checks the credential. `False` for a
+            plain `fastapi.security` scheme, which only reads the credential
+            and lets any value through, and for a guard replaced in
+            `app.dependency_overrides`.
+        overridden: Whether `app.dependency_overrides` replaces the guard,
+            so what the route declares is not what runs.
     """
 
     scheme_name: str | None
@@ -36,6 +43,8 @@ class SchemeRequirement:
     scopes: tuple[str, ...]
     optional: bool | None
     csrf: bool | None = None
+    validated: bool = True
+    overridden: bool = False
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -53,8 +62,11 @@ class RouteAuth:
         scopes: Every scope named on the route, in first-seen order. What a
             credential must carry is the scope list of its own entry.
         unguarded: Whether a request without a credential reaches the
-            route, including through `optional()` sources or a scheme
-            that does not say (`optional=None`).
+            route, including through `optional()` sources, a scheme that
+            does not say (`optional=None`) or a guard replaced in
+            `app.dependency_overrides`. A plain `fastapi.security` scheme
+            refuses a missing credential but checks no value: see
+            `SchemeRequirement.validated`.
         include_in_schema: Whether the route appears in `app.openapi()`;
             `False` for WebSocket routes.
     """
@@ -83,24 +95,27 @@ def _declared_scopes(dependant: Dependant) -> tuple[str, ...]:
 
 
 def _requirements(
-    sources: Iterable[AuthSource | SecurityBase],
-    scopes: tuple[str, ...],
-    optional: bool | None,
+    unit: "_Unit", scopes: tuple[str, ...]
 ) -> tuple[SchemeRequirement, ...]:
-    """Describe each of `sources` as a requirement carrying `scopes`."""
+    """Describe each source of `unit` as a requirement carrying `scopes`."""
     return tuple(
         SchemeRequirement(
             scheme_name=getattr(source, "scheme_name", None),
             source=type(source).__name__,
             scopes=scopes,
-            optional=optional,
+            optional=unit.optional,
             csrf=source._csrf if isinstance(source, AuthSource) else None,
+            validated=unit.validated and isinstance(source, AuthSource),
+            overridden=unit.overridden,
         )
-        for source in sources
+        for source in unit.sources
     )
 
 
-def _is_optional(source: AuthSource | MultiAuth | SecurityBase) -> bool | None:
+_Guard = AuthSource | MultiAuth | SecurityBase
+
+
+def _is_optional(source: _Guard) -> bool | None:
     """Say whether `source` on its own lets a credential-less request through."""
     if isinstance(source, (AuthSource, MultiAuth)):
         return source._optional
@@ -108,11 +123,8 @@ def _is_optional(source: AuthSource | MultiAuth | SecurityBase) -> bool | None:
     return None if auto_error is None else not auto_error
 
 
-_Resolution = tuple[
-    type["AuthSource | MultiAuth | SecurityBase"],
-    tuple["AuthSource | SecurityBase", ...],
-    bool | None,
-]
+_Resolution = tuple[tuple["AuthSource | SecurityBase", ...], bool | None, bool, bool]
+_Overrides = dict[Callable[..., Any], Callable[..., Any]]
 
 
 @dataclasses.dataclass(slots=True)
@@ -122,41 +134,62 @@ class _Unit:
     sources: tuple[AuthSource | SecurityBase, ...]
     scopes: list[str]
     optional: bool | None
+    validated: bool = True
+    overridden: bool = False
+
+    @property
+    def key(self) -> _Resolution:
+        """What decides how this unit resolves: units sharing it fold together."""
+        return (self.sources, self.optional, self.validated, self.overridden)
 
 
-def _positions(dependant: Dependant) -> Iterator[tuple[_Resolution, _Unit]]:
-    """Yield each security dependency below `dependant`, keyed by resolution.
+def _sources_of(guard: _Guard) -> tuple[AuthSource | SecurityBase, ...]:
+    """The schemes `guard` accepts: a `MultiAuth`'s members, or itself."""
+    return tuple(guard._sources) if isinstance(guard, MultiAuth) else (guard,)
 
-    Dependencies sharing a key resolve alike, so their scopes fold together.
+
+def _positions(dependant: Dependant, overrides: _Overrides) -> Iterator[_Unit]:
+    """Yield each security dependency below `dependant`, as FastAPI runs it.
+
+    `app.dependency_overrides` decides what runs: a guard replaced by a plain
+    callable checks nothing, and a plain dependency replaced by another one
+    runs the replacement's own dependencies, not the declared ones.
     """
     for sub in dependant.dependencies:
-        call = sub.call
-        if isinstance(call, MultiAuth):
-            sources = tuple(call._sources)
-        elif isinstance(call, (AuthSource, SecurityBase)):
-            sources = (call,)
+        declared = sub.call
+        override = overrides.get(declared) if declared is not None else None
+        call = declared if override is None else override
+        scopes = list(_declared_scopes(sub))
+        if isinstance(call, _Guard):
+            yield _Unit(
+                _sources_of(call),
+                scopes,
+                _is_optional(call),
+                overridden=override is not None,
+            )
+        elif isinstance(declared, _Guard):
+            yield _Unit(
+                _sources_of(declared), scopes, None, validated=False, overridden=True
+            )
         else:
-            yield from _positions(sub)
-            continue
-        optional = _is_optional(call)
-        yield (
-            (type(call), sources, optional),
-            _Unit(sources, list(_declared_scopes(sub)), optional),
-        )
+            if override is not None:
+                sub = get_dependant(
+                    path=sub.path or "", call=override, parent_oauth_scopes=scopes
+                )
+            yield from _positions(sub, overrides)
 
 
-def _auth_units(dependant: Dependant) -> list[tuple[SchemeRequirement, ...]]:
+def _auth_units(
+    dependant: Dependant, overrides: _Overrides
+) -> list[tuple[SchemeRequirement, ...]]:
     """Collect the groups of interchangeable schemes a request must satisfy."""
     by_resolution: dict[_Resolution, _Unit] = {}
-    for key, unit in _positions(dependant):
-        merged = by_resolution.get(key)
-        if merged is None:
-            by_resolution[key] = unit
-        else:
+    for unit in _positions(dependant, overrides):
+        merged = by_resolution.setdefault(unit.key, unit)
+        if merged is not unit:
             merged.scopes.extend(unit.scopes)
     requirements = [
-        _requirements(unit.sources, _dedupe(unit.scopes), unit.optional)
-        for unit in by_resolution.values()
+        _requirements(unit, _dedupe(unit.scopes)) for unit in by_resolution.values()
     ]
     return list(dict.fromkeys(requirements))
 
@@ -183,7 +216,8 @@ def auth_surface(app: FastAPI) -> list[RouteAuth]:
     """Report what guards every route of `app`.
 
     Reads the routes themselves rather than the OpenAPI schema, so hidden
-    routes are included.
+    routes are included, and honours `app.dependency_overrides`, so a guard
+    a test replaced and forgot is reported as not running.
 
     Args:
         app: The application to inspect. Mounted sub-applications are not
@@ -211,7 +245,11 @@ def auth_surface(app: FastAPI) -> list[RouteAuth]:
         dependant = getattr(route, "dependant", None)
         if dependant is None and path in docs_paths:
             continue
-        units = _auth_units(dependant) if dependant is not None else []
+        units = (
+            _auth_units(dependant, app.dependency_overrides)
+            if dependant is not None
+            else []
+        )
         alternatives = tuple(itertools.product(*units)) if units else ()
         surface.append(
             RouteAuth(
