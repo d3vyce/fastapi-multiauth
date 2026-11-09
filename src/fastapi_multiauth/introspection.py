@@ -21,17 +21,13 @@ from .utils import (
     hash_token,
     record_verified_jkt,
     refusal,
+    reject_other_token_kinds,
     require_nonnegative_seconds,
     require_scopes,
     service_unavailable,
 )
 
 logger = logging.getLogger(__name__)
-
-_OTHER_TOKEN_KINDS = {
-    "typ": frozenset({"refresh", "offline", "id", "logout"}),
-    "token_use": frozenset({"refresh_token", "id_token", "refresh", "id"}),
-}
 
 
 class _IntrospectionUnavailable(Exception):
@@ -238,10 +234,7 @@ class IntrospectionValidator:
 
     def _check_claims(self, claims: dict[str, Any]) -> None:
         """Check the token is an access token, then `exp`, `nbf`, `aud` and `iss`."""
-        for field, kinds in _OTHER_TOKEN_KINDS.items():
-            kind = claims.get(field)
-            if isinstance(kind, str) and kind.lower() in kinds:
-                raise refusal(UnauthorizedError(), "not_access_token")
+        reject_other_token_kinds(claims)
         now = time.time()
         if "exp" in claims:
             exp = finite_number(claims["exp"])
