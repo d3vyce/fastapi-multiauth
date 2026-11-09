@@ -2003,6 +2003,31 @@ class TestFetchUserinfo:
                     userinfo_url=self.USERINFO_URL, access_token="tok123"
                 )
 
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_expected_sub_binds_the_profile_to_the_id_token(self):
+        """OIDC Core 5.3.2: a profile for another sub must not be used."""
+        route = respx.get(self.USERINFO_URL).respond(json={"sub": "user-1"})
+        result = await oauth_fetch_userinfo(
+            userinfo_url=self.USERINFO_URL, access_token="tok123", expected_sub="user-1"
+        )
+        assert result == {"sub": "user-1"}
+
+        for payload, expected in [
+            ({"sub": "user-2"}, "user-1"),
+            ({"email": "alice@example.com"}, "user-1"),
+            ({"sub": 1}, "1"),
+            ({"sub": ""}, ""),
+            ({"sub": "user-1"}, ""),
+        ]:
+            route.respond(json=payload)
+            with pytest.raises(OAuthUserinfoError, match="sub does not match"):
+                await oauth_fetch_userinfo(
+                    userinfo_url=self.USERINFO_URL,
+                    access_token="tok123",
+                    expected_sub=expected,
+                )
+
 
 class TestPkce:
     def test_generate_pkce_pair(self):
@@ -5127,6 +5152,7 @@ class TestValidateIDToken:
             (_id_claims(sub=None), "failed validation"),
             (_id_claims(iat=None), "failed validation"),
             (_id_claims(azp="other-client"), "another client"),
+            (_id_claims(aud=[CLIENT_ID, "api"]), "without azp"),
         ]:
             await self._refused(_id_token(claims), match)
 
