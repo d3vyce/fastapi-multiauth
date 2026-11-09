@@ -6,7 +6,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, ClassVar, Self
+from typing import Any, ClassVar, NamedTuple, Self
 
 from fastapi import HTTPException
 from fastapi.requests import HTTPConnection
@@ -228,6 +228,28 @@ class _Freshness:
     """Caller-supplied reader of the instant, `None` to use the source's own."""
 
 
+async def _within(freshness: _Freshness, instant: Any, identity: Any) -> bool:
+    """Whether a credential proven at `instant` falls inside `freshness`.
+
+    `freshness.read`, when set, reads the instant off `identity` instead.
+    """
+    if freshness.read is not None:
+        instant = await freshness.read(identity)
+    age = credential_age(instant)
+    return age is not None and (
+        -freshness.leeway <= age <= freshness.max_age + freshness.leeway
+    )
+
+
+class _Record(NamedTuple):
+    """What a source leaves in the request scope once it authenticated it."""
+
+    source: "AuthSource"
+    authenticated_at: Any
+    """When the credential was proven, so `ensure_fresh()` never sees the credential."""
+    identity: Any
+
+
 @dataclass(frozen=True, slots=True)
 class _Assurance:
     """The levels set by `stepped_up()`."""
@@ -346,14 +368,22 @@ class AuthSource(ABC):
     ) -> Any:
         """Authenticate, attaching this source's challenge to any 401 raised.
 
-        Freshness is checked after the credential: an invalid one is refused as
-        invalid, not as stale. Every outcome is logged.
+        A validator that returns `None` or `False` refuses the credential: a
+        lookup that found nothing, or a comparison that failed, must never
+        pass for an identity. Freshness is checked after the credential: an
+        invalid one is refused as invalid, not as stale. Every outcome is logged.
+
+        What is recorded for `ensure_fresh()` is when the credential was
+        proven, not the credential itself, so the record never holds it.
         """
         try:
             identity = await self.authenticate_scoped(
                 credential, scopes, request=request
             )
-            await self._enforce_step_up(credential, identity, request)
+            if identity is None or identity is False:
+                raise refusal(UnauthorizedError(), "no_identity")
+            instant = self._credential_authenticated_at(credential, request)
+            await self._enforce_step_up(credential, identity, request, instant)
         except HTTPException as exc:
             add_challenge(exc, self.www_authenticate())
             self._log(logging.WARNING, refusal_reason(exc), exc.status_code)
@@ -361,7 +391,7 @@ class AuthSource(ABC):
         records = request.scope.get(_AUTHENTICATED)
         if records is None:
             records = request.scope[_AUTHENTICATED] = {}
-        records[self._record_key()] = (self, credential, identity)
+        records[self._record_key()] = _Record(self, instant, identity)
         if self._logger.isEnabledFor(logging.DEBUG):
             self._log(logging.DEBUG, "authenticated")
         return identity
@@ -401,7 +431,9 @@ class AuthSource(ABC):
         """Return when a credential was proven, for `fresh()`.
 
         Override it in a source that can date its own credentials, as the
-        signed cookie does.
+        signed cookie does. It runs on every authenticated request, whether
+        or not the route asks for freshness, since `ensure_fresh()` may ask
+        later: return `None` rather than raise for a credential it cannot date.
 
         Args:
             credential: The credential returned by `extract()`.
@@ -537,15 +569,11 @@ class AuthSource(ABC):
         await self._check_record(request, record, window)
 
     async def _check_record(
-        self,
-        request: HTTPConnection,
-        record: tuple["AuthSource", str, Any],
-        window: _Freshness,
+        self, request: HTTPConnection, record: _Record, window: _Freshness
     ) -> None:
         """Refuse the recorded authentication when it falls outside `window`."""
-        source, credential, identity = record
-        if not await self._is_fresh(window, credential, identity, request):
-            assurance = source._assurance
+        if not await _within(window, record.authenticated_at, record.identity):
+            assurance = record.source._assurance
             exc = refusal(
                 self._challenge_error(
                     StaleCredentialError,
@@ -622,13 +650,18 @@ class AuthSource(ABC):
         return clone
 
     async def _enforce_step_up(
-        self, credential: str, identity: Any, request: HTTPConnection | None = None
+        self,
+        credential: str,
+        identity: Any,
+        request: HTTPConnection | None,
+        instant: Any,
     ) -> None:
-        """Refuse an identity outside the `fresh()` window or `stepped_up()` levels."""
+        """Refuse an identity outside the `fresh()` window or `stepped_up()` levels.
+
+        `instant` is what `_credential_authenticated_at()` read for the credential.
+        """
         freshness, assurance = self._freshness, self._assurance
-        if freshness is not None and not await self._is_fresh(
-            freshness, credential, identity, request
-        ):
+        if freshness is not None and not await _within(freshness, instant, identity):
             raise refusal(self._step_up_error(StaleCredentialError), "stale")
         if assurance is not None:
             if assurance.read is not None:
@@ -640,23 +673,6 @@ class AuthSource(ABC):
                     self._step_up_error(InsufficientAuthenticationError),
                     "insufficient_acr",
                 )
-
-    async def _is_fresh(
-        self,
-        freshness: _Freshness,
-        credential: str,
-        identity: Any,
-        request: HTTPConnection | None,
-    ) -> bool:
-        """Whether the credential was proven inside the window."""
-        if freshness.read is not None:
-            instant = await freshness.read(identity)
-        else:
-            instant = self._credential_authenticated_at(credential, request)
-        age = credential_age(instant)
-        return age is not None and (
-            -freshness.leeway <= age <= freshness.max_age + freshness.leeway
-        )
 
     def _credential_authenticated_at(
         self, credential: str, request: HTTPConnection | None

@@ -76,7 +76,7 @@ from fastapi_multiauth import (
     verify_token_hash,
 )
 from fastapi_multiauth._http import DEFAULT_TIMEOUT, _require_https
-from fastapi_multiauth.abc import _DocOnlyScheme
+from fastapi_multiauth.abc import _AUTHENTICATED, _DocOnlyScheme
 from fastapi_multiauth.exceptions import UnauthorizedError
 from fastapi_multiauth.oauth import (
     OAuthDiscoveryError,
@@ -1392,6 +1392,57 @@ class TestAuthSource:
         response = client.get("/me", headers={"X-Token": "s3cr3t"})
         assert response.status_code == 200
         assert response.json() == {"token": "s3cr3t"}
+
+
+class TestNoIdentity:
+    """A validator that returns None refuses the credential: nothing is nobody."""
+
+    @staticmethod
+    async def lookup(credential: str) -> dict | None:
+        return {"user": "alice"} if credential == VALID_TOKEN else None
+
+    def test_none_is_a_401_with_the_challenge(self):
+        bearer = HTTPBearerAuth(self.lookup)
+        for auth in [
+            bearer,
+            MultiAuth(bearer),
+            bearer.optional(),
+            MultiAuth(bearer).optional(),
+        ]:
+            client = _client(auth)
+            response = client.get(
+                "/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"}
+            )
+            assert response.status_code == 200, auth
+            assert response.json() == {"user": "alice"}
+            response = client.get("/me", headers={"Authorization": "Bearer unknown"})
+            assert response.status_code == 401, auth
+            assert response.headers["WWW-Authenticate"] == "Bearer"
+            assert response.json() == {"detail": "Unauthorized"}
+
+    def test_false_is_refused_like_none(self):
+        """A validator written as a comparison must not let its `False` through."""
+
+        def matches(credential: str) -> bool:
+            return secrets.compare_digest(credential, VALID_TOKEN)
+
+        client = _client(HTTPBearerAuth(matches))
+        response = client.get("/me", headers={"Authorization": f"Bearer {VALID_TOKEN}"})
+        assert (response.status_code, response.json()) == (200, True)
+        response = client.get("/me", headers={"Authorization": "Bearer unknown"})
+        assert response.status_code == 401
+        assert response.headers["WWW-Authenticate"] == "Bearer"
+
+    @pytest.mark.anyio
+    async def test_a_custom_source_cannot_return_none_either(self):
+        class _NoneAuth(_HeaderAuth):
+            async def authenticate(self, credential: str) -> None:
+                return None
+
+        request = _request(x_token="s3cr3t")
+        with pytest.raises(UnauthorizedError):
+            await _NoneAuth(secret="s3cr3t").dispatch(request, [])
+        assert _AUTHENTICATED not in request.scope
 
 
 class TestEncodeDecodeOAuthState:
@@ -3843,6 +3894,24 @@ class TestEnsureFresh:
             await session.fresh(300).dispatch(guarded, [])
         assert stale.value.max_age == expected.value.max_age == 300
         assert stale.value.headers == expected.value.headers
+
+    @pytest.mark.anyio
+    async def test_the_record_holds_no_credential(self):
+        """What authentication leaves in the scope dates the credential, never repeats it."""
+        session = _signed_cookie_auth()
+        request = self._cookie_request(session)
+        cookie = request.cookies["session"]
+        await session.dispatch(request, [])
+        (record,) = request.scope[_AUTHENTICATED].values()
+        assert cookie not in repr(record)
+        assert record[1] == pytest.approx(time.time(), abs=2)
+        await session.ensure_fresh(request, 300)
+
+        request = _request(authorization=f"Bearer {VALID_TOKEN}")
+        await HTTPBearerAuth(simple_validator).dispatch(request, [])
+        (record,) = request.scope[_AUTHENTICATED].values()
+        assert VALID_TOKEN not in repr(record)
+        assert record[1] is None, "a bearer source cannot date its tokens"
 
     @pytest.mark.anyio
     async def test_a_session_id_and_a_level_keep_the_timestamp(self):
@@ -7162,6 +7231,15 @@ class TestSecurityLogging:
     def test_the_package_logger_has_a_null_handler(self):
         handlers = logging.getLogger("fastapi_multiauth").handlers
         assert any(isinstance(h, logging.NullHandler) for h in handlers)
+
+    def test_a_validator_returning_none_is_logged_as_no_identity(self):
+        async def lookup(token: str) -> None:
+            return None
+
+        _client(HTTPBearerAuth(lookup)).get("/me", headers=self._bearer_header())
+        self._assert_refusal(
+            "fastapi_multiauth.sources.bearer", "HTTPBearerAuth", "no_identity", 401
+        )
 
     def test_success_and_anonymous_are_logged_at_debug(self):
         async def validate(token: str) -> dict:

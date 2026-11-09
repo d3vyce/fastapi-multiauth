@@ -52,6 +52,7 @@ Records never contain the credential, its hash, or the identity. Correlate with 
 | `inactive` | the introspection endpoint says the token is not active |
 | `not_access_token` | the introspection endpoint describes a refresh or ID token |
 | `introspection_unavailable` | the introspection endpoint cannot be reached, or answers unusably (503) |
+| `no_identity` | your validator returned `None` or `False` |
 | `rejected`, `forbidden`, `error` | your validator raised a 401, a 403, or another error |
 
 `JWTValidator` also reports `not_yet_valid`, `invalid_audience`, `invalid_issuer`, `missing_claim`, `invalid_algorithm` and `invalid_token`, and `IntrospectionValidator` the ones that apply to its answers.

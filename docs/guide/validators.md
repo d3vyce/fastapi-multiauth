@@ -16,6 +16,7 @@ A validator receives the credential and returns the user (any object), or raises
 
 - Raise [`UnauthorizedError`][fastapi_multiauth.UnauthorizedError] (401) when the credential is missing or invalid.
 - Raise [`ForbiddenError`][fastapi_multiauth.ForbiddenError] (403) when it is valid, but not allowed here.
+- Return `None` or `False` and the credential is refused too (401): a lookup that found nobody, or a comparison that failed, never passes for a user.
 
 The library adds the `WWW-Authenticate` header to 401 responses for you.
 
