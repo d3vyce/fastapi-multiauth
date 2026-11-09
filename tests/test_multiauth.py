@@ -4866,6 +4866,124 @@ class TestAuthSurface:
         route = self._find(_app(setup), "/layered")
         assert len(route.alternatives) == 4, "both positions pick independently"
 
+    def test_a_dependency_override_is_reported_as_what_runs(self):
+        """A guard a test replaced and forgot must not read as protecting the route."""
+        bearer = HTTPBearerAuth(self._scoped)
+        api_key = APIKeyHeaderAuth("X-Key", self._scoped)
+
+        def get_user(user=Security(bearer, scopes=["admin"])):
+            return user
+
+        def fake_user(user=Security(api_key)):
+            return user
+
+        def setup(app: FastAPI):
+            @app.get("/admin")
+            async def admin(user=Security(bearer, scopes=["admin"])):
+                return {}
+
+            @app.get("/wrapped")
+            async def wrapped(user=Depends(get_user)):
+                return {}
+
+        app = _app(setup)
+        for path in ["/admin", "/wrapped"]:
+            route = self._find(app, path)
+            assert route.unguarded is False
+            assert (route.alternatives[0][0].overridden, route.scopes) == (
+                False,
+                ("admin",),
+            )
+
+        app.dependency_overrides[bearer] = lambda: {"user": "fake"}
+        assert TestClient(app).get("/admin").status_code == 200
+        for path in ["/admin", "/wrapped"]:
+            route = self._find(app, path)
+            assert route.unguarded is True, path
+            (req,) = route.alternatives[0]
+            assert (req.source, req.optional, req.validated, req.overridden) == (
+                "HTTPBearerAuth",
+                None,
+                False,
+                True,
+            )
+            assert route.scopes == ("admin",), "the declared scopes stay visible"
+
+        # Overriding the wrapper hides the guard below it just as well.
+        app.dependency_overrides = {get_user: lambda: {"user": "fake"}}
+        assert TestClient(app).get("/wrapped").status_code == 200
+        route = self._find(app, "/wrapped")
+        assert (route.unguarded, route.alternatives) == (True, ())
+
+        # A replacement that is itself a source, or depends on one, is the guard.
+        app.dependency_overrides = {bearer: api_key, get_user: fake_user}
+        admin, wrapped = self._find(app, "/admin"), self._find(app, "/wrapped")
+        (req,) = admin.alternatives[0]
+        assert (req.source, req.validated, req.overridden) == (
+            "APIKeyHeaderAuth",
+            True,
+            True,
+        )
+        assert admin.unguarded is False
+        (req,) = wrapped.alternatives[0]
+        assert (req.source, req.validated, req.overridden) == (
+            "APIKeyHeaderAuth",
+            True,
+            False,
+        )
+        assert wrapped.unguarded is False
+
+    def test_scopes_reach_the_guard_below_an_overridden_dependency(self):
+        """FastAPI hands the route's scopes to the replacement: so must the report."""
+        bearer = HTTPBearerAuth(self._scoped)
+
+        def get_user(user=Security(bearer)):
+            return user
+
+        def other_user(user=Security(bearer)):
+            return user
+
+        def setup(app: FastAPI):
+            @app.get("/admin")
+            async def admin(user=Security(get_user, scopes=["admin"])):
+                return user
+
+        app = _app(setup)
+        app.dependency_overrides[get_user] = other_user
+        response = TestClient(app).get(
+            "/admin", headers={"Authorization": "Bearer anything"}
+        )
+        assert response.json()["scopes"] == ["admin"]
+        route = self._find(app, "/admin")
+        assert route.scopes == ("admin",)
+        assert route.alternatives[0][0].scopes == ("admin",)
+
+    def test_validated_tells_a_source_from_a_bare_scheme(self):
+        """fastapi.security's HTTPBearer refuses a missing header but checks no value."""
+
+        def setup(app: FastAPI):
+            @app.get("/bare")
+            async def bare(credentials=Security(HTTPBearer())):
+                return {}
+
+            @app.get("/checked")
+            async def checked(user=Security(HTTPBearerAuth(simple_validator))):
+                return {}
+
+        app = _app(setup)
+        client = TestClient(app)
+        garbage = {"Authorization": "Bearer anything"}
+        assert client.get("/bare").status_code != 200
+        assert client.get("/bare", headers=garbage).status_code == 200
+        assert client.get("/checked", headers=garbage).status_code == 401
+
+        bare, checked = self._find(app, "/bare"), self._find(app, "/checked")
+        assert (bare.unguarded, bare.alternatives[0][0].validated) == (False, False)
+        assert (checked.unguarded, checked.alternatives[0][0].validated) == (
+            False,
+            True,
+        )
+
     def test_foreign_schemes_are_read_by_their_own_optionality(self):
         """A foreign SecurityBase need not spell its optionality as auto_error."""
 

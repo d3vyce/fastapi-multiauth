@@ -88,7 +88,7 @@ Set `SECRET_KEY` to at least 32 random bytes, for example the output of `python 
 - **Scopes and step-up**: fail-closed scope checks, and `fresh()` / `stepped_up()` with RFC 9470 challenges for sensitive routes.
 - **Second factor**: TOTP helpers that refuse a replayed code, and the login level signed into the session cookie.
 - **OAuth login helpers**: discovery, CSRF `state`, PKCE, code exchange and ID token validation.
-- **Observable**: reason-coded security logs and `auth_surface(app)` to audit what guards every route.
+- **Observable**: reason-coded security logs and `auth_surface(app)` to audit what guards every route, `dependency_overrides` included.
 
 See the [comparison](https://fastapi-multiauth.d3vyce.fr/guide/comparison/) for how it sits next to `fastapi.security`, fastapi-users, AuthX and Authlib, and the [security model](https://fastapi-multiauth.d3vyce.fr/security-model/) for what it guarantees.
 

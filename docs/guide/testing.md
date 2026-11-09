@@ -17,7 +17,7 @@ Here are three ways to test it:
 ```
 
 `test_admin_with_override`
-:   A source is a normal FastAPI dependency, so `app.dependency_overrides` replaces it. Use the **same object** as the route: `require()` and `optional()` return copies, so assign the copy to a name first, as `admin` is here.
+:   A source is a normal FastAPI dependency, so `app.dependency_overrides` replaces it. Use the **same object** as the route: `require()` and `optional()` return copies, so assign the copy to a name first, as `admin` is here. Clear the override afterwards: [`auth_surface()`](auditing.md) reports a route whose guard is overridden as unguarded.
 
 `test_admin_requires_a_token`
 :   Check the protection itself: status code and `WWW-Authenticate` header.
