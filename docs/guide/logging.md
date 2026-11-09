@@ -50,7 +50,7 @@ Records never contain the credential, its hash, or the identity. Correlate with 
 | `unknown_key` | a JWT signed with a key the provider does not publish |
 | `jwks_unavailable` | the provider's keys cannot be fetched (503) |
 | `inactive` | the introspection endpoint says the token is not active |
-| `not_access_token` | the introspection endpoint describes a refresh or ID token |
+| `not_access_token` | the introspection endpoint describes, or the JWT's claims or `typ` header mark, a refresh or ID token |
 | `introspection_unavailable` | the introspection endpoint cannot be reached, or answers unusably (503) |
 | `no_identity` | your validator returned `None` or `False` |
 | `rejected`, `forbidden`, `error` | your validator raised a 401, a 403, or another error |

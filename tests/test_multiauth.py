@@ -2655,6 +2655,8 @@ class TestJWTValidatorConfig:
         for leeway in [-1, math.inf, math.nan]:
             with pytest.raises(ValueError, match="leeway"):
                 JWTValidator(secret=JWT_SECRET, leeway=leeway)
+        with pytest.raises(ValueError, match="typ"):
+            JWTValidator(secret=JWT_SECRET, typ="")
 
     def test_valid_configuration_accepted(self):
         _jwks_validator("http://localhost:8080/jwks")
@@ -2683,6 +2685,30 @@ class TestJWTValidatorSymmetric:
         )
         client = _auth_client(JWTValidator(secret=JWT_SECRET, required_claims=()))
         assert _status(client, no_exp) == 200
+
+    def test_id_and_refresh_tokens_are_refused(self):
+        """A token marked as another kind by its claims is not an access token."""
+        client = _auth_client(JWTValidator(secret=JWT_SECRET))
+        for claims in [
+            _claims(typ="ID"),
+            _claims(typ="Refresh"),
+            _claims(typ="Offline"),
+            _claims(token_use="id"),
+            _claims(token_use="refresh_token"),
+        ]:
+            assert _status(client, _hs_token(claims)) == 401, claims
+        for claims in [_claims(typ="Bearer"), _claims(token_use="access"), _claims()]:
+            assert _status(client, _hs_token(claims)) == 200, claims
+
+    def test_typ_header_is_enforced_when_asked(self):
+        client = _auth_client(JWTValidator(secret=JWT_SECRET, typ="at+jwt"))
+        for typ in ["at+jwt", "AT+JWT", "application/at+jwt"]:
+            assert _status(client, _hs_token(headers={"typ": typ})) == 200, typ
+        for typ in ["JWT", "id+jwt", "at", None]:
+            assert _status(client, _hs_token(headers={"typ": typ})) == 401, typ
+        assert (
+            _status(_auth_client(JWTValidator(secret=JWT_SECRET)), _hs_token()) == 200
+        )
 
     def test_bad_tokens_rejected(self):
         client = _auth_client(JWTValidator(secret=JWT_SECRET))
@@ -7240,6 +7266,16 @@ class TestSecurityLogging:
         self._assert_refusal(
             "fastapi_multiauth.sources.bearer", "HTTPBearerAuth", "no_identity", 401
         )
+
+    @respx.mock
+    def test_an_id_token_is_logged_as_not_access_token(self):
+        respx.get(ID_JWKS_URL).respond(json={"keys": [_jwk(_RSA_KEY_1, "key1")]})
+        token = _id_token(_id_claims(typ="ID"))
+        _auth_client(_jwks_validator(ID_JWKS_URL, audience=CLIENT_ID)).get(
+            "/me", headers=self._bearer_header(token)
+        )
+        assert self._only().auth_reason == "not_access_token"
+        self._assert_no_leak(token)
 
     def test_success_and_anonymous_are_logged_at_debug(self):
         async def validate(token: str) -> dict:

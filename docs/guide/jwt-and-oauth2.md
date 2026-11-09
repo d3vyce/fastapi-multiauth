@@ -21,6 +21,8 @@ The validator fetches the provider's public keys (the JWKS) and checks the signa
 !!! warning "`audience` is required"
     A provider signs the tokens of **all** its applications with the same keys. Without an audience check, a token issued for another app would be accepted here. Use `audience=JWTValidator.ANY_AUDIENCE` only if you really mean it.
 
+    Pass your API's own identifier, not the client id of a front-end: the ID tokens the provider hands that front-end carry its client id as `aud`, and an ID token is not an access token. The validator refuses a token whose `typ` or `token_use` claim marks it as an ID or refresh token; with a provider issuing [RFC 9068](https://datatracker.ietf.org/doc/html/rfc9068) access tokens, `typ="at+jwt"` refuses everything else.
+
 By default the route receives the token's claims. Pass `claims_to_identity=` to turn them into your own user object. For tokens you sign yourself, use `JWTValidator(secret=...)` instead of `jwks_url`.
 
 ## Sender-constrained tokens (DPoP)

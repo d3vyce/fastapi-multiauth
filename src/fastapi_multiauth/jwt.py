@@ -15,6 +15,7 @@ from .utils import (
     ensure_async,
     record_verified_jkt,
     refusal,
+    reject_other_token_kinds,
     require_nonnegative_seconds,
     require_scopes,
     service_unavailable,
@@ -63,6 +64,11 @@ def _reject_symmetric(algorithms: Sequence[str], url_param: str) -> None:
             "a public JWKS key must never double as an HMAC secret "
             "(key-confusion attack)"
         )
+
+
+def _normalize_typ(typ: str) -> str:
+    """A JWT header `typ`, lowercased and without the optional `application/`."""
+    return typ.lower().removeprefix("application/")
 
 
 def _import_pyjwt() -> Any:
@@ -227,17 +233,28 @@ class JWTValidator:
     cached and refreshed when the provider rotates them; if the provider
     is down, cached keys keep working, and a cold start answers 503.
 
+    A token whose `typ` or `token_use` claim marks it as a refresh, ID or
+    logout token is refused (`not_access_token`), as the introspection
+    validator does. Providers that mark their access tokens in the header
+    can be held to it with `typ`.
+
     Args:
         secret: Shared HMAC key of at least 32 bytes.
         jwks_url: HTTPS URL of the provider's public keys.
         algorithms: Accepted algorithms; `["HS256"]` with a secret,
             `["RS256", "ES256"]` with a JWKS, where `HS*` is refused.
-        audience: Expected `aud`. Required with a JWKS, since a provider
-            signs every application's tokens with the same keys; pass
-            `ANY_AUDIENCE` to skip the check on purpose.
+        audience: Expected `aud`: your API's own identifier. Required with
+            a JWKS, since a provider signs every application's tokens with
+            the same keys; pass `ANY_AUDIENCE` to skip the check on purpose.
+            Do not use the client id of a front-end here: the ID tokens the
+            provider hands that front-end carry it as `aud` too.
         issuer: Expected `iss`; not checked when unset.
         leeway: Clock-skew tolerance in seconds for `exp`, `nbf` and `iat`.
         required_claims: Claims every token must carry.
+        typ: Expected JWT header `typ`, e.g. `"at+jwt"` for a provider
+            issuing [RFC 9068](https://datatracker.ietf.org/doc/html/rfc9068)
+            access tokens. Compared case-insensitively, with or without the
+            `application/` prefix. Not checked when unset.
         scopes_claim: Claim holding granted scopes: a space-separated string
             (`scope`) or a list (`scp`, `roles`). A missing route scope is a 403.
         claims_to_identity: Sync or async callable turning the verified
@@ -249,7 +266,7 @@ class JWTValidator:
     Raises:
         ValueError: On an invalid configuration, such as both or neither of
             `secret` and `jwks_url`, a short secret, a JWKS without `audience`,
-            or a negative `leeway`.
+            a negative `leeway`, or an empty `typ`.
     """
 
     ANY_AUDIENCE: ClassVar[AnyAudience] = AnyAudience.ANY
@@ -265,6 +282,7 @@ class JWTValidator:
         issuer: str | None = None,
         leeway: float = 0.0,
         required_claims: Sequence[str] = ("exp",),
+        typ: str | None = None,
         scopes_claim: str = "scope",
         claims_to_identity: Callable[[dict[str, Any]], Any] | None = None,
         jwks_cache_ttl: float = 3600.0,
@@ -275,6 +293,11 @@ class JWTValidator:
         if (secret is None) == (jwks_url is None):
             raise ValueError("provide exactly one of 'secret' or 'jwks_url'")
         require_nonnegative_seconds(leeway, "leeway")
+        if typ is not None:
+            if not typ:
+                raise ValueError("typ must be a non-empty string")
+            typ = _normalize_typ(typ)
+        self._typ = typ
         if secret is not None:
             if len(secret.encode()) < _MIN_SECRET_BYTES:
                 raise ValueError(
@@ -343,7 +366,7 @@ class JWTValidator:
         else:
             key = await self._resolve_jwks_key(self._key_set, token)
         try:
-            claims = self._jwt.decode(
+            decoded = self._jwt.decode_complete(
                 token,
                 key=key,
                 algorithms=self._algorithms,
@@ -354,12 +377,24 @@ class JWTValidator:
             )
         except (self._jwt.exceptions.PyJWTError, TypeError, ValueError) as exc:
             raise refusal(UnauthorizedError(), self._decode_reason(exc)) from None
+        claims = decoded["payload"]
+        self._reject_other_kinds(decoded["header"], claims)
         if scopes:
             require_scopes(claims, self._scopes_claim, scopes)
         record_verified_jkt(claims)
         if self._claims_to_identity is not None:
             return await self._claims_to_identity(claims)
         return claims
+
+    def _reject_other_kinds(
+        self, header: dict[str, Any], claims: dict[str, Any]
+    ) -> None:
+        """Refuse a verified token that is not an access token."""
+        if self._typ is not None:
+            typ = header.get("typ")
+            if not isinstance(typ, str) or _normalize_typ(typ) != self._typ:
+                raise refusal(UnauthorizedError(), "not_access_token")
+        reject_other_token_kinds(claims)
 
     def _decode_reason(self, exc: Exception) -> str:
         """The reason code of a failed decode, by PyJWT exception class."""

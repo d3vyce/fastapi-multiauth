@@ -21,7 +21,7 @@ import anyio.to_thread
 from fastapi import HTTPException, status
 from fastapi.requests import HTTPConnection
 
-from .exceptions import ForbiddenError
+from .exceptions import ForbiddenError, UnauthorizedError
 
 
 def b64url_encode(data: bytes) -> str:
@@ -363,6 +363,25 @@ def require_scopes(claims: dict[str, Any], claim: str, scopes: list[str]) -> Non
     """Refuse claims whose scopes `claim` lacks one of `scopes`, with a 403."""
     if set(scopes) - granted_scopes(claims, claim):
         raise refusal(ForbiddenError("Insufficient scope"), "insufficient_scope")
+
+
+_OTHER_TOKEN_KINDS = {
+    "typ": frozenset({"refresh", "offline", "id", "logout"}),
+    "token_use": frozenset({"refresh_token", "id_token", "refresh", "id"}),
+}
+
+
+def reject_other_token_kinds(claims: Mapping[str, Any]) -> None:
+    """Refuse claims describing a refresh, ID or logout token.
+
+    Raises:
+        UnauthorizedError: Tagged `not_access_token`, when `typ` or
+            `token_use` names another kind of token.
+    """
+    for field, kinds in _OTHER_TOKEN_KINDS.items():
+        kind = claims.get(field)
+        if isinstance(kind, str) and kind.lower() in kinds:
+            raise refusal(UnauthorizedError(), "not_access_token")
 
 
 def service_unavailable(reason: str) -> HTTPException:
