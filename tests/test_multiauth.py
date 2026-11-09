@@ -4464,7 +4464,7 @@ class TestWebSocket:
             "/ws",
             headers={
                 **_cookie_header({"session": VALID_COOKIE}),
-                "Origin": "http://testserver",
+                "Origin": "https://testserver",
             },
         ) as websocket:
             assert websocket.receive_json() == {"user": {"session": VALID_COOKIE}}
@@ -5882,6 +5882,19 @@ class TestCookieCsrf:
                 assert self._status(client, method, **headers) == 403, headers
             response = client.post("/me", headers=headers)
             assert response.json() == {"detail": "Forbidden"}
+
+    def test_a_secure_cookie_needs_an_https_origin(self):
+        """Without Sec-Fetch-Site, a page on the plain-HTTP side of the host must not pass."""
+        client = self._client(
+            APIKeyCookieAuth("session", cookie_validator, secret_key=COOKIE_SECRET)
+        )
+        for method in ["POST", "PUT", "PATCH", "DELETE"]:
+            assert self._status(client, method, Origin="http://testserver") == 403
+            assert self._status(client, method, Origin="https://testserver") == 200
+            assert self._status(client, method, Origin="HTTPS://TestServer") == 200
+        assert client.post("/me", headers={"Origin": "http://testserver"}).json() == {
+            "detail": "Forbidden"
+        }
 
     def test_safe_methods_are_not_checked(self):
         client = self._client(_signed_cookie_auth())
