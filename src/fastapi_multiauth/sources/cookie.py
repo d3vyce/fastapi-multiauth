@@ -5,7 +5,6 @@ import json
 import secrets
 from collections.abc import Callable, Sequence
 from typing import Any, Literal, NamedTuple
-from urllib.parse import urlsplit
 
 from fastapi import Response
 from fastapi.requests import HTTPConnection
@@ -61,14 +60,6 @@ def _normalize_origins(origins: Sequence[str]) -> frozenset[str]:
     return frozenset(
         normalize_origin(origin, "each trusted_origins entry") for origin in origins
     )
-
-
-def _origin_host(origin: str) -> str | None:
-    """The `host[:port]` of an `Origin` header, `None` when it has none."""
-    try:
-        return urlsplit(origin).netloc.lower() or None
-    except ValueError:
-        return None
 
 
 def _encode_assurance(acr: str | None, amr: Sequence[str] | None) -> str:
@@ -390,8 +381,9 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         if site is None:
             if origin is None:
                 raise refusal(ForbiddenError(), "missing_origin")
-            host = request.headers.get("host")
-            if host and _origin_host(origin) == host.lower():
+            host = request.headers.get("host", "").lower()
+            schemes = ("https",) if self._secure else ("https", "http")
+            if host and origin.lower() in {f"{s}://{host}" for s in schemes}:
                 return
         raise refusal(ForbiddenError(), "cross_origin")
 

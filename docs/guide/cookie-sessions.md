@@ -44,7 +44,7 @@ Browsers send cookies with every request to your site, whoever triggered it. `sa
 
 Every request except `GET`, `HEAD` and `OPTIONS` must come from your own origin, or from one listed in `trusted_origins`. Anything else gets a **403** before your validator runs. A sibling subdomain counts as another origin.
 
-The check reads `Sec-Fetch-Site`, which browsers set and pages cannot forge, and falls back to comparing `Origin` with the `Host` header for older browsers. Behind a proxy, keep the `Host` header intact or list your public origin in `trusted_origins`.
+The check reads `Sec-Fetch-Site`, which browsers set and pages cannot forge, and falls back to comparing `Origin` with the `Host` header for older browsers: for a `Secure` cookie, that origin must be `https` too. Behind a proxy, keep the `Host` header intact or list your public origin in `trusted_origins`.
 
 !!! warning "Scripts and tests"
     A request carrying neither header is refused too. Every browser released since 2020 sends one, so only non-browser clients are affected: send `Sec-Fetch-Site: same-origin` from your tests, and give scripts a bearer token instead of a cookie. `authenticate()` called outside a request is refused as well. Pass `csrf=False` only for a cookie no browser carries.
