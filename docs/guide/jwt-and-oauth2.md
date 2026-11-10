@@ -40,7 +40,7 @@ A proof stays valid for `proof_max_age` (60 seconds). `replay_check` records eac
 !!! note "Bound tokens are refused as Bearer"
     A stolen bound token sent as `Bearer` would skip the proof, so `HTTPBearerAuth` and the OAuth 2.0 sources refuse an identity carrying `cnf.jkt`. This also holds with `claims_to_identity`: `JWTValidator` and `IntrospectionValidator` report the binding of the claims they verified. With your own validator, keep `cnf` in the identity or refuse bound tokens there. Pass `allow_dpop_bound=True` to accept them anyway.
 
-Behind a proxy that changes the scheme or host, pass `public_origin="https://api.example.com"`: the proof names the URL the client called. With `claims_to_identity`, pass `jkt=` to read the thumbprint from your identity.
+Pass `public_origin="https://api.example.com"`, the scheme and host clients call. Without it the URL is read from the request, `Host` header included: behind a proxy that changes either, every proof is refused, and on a server answering any `Host`, a proof signed for another service accepting the same token would pass here. With `claims_to_identity`, pass `jkt=` to read the thumbprint from your identity.
 
 ## Opaque tokens
 
