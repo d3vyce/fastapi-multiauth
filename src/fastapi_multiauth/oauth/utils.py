@@ -180,9 +180,12 @@ def oauth_decode_state(
         The destination, or `fallback`.
 
     Raises:
+        TypeError: If `allowed_hosts` is a bare string.
         OAuthStateError: If no token was stored, or `state` is missing,
             malformed or carries another token. Do not exchange the code.
     """
+    if isinstance(allowed_hosts, str):
+        raise TypeError("allowed_hosts must be a sequence of hosts, not a string")
     if not expected_state_token:
         raise OAuthStateError("no state token was stored for this session")
     payload = _verified_payload(state, expected_state_token)
