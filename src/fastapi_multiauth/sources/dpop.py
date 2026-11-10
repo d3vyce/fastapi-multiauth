@@ -110,8 +110,10 @@ class HTTPDPoPAuth(ValidatedAuthSource):
         proof_max_age: How old a proof may be, in seconds.
         leeway: Clock-skew tolerance in seconds for the proof's `iat`.
         public_origin: The scheme and host clients call, e.g.
-            `"https://api.example.com"`, when a proxy changes them; the
-            URL the request arrived on otherwise.
+            `"https://api.example.com"`. Set it in production: without it
+            the URL is read from the request, whose `Host` header the caller
+            chooses, so a proof signed for another service could be replayed
+            here.
         jkt: Sync or async callable taking the identity and returning the
             thumbprint the token is bound to. Defaults to reading
             `identity["cnf"]["jkt"]`, right when the identity is the claims.
