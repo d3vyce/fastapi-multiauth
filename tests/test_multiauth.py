@@ -2083,6 +2083,11 @@ class TestDecodeStateOpenRedirectGuard:
             state, expected_state_token=self.TOKEN, fallback="/fallback", **kwargs
         )
 
+    def test_a_bare_string_allowlist_is_refused(self):
+        """`hostname in "myapp.io"` would be a substring match: `app.io` passes."""
+        with pytest.raises(TypeError, match="not a string"):
+            self._decode("https://app.example.com/x", "app.example.com")
+
     def test_allowed_destinations(self):
         assert self._decode("/dashboard?tab=1", ()) == "/dashboard?tab=1"
         assert self._decode("/dashboard") == "/dashboard"
