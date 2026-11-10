@@ -1435,13 +1435,16 @@ class TestNoIdentity:
 
     @pytest.mark.anyio
     async def test_a_custom_source_cannot_return_none_either(self):
-        class _NoneAuth(_HeaderAuth):
+        class _NoneAuth(AuthSource):
+            async def extract(self, request) -> str | None:
+                return request.headers.get("X-Token") or None
+
             async def authenticate(self, credential: str) -> None:
                 return None
 
         request = _request(x_token="s3cr3t")
         with pytest.raises(UnauthorizedError):
-            await _NoneAuth(secret="s3cr3t").dispatch(request, [])
+            await _NoneAuth().dispatch(request, [])
         assert _AUTHENTICATED not in request.scope
 
 
