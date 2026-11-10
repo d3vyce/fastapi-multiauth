@@ -1,5 +1,6 @@
 """Tests for fastapi_multiauth."""
 
+import asyncio
 import base64
 import contextvars
 import hashlib
@@ -100,6 +101,7 @@ from fastapi_multiauth.oauth import (
 from fastapi_multiauth.oauth.id_token import _key_set as _id_key_set
 from fastapi_multiauth.sources.dpop import _jwk_thumbprint
 from fastapi_multiauth.utils import (
+    VerifiedBinding,
     ensure_async,
     first_use,
     record_verified_jkt,
@@ -7130,13 +7132,40 @@ class TestDPoP:
 
     def test_the_recorded_binding_is_the_last_verified_one(self):
         def verify_in_turn():
+            binding = VerifiedBinding()
+            verified_jkt.set(binding)
             seen = []
             for claims in [{"sub": "a"}, {"cnf": {"jkt": "k"}}, {"sub": "b"}]:
                 record_verified_jkt(claims)
-                seen.append(verified_jkt.get())
+                seen.append(binding.jkt)
             return seen
 
         assert contextvars.copy_context().run(verify_in_turn) == [None, "k", None]
+        record_verified_jkt({"cnf": {"jkt": "k"}})
+        assert verified_jkt.get() is None
+
+    def test_the_binding_survives_a_validator_running_elsewhere(self):
+        """A task or a thread copies the context: the binding must still come back."""
+        jwt_validator = JWTValidator(secret=JWT_SECRET)
+
+        async def in_a_task(token: str):
+            claims = await asyncio.create_task(jwt_validator(token))
+            return {"id": claims["sub"]}
+
+        async def gathered(token: str):
+            (claims,) = await asyncio.gather(jwt_validator(token))
+            return {"id": claims["sub"]}
+
+        def in_a_thread(token: str):
+            return {"id": asyncio.run(jwt_validator(token))["sub"]}
+
+        token = self._token()
+        for validator in [in_a_task, gathered, in_a_thread]:
+            bearer = _client(HTTPBearerAuth(validator))
+            response = self._get(bearer, token, None, scheme="Bearer")
+            assert response.status_code == 401, validator.__name__
+            response = self._get(bearer, _hs_token(), None, scheme="Bearer")
+            assert response.status_code == 200, validator.__name__
 
     def test_a_proof_checked_twice_in_one_request_is_not_a_replay(self):
         seen, remember = _replay_store()

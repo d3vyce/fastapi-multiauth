@@ -10,7 +10,13 @@ from fastapi.security import HTTPBearer
 from fastapi_multiauth.exceptions import UnauthorizedError
 
 from ..abc import ValidatedAuthSource
-from ..utils import authorization_credential, claims_jkt, refusal, verified_jkt
+from ..utils import (
+    VerifiedBinding,
+    authorization_credential,
+    claims_jkt,
+    refusal,
+    verified_jkt,
+)
 
 
 class _BearerSource(ValidatedAuthSource):
@@ -64,14 +70,15 @@ class _BearerSource(ValidatedAuthSource):
         """
         if self._prefix is not None and not credential.startswith(self._prefix):
             raise UnauthorizedError()
-        marker = verified_jkt.set(None)
+        binding = VerifiedBinding()
+        marker = verified_jkt.set(binding)
         try:
             identity = await self._call_validator(
                 credential, scopes=scopes, request=request
             )
-            bound = verified_jkt.get() or claims_jkt(identity)
         finally:
             verified_jkt.reset(marker)
+        bound = binding.jkt or claims_jkt(identity)
         if not self._allow_dpop_bound and bound is not None:
             raise refusal(UnauthorizedError(), "dpop_bound")
         return identity

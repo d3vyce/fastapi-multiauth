@@ -335,21 +335,32 @@ def claims_jkt(identity: Any) -> Any:
     return cnf.get("jkt")
 
 
-verified_jkt: ContextVar[Any] = ContextVar(
+class VerifiedBinding:
+    """Where library validators report the `cnf.jkt` of the claims they verify."""
+
+    __slots__ = ("jkt",)
+
+    def __init__(self) -> None:
+        self.jkt: Any = None
+
+
+verified_jkt: ContextVar[VerifiedBinding | None] = ContextVar(
     "fastapi_multiauth.verified_jkt", default=None
 )
-"""The `cnf.jkt` of the claims a library validator verified last in this context.
+"""The binding a bearer source is waiting on, `None` outside one.
 
-Set before `claims_to_identity` runs, so a bearer source still sees the
-binding when the identity no longer carries the claims.
+A validator writes into the object rather than setting the variable: tasks
+and threads started by a caller's own validator copy the context, and still
+share the object. It is written before `claims_to_identity` runs, so the
+source sees the binding when the identity no longer carries the claims.
 """
 
 
 def record_verified_jkt(claims: Mapping[str, Any]) -> None:
-    """Record the `cnf.jkt` of verified claims in `verified_jkt`."""
-    jkt = claims_jkt(claims) if "cnf" in claims else None
-    if jkt is not None or verified_jkt.get() is not None:
-        verified_jkt.set(jkt)
+    """Record the `cnf.jkt` of verified claims, the last verified ones winning."""
+    binding = verified_jkt.get()
+    if binding is not None:
+        binding.jkt = claims_jkt(claims) if "cnf" in claims else None
 
 
 def finite_number(value: Any) -> float | None:
