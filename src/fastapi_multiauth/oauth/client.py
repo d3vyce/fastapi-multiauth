@@ -6,11 +6,11 @@ from typing import Any, Literal, NamedTuple
 from urllib.parse import urlsplit
 
 import httpx
-from async_lru import alru_cache
 
 from .._http import DEFAULT_TIMEOUT, _get_json, _require_https
 from .._imports import require_extra
 from ..exceptions import OAuthDiscoveryError, OAuthExchangeError, OAuthUserinfoError
+from ..utils import SingleFlight, TTLCache
 
 __all__ = [
     "OIDCEndpoints",
@@ -21,6 +21,7 @@ __all__ = [
 
 _DISCOVERY_SUFFIX = "/.well-known/openid-configuration"
 _DISCOVERY_CACHE_TTL = 3600
+_DISCOVERY_CACHE_SIZE = 32
 
 TokenEndpointAuthMethod = Literal["client_secret_post", "client_secret_basic"]
 
@@ -114,7 +115,15 @@ def _oauth2_client_class() -> type:
     return _TimeoutOAuth2
 
 
-@alru_cache(maxsize=32, ttl=_DISCOVERY_CACHE_TTL)
+_discovery_cache = TTLCache(_DISCOVERY_CACHE_SIZE)
+_discovery_flights = SingleFlight()
+
+
+def _clear_discovery_cache() -> None:
+    """Forget every cached discovery document."""
+    _discovery_cache.clear()
+
+
 async def oauth_resolve_provider_urls(
     discovery_url: str,
     timeout: float = DEFAULT_TIMEOUT,
@@ -138,6 +147,24 @@ async def oauth_resolve_provider_urls(
             ones only pass from a loopback discovery URL), or names another
             issuer.
     """
+    key = (discovery_url, timeout)
+
+    async def fetch() -> OIDCEndpoints:
+        endpoints = await _fetch_provider_urls(discovery_url, timeout)
+        _discovery_cache.put(key, endpoints, _DISCOVERY_CACHE_TTL)
+        return endpoints
+
+    cached = _discovery_cache.get(key)
+    if cached is not None:
+        return cached
+    return await _discovery_flights.run(key, fetch)
+
+
+setattr(oauth_resolve_provider_urls, "cache_clear", _clear_discovery_cache)  # noqa: B010
+
+
+async def _fetch_provider_urls(discovery_url: str, timeout: float) -> OIDCEndpoints:
+    """Fetch and check one discovery document."""
     _require_https(discovery_url, "OIDC discovery URL")
     cfg = await _get_json(
         discovery_url,

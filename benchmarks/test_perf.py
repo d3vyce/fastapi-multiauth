@@ -221,7 +221,7 @@ def test_jwt_es256_jwks_validate(benchmark):
 
 
 def test_introspection_cache_hit(benchmark):
-    """Opaque token already introspected: the hash and LRU lookup every request pays."""
+    """Opaque token already introspected: the hash and cache lookup every request pays."""
 
     def provider(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

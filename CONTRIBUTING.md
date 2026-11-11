@@ -26,7 +26,7 @@ uv run ty check
 uv run pytest
 ```
 
-CI also runs the tests on Python 3.11 to 3.15, and against the oldest FastAPI release the project supports (0.123.0).
+CI also runs the tests on Python 3.11 to 3.15, on the free-threaded 3.14t and 3.15t builds, and against the oldest FastAPI release the project supports (0.123.0).
 
 ## Tests
 

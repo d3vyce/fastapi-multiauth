@@ -4,18 +4,18 @@ import base64
 import copy
 import logging
 import time
-from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from typing import Any, ClassVar
 from urllib.parse import quote_plus
 
-import anyio
 import httpx
 
 from ._http import DEFAULT_TIMEOUT, _request_json, _require_https
 from .exceptions import UnauthorizedError
 from .jwt import AnyAudience
 from .utils import (
+    SingleFlight,
+    TTLCache,
     ensure_async,
     finite_number,
     hash_token,
@@ -51,15 +51,6 @@ class _Answer:
         for name in self.nested:
             copied[name] = copy.deepcopy(self.claims[name])
         return copied
-
-
-class _Lookup:
-    """One introspection in flight, awaited by every request carrying its token."""
-
-    def __init__(self) -> None:
-        self.done = anyio.Event()
-        self.answer: _Answer | None = None
-        self.error: Exception | None = None
 
 
 def _basic_authorization(client_id: str, client_secret: str) -> str:
@@ -153,9 +144,8 @@ class IntrospectionValidator:
             ensure_async(claims_to_identity) if claims_to_identity else None
         )
         self._cache_ttl = cache_ttl
-        self._cache_size = cache_size
-        self._cache: OrderedDict[str, tuple[float, _Answer]] = OrderedDict()
-        self._lookups: dict[str, _Lookup] = {}
+        self._cache = TTLCache(cache_size)
+        self._lookups = SingleFlight()
         self._timeout = timeout
         self._client = client
 
@@ -168,7 +158,9 @@ class IntrospectionValidator:
             HTTPException: 503 if the introspection endpoint cannot be used.
         """
         key = hash_token(token)
-        answer = self._cached(key) or await self._lookup(token, key)
+        answer = self._cache.get(key) or await self._lookups.run(
+            key, lambda: self._lookup(token, key)
+        )
         claims = answer.copy()
         if scopes:
             require_scopes(claims, self._scopes_claim, scopes)
@@ -178,26 +170,11 @@ class IntrospectionValidator:
         return claims
 
     async def _lookup(self, token: str, key: str) -> _Answer:
-        """The answer for `token`, from the introspection in flight or a new one."""
-        while (lookup := self._lookups.get(key)) is not None:
-            await lookup.done.wait()
-            if lookup.error is not None:
-                raise copy.copy(lookup.error)
-            if lookup.answer is not None:
-                return lookup.answer
-        lookup = self._lookups[key] = _Lookup()
-        try:
-            claims = await self._introspect(token)
-            self._check_claims(claims)
-            answer = _Answer(claims)
-            self._store(key, answer)
-            lookup.answer = answer
-        except Exception as exc:
-            lookup.error = exc
-            raise
-        finally:
-            del self._lookups[key]
-            lookup.done.set()
+        """Introspect `token`, check its claims and cache the answer."""
+        claims = await self._introspect(token)
+        self._check_claims(claims)
+        answer = _Answer(claims)
+        self._store(key, answer)
         return answer
 
     async def _introspect(self, token: str) -> dict[str, Any]:
@@ -258,27 +235,11 @@ class IntrospectionValidator:
         if self._issuer is not None and claims.get("iss") != self._issuer:
             raise refusal(UnauthorizedError(), "invalid_issuer")
 
-    def _cached(self, key: str) -> _Answer | None:
-        """A cached answer still within its lifetime, `None` otherwise."""
-        entry = self._cache.get(key)
-        if entry is None:
-            return None
-        expires_at, answer = entry
-        if time.monotonic() >= expires_at:
-            del self._cache[key]
-            return None
-        self._cache.move_to_end(key)
-        return answer
-
     def _store(self, key: str, answer: _Answer) -> None:
         """Cache an active answer for `cache_ttl`, never past the token's `exp`."""
         ttl = self._cache_ttl
         exp = finite_number(answer.claims.get("exp"))
         if exp is not None:
             ttl = min(ttl, exp - time.time())
-        if ttl <= 0:
-            return
-        self._cache[key] = (time.monotonic() + ttl, answer)
-        self._cache.move_to_end(key)
-        while len(self._cache) > self._cache_size:
-            self._cache.popitem(last=False)
+        if ttl > 0:
+            self._cache.put(key, answer, ttl)
