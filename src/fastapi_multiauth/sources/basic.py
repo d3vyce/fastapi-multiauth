@@ -43,6 +43,8 @@ class HTTPBasicAuth(ValidatedAuthSource):
         **kwargs: Keyword arguments passed to the validator on every call.
     """
 
+    authorization_scheme = "basic"
+
     def __init__(
         self,
         validator: Callable[..., Any],

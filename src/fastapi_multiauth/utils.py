@@ -8,6 +8,7 @@ import hmac
 import inspect
 import logging
 import math
+import re
 import secrets
 import string
 import threading
@@ -554,6 +555,19 @@ def step_up_challenge(
         params.append(f'max_age="{max(1, int(max_age))}"')
     separator = ", " if " " in challenge else " "
     return challenge_headers(f"{challenge}{separator}{', '.join(params)}")
+
+
+_SCHEME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+
+
+def authorization_scheme(request: HTTPConnection) -> str | None:
+    """Return the lowercased scheme of the `Authorization` header, `None` without one.
+
+    The scheme is the leading run of token characters (RFC 7230 §3.2.6),
+    whatever follows it.
+    """
+    match = _SCHEME.match(request.headers.get("Authorization", ""))
+    return match.group().lower() if match else None
 
 
 def authorization_credential(request: HTTPConnection, scheme: str) -> str | None:

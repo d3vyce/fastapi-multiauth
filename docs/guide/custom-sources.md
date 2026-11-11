@@ -20,4 +20,6 @@ When no built-in source reads your credential, subclass [`AuthSource`][fastapi_m
 
 The scheme passed to `super().__init__()` is only used for OpenAPI. Your source works with `MultiAuth`, `optional()`, WebSockets, logging and auditing like the built-in ones.
 
+If your source reads the `Authorization` header, set the class attribute `authorization_scheme` to the scheme it reads, lowercased, such as `"bearer"`, or to `"*"` for any scheme. `MultiAuth` then refuses a header of that scheme that no source takes, instead of using the cookie sent alongside it. Without it, a token your source takes is refused when a built-in source of the same scheme, such as a prefixed `HTTPBearerAuth`, is combined with it and does not take that token.
+
 To check [scopes](scopes.md), override `authenticate_scoped()`, keeping its keyword-only `request` parameter. To use [`fresh()`](step-up.md) or [`stepped_up()`](step-up.md#strong-login-stepped_up) without a reader, override `authenticated_at()` or `authenticated_acr()`. See the [API reference](../reference.md#fastapi_multiauth.AuthSource).

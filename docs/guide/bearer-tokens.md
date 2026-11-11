@@ -19,7 +19,7 @@ icon: lucide/key-round
 
 ## Prefixes
 
-`prefix="user_"` makes the source only accept tokens starting with `user_`. The check is a string comparison made before your validator runs, so a token with the wrong prefix is refused without hashing it or querying the database. Under `MultiAuth`, it counts as no credential for that source and the next source is tried.
+`prefix="user_"` makes the source only accept tokens starting with `user_`. The check is a string comparison made before your validator runs, so a token with the wrong prefix is refused without hashing it or querying the database. Under `MultiAuth`, it counts as no credential for that source and the next source is tried. If no source takes it, the request is refused, even with a valid cookie.
 
 Give each kind of token its own prefix and source, and combine them with [`MultiAuth`](multiauth.md): each validator only ever sees its own tokens. Prefixes also help secret scanners spot leaked tokens.
 
