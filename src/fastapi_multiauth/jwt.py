@@ -2,16 +2,18 @@
 
 import enum
 import logging
+import threading
 import time
 from collections.abc import Callable, Sequence
 from typing import Any, ClassVar
 
-import anyio
+from anyio.lowlevel import current_token
 
 from ._http import DEFAULT_TIMEOUT, _get_json, _require_https
 from ._imports import require_extra
 from .exceptions import UnauthorizedError
 from .utils import (
+    SingleFlight,
     ensure_async,
     record_verified_jkt,
     refusal,
@@ -118,9 +120,10 @@ class _JWKSKeySet:
         self._refresh_cooldown = refresh_cooldown
         self._timeout = timeout
         self._keys: dict[str, Any] = {}
-        self._fetched_at = 0.0
-        self._attempted_at = float("-inf")
-        self._refresh_lock = anyio.Lock()
+        self._fetched_at = float("-inf")
+        self._attempts: dict[Any, float] = {}
+        self._lock = threading.Lock()
+        self._refreshes = SingleFlight()
 
     async def key_for_token(self, token: str) -> Any:
         """The key that signed `token`, found by its header `kid`.
@@ -159,27 +162,42 @@ class _JWKSKeySet:
     async def _refresh(self, force: bool = False) -> None:
         """Refetch the JWKS, coalescing concurrent and repeated refreshes.
 
-        At most one attempt per `refresh_cooldown`; a failed fetch falls
+        Requests on one event loop share its refresh in flight. Each loop
+        attempts at most one fetch per `refresh_cooldown`, and none within
+        it of a fetch that succeeded on any loop; a failed fetch falls
         back on cached keys, or raises when the cache is empty.
         """
-        async with self._refresh_lock:
-            # Re-check after acquiring: another request may just have tried.
-            if time.monotonic() - self._attempted_at < self._refresh_cooldown:
-                if not self._keys:
-                    raise _JWKSUnavailable()
-                return
-            if not force and not self._cache_stale():
-                return
-            self._attempted_at = time.monotonic()
-            try:
-                await self._fetch()
-            except _JWKSFetchError as exc:
-                logger.warning("JWKS refresh failed: %s", exc)
-                if not self._keys:
-                    raise _JWKSUnavailable() from exc
-                # Stale fallback: keep validating with the cached keys.
+        loop = current_token()
+        await self._refreshes.run(None, lambda: self._attempt(loop, force))
+
+    async def _attempt(self, loop: Any, force: bool) -> None:
+        if not self._claim_attempt(loop, force):
+            if not self._keys:
+                raise _JWKSUnavailable()
+            return
+        try:
+            await self._fetch()
+        except _JWKSFetchError as exc:
+            logger.warning("JWKS refresh failed: %s", exc)
+            if not self._keys:
+                raise _JWKSUnavailable() from exc
+
+    def _claim_attempt(self, loop: Any, force: bool) -> bool:
+        """Whether `loop` may fetch now, recording the attempt when it may."""
+        now = time.monotonic()
+        cooldown = self._refresh_cooldown
+        with self._lock:
+            last = max(self._fetched_at, self._attempts.get(loop, float("-inf")))
+            if now - last < cooldown or not (force or self._cache_stale()):
+                return False
+            self._attempts = {
+                seen: at for seen, at in self._attempts.items() if now - at < cooldown
+            }
+            self._attempts[loop] = now
+            return True
 
     async def _fetch(self) -> None:
+        started = time.monotonic()
         document = await _get_json(
             self._url,
             timeout=self._timeout,
@@ -221,8 +239,10 @@ class _JWKSKeySet:
                 f"JWKS document has no usable signing key "
                 f"({len(document['keys'])} entries)"
             )
-        self._keys = keys
-        self._fetched_at = time.monotonic()
+        with self._lock:
+            if started >= self._fetched_at:
+                self._keys = keys
+                self._fetched_at = started
 
 
 class JWTValidator:

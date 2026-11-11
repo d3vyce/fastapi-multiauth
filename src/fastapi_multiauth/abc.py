@@ -208,10 +208,13 @@ def _carry_scheme(dependency: Any, scheme: SecurityBase) -> None:
     cls = type(dependency)
     promoted = _SCHEME_CLASSES.get(cls)
     if promoted is None:
-        promoted = _SCHEME_CLASSES[cls] = type(
-            cls.__name__,
-            (cls, SecurityBase),
-            {"__module__": cls.__module__, "__doc__": cls.__doc__},
+        promoted = _SCHEME_CLASSES.setdefault(
+            cls,
+            type(
+                cls.__name__,
+                (cls, SecurityBase),
+                {"__module__": cls.__module__, "__doc__": cls.__doc__},
+            ),
         )
     dependency.__class__ = promoted
     dependency.model = scheme.model

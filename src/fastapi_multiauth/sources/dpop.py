@@ -6,6 +6,7 @@ import hmac
 import json
 import re
 import string
+import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
@@ -176,6 +177,7 @@ class HTTPDPoPAuth(ValidatedAuthSource):
         )
         self._jkt = ensure_async(jkt) if jkt else None
         self._keys: OrderedDict[tuple[str, str], Any] = OrderedDict()
+        self._keys_lock = threading.Lock()
         super().__init__(
             validator,
             HTTPBase(
@@ -243,11 +245,11 @@ class HTTPDPoPAuth(ValidatedAuthSource):
         )
 
     def _remember_key(self, cache_key: tuple[str, str], key: Any) -> None:
-        """Remember the parsed key of a verified proof, by thumbprint and algorithm."""
-        self._keys[cache_key] = key
-        self._keys.move_to_end(cache_key)
-        if len(self._keys) > _KEY_CACHE_SIZE:
-            self._keys.popitem(last=False)
+        """Remember the parsed key of a verified proof, evicting the oldest past the size."""
+        with self._keys_lock:
+            self._keys[cache_key] = key
+            if len(self._keys) > _KEY_CACHE_SIZE:
+                self._keys.popitem(last=False)
 
     def _verify_proof(
         self, token: str, request: HTTPConnection | None
@@ -280,7 +282,8 @@ class HTTPDPoPAuth(ValidatedAuthSource):
             raise self._proof_error("invalid_dpop_proof")
         cache_key = (thumbprint, alg)
         try:
-            key = self._keys.get(cache_key) or self._jwt.PyJWK(jwk, algorithm=alg)
+            cached = self._keys.get(cache_key)
+            key = cached or self._jwt.PyJWK(jwk, algorithm=alg)
             claims = self._jwt.decode(
                 proofs[0],
                 key=key,
@@ -294,7 +297,8 @@ class HTTPDPoPAuth(ValidatedAuthSource):
             )
         except (self._jwt.exceptions.PyJWTError, TypeError, ValueError):
             raise self._proof_error("invalid_dpop_proof") from None
-        self._remember_key(cache_key, key)
+        if cached is None:
+            self._remember_key(cache_key, key)
         now = time.time()
         iat = finite_number(claims["iat"])
         if iat is None or not (

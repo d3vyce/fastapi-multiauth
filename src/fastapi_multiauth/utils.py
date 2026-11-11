@@ -1,6 +1,7 @@
 """Standalone helpers: public token utilities plus internal source helpers."""
 
 import base64
+import copy
 import functools
 import hashlib
 import hmac
@@ -9,15 +10,19 @@ import logging
 import math
 import secrets
 import string
+import threading
 import time
 import zlib
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any, TypeVar
 from urllib.parse import urlsplit
 
+import anyio
 import anyio.to_thread
+from anyio.lowlevel import current_token
 from fastapi import HTTPException, status
 from fastapi.requests import HTTPConnection
 
@@ -313,6 +318,93 @@ def ensure_async(fn: Callable[..., Any]) -> Callable[..., Any]:
         return result
 
     return wrapper
+
+
+class _Flight:
+    """One call in flight and its outcome."""
+
+    __slots__ = ("done", "error", "landed", "result")
+
+    def __init__(self) -> None:
+        self.done = anyio.Event()
+        self.error: Exception | None = None
+        self.landed = False
+        self.result: Any = None
+
+
+class SingleFlight:
+    """Calls in flight, one per key and event loop, shared by the requests awaiting them.
+
+    A request on another event loop makes its own call: nothing waits
+    across threads.
+    """
+
+    def __init__(self) -> None:
+        self._flights: dict[tuple[Any, Any], _Flight] = {}
+
+    async def run(self, key: Any, call: Callable[[], Awaitable[Any]]) -> Any:
+        """The outcome of `call()`, or of the call already in flight for `key`.
+
+        A failure is raised to the requests sharing it as a copy.
+        """
+        slot = (current_token(), key)
+        while (flight := self._flights.get(slot)) is not None:
+            await flight.done.wait()
+            if flight.error is not None:
+                raise copy.copy(flight.error)
+            if flight.landed:
+                return flight.result
+        flight = self._flights[slot] = _Flight()
+        try:
+            flight.result = await call()
+            flight.landed = True
+        except Exception as exc:
+            flight.error = exc
+            raise
+        finally:
+            del self._flights[slot]
+            flight.done.set()
+        return flight.result
+
+
+class TTLCache:
+    """A bounded cache of expiring entries, safe to share across threads.
+
+    A read takes no lock. The entry stored first is evicted first.
+    """
+
+    def __init__(self, size: int) -> None:
+        self._size = size
+        self._entries: OrderedDict[Any, tuple[float, Any]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def get(self, key: Any) -> Any | None:
+        """The value stored for `key`, `None` when absent or expired."""
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        expires_at, value = entry
+        if time.monotonic() >= expires_at:
+            with self._lock:
+                self._entries.pop(key, None)
+            return None
+        return value
+
+    def put(self, key: Any, value: Any, ttl: float) -> None:
+        """Store `value` for `ttl` seconds, evicting the oldest entries past the size."""
+        with self._lock:
+            self._entries[key] = (time.monotonic() + ttl, value)
+            self._entries.move_to_end(key)
+            while len(self._entries) > self._size:
+                self._entries.popitem(last=False)
+
+    def clear(self) -> None:
+        """Forget every entry."""
+        with self._lock:
+            self._entries.clear()
 
 
 def granted_scopes(claims: dict[str, Any], claim: str) -> set[str]:

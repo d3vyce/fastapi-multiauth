@@ -10,8 +10,12 @@ import logging
 import math
 import secrets
 import string
+import sys
+import sysconfig
+import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from enum import StrEnum
 from operator import itemgetter
@@ -19,6 +23,7 @@ from typing import Any, ClassVar, cast
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
+import anyio
 import httpx
 import jwt as pyjwt
 import pyotp
@@ -98,9 +103,11 @@ from fastapi_multiauth.oauth import (
     oauth_resolve_provider_urls,
     oauth_validate_id_token,
 )
+from fastapi_multiauth.oauth.client import _clear_discovery_cache
 from fastapi_multiauth.oauth.id_token import _key_set as _id_key_set
 from fastapi_multiauth.sources.dpop import _jwk_thumbprint
 from fastapi_multiauth.utils import (
+    TTLCache,
     VerifiedBinding,
     ensure_async,
     first_use,
@@ -1572,7 +1579,7 @@ class TestResolveProviderUrls:
         route = respx.get(DISCOVERY_URL)
 
         route.respond(json=_discovery_doc())
-        oauth_resolve_provider_urls.cache_clear()
+        _clear_discovery_cache()
         endpoints = await oauth_resolve_provider_urls(DISCOVERY_URL)
         assert isinstance(endpoints, OIDCEndpoints)
         assert endpoints.authorization_endpoint == "https://auth.example.com/authorize"
@@ -1589,7 +1596,7 @@ class TestResolveProviderUrls:
                 end_session_endpoint="https://auth.example.com/logout",
             )
         )
-        oauth_resolve_provider_urls.cache_clear()
+        _clear_discovery_cache()
         endpoints = await oauth_resolve_provider_urls(DISCOVERY_URL)
         assert endpoints.jwks_uri == "https://auth.example.com/jwks"
         assert endpoints.end_session_endpoint == "https://auth.example.com/logout"
@@ -1600,7 +1607,7 @@ class TestResolveProviderUrls:
     async def test_caches_discovery_document(self):
         route = respx.get(DISCOVERY_URL).respond(json=_discovery_doc())
 
-        oauth_resolve_provider_urls.cache_clear()
+        _clear_discovery_cache()
         await oauth_resolve_provider_urls(DISCOVERY_URL)
         await oauth_resolve_provider_urls(DISCOVERY_URL)
 
@@ -1629,7 +1636,7 @@ class TestResolveProviderUrls:
             ),
         ]:
             route.mock(side_effect=[response])
-            oauth_resolve_provider_urls.cache_clear()
+            _clear_discovery_cache()
             with pytest.raises(OAuthDiscoveryError, match=match):
                 await oauth_resolve_provider_urls(DISCOVERY_URL)
 
@@ -1662,7 +1669,7 @@ class TestOAuthHttpsEnforcement:
     @respx.mock
     async def test_http_discovery_url_rejected_before_fetch(self):
         # No respx routes are registered: any HTTP request would error out.
-        oauth_resolve_provider_urls.cache_clear()
+        _clear_discovery_cache()
         with pytest.raises(ValueError, match="discovery URL must use https"):
             await oauth_resolve_provider_urls(
                 "http://auth.example.com/.well-known/openid-configuration"
@@ -1686,7 +1693,7 @@ class TestOAuthHttpsEnforcement:
                     **{endpoint: "http://attacker.example.com/endpoint"}
                 )
             )
-            oauth_resolve_provider_urls.cache_clear()
+            _clear_discovery_cache()
             with pytest.raises(OAuthDiscoveryError, match=f"{endpoint} must use https"):
                 await oauth_resolve_provider_urls(DISCOVERY_URL)
 
@@ -1697,7 +1704,7 @@ class TestOAuthHttpsEnforcement:
         for endpoint in ["token_endpoint", "userinfo_endpoint", "jwks_uri"]:
             for url in ["http://127.0.0.1:8080/x", "http://localhost/x"]:
                 route.respond(json=_discovery_doc(**{endpoint: url}))
-                oauth_resolve_provider_urls.cache_clear()
+                _clear_discovery_cache()
                 with pytest.raises(
                     OAuthDiscoveryError, match=f"{endpoint} must use https"
                 ):
@@ -1722,7 +1729,7 @@ class TestOAuthHttpsEnforcement:
                 }
             )
 
-            oauth_resolve_provider_urls.cache_clear()
+            _clear_discovery_cache()
             endpoints = await oauth_resolve_provider_urls(
                 f"http://{host}:8080/.well-known/openid-configuration"
             )
@@ -1751,7 +1758,7 @@ class TestOAuthHttpsEnforcement:
         ]:
             with respx.mock:
                 respx.get(url).respond(json=doc)
-                oauth_resolve_provider_urls.cache_clear()
+                _clear_discovery_cache()
                 with pytest.raises(OAuthDiscoveryError, match="issuer"):
                     await oauth_resolve_provider_urls(url)
 
@@ -1766,7 +1773,7 @@ class TestOAuthHttpsEnforcement:
         ]:
             with respx.mock:
                 respx.get(url).respond(json=doc)
-                oauth_resolve_provider_urls.cache_clear()
+                _clear_discovery_cache()
                 endpoints = await oauth_resolve_provider_urls(url)
             assert endpoints.token_endpoint == "https://auth.example.com/token"
             assert endpoints.issuer == doc["issuer"]
@@ -1779,19 +1786,19 @@ class TestOAuthHttpsEnforcement:
         route = respx.get(url)
 
         route.respond(json=_discovery_doc(issuer="https://unrelated.example.com"))
-        oauth_resolve_provider_urls.cache_clear()
+        _clear_discovery_cache()
         with pytest.raises(OAuthDiscoveryError, match="origin"):
             await oauth_resolve_provider_urls(url)
 
         no_issuer = _discovery_doc()
         del no_issuer["issuer"]
         route.respond(json=no_issuer)
-        oauth_resolve_provider_urls.cache_clear()
+        _clear_discovery_cache()
         with pytest.raises(OAuthDiscoveryError, match="issuer"):
             await oauth_resolve_provider_urls(url)
 
         route.respond(json=_discovery_doc(issuer="https://auth.example.com/t1"))
-        oauth_resolve_provider_urls.cache_clear()
+        _clear_discovery_cache()
         endpoints = await oauth_resolve_provider_urls(url)
         assert endpoints.issuer == "https://auth.example.com/t1"
 
@@ -6588,10 +6595,14 @@ class TestIntrospectionValidator:
             **overrides,
         }
 
-    def _validator(self, **kwargs) -> IntrospectionValidator:
+    @staticmethod
+    def _validator(**kwargs) -> IntrospectionValidator:
         kwargs.setdefault("audience", "my-api")
         return IntrospectionValidator(
-            url=self.URL, client_id="my-api", client_secret="api-secret", **kwargs
+            url=TestIntrospectionValidator.URL,
+            client_id="my-api",
+            client_secret="api-secret",
+            **kwargs,
         )
 
     @respx.mock
@@ -7695,3 +7706,277 @@ class TestSecurityLogging:
             ("jwks_unavailable", 503)
         ]
         self._assert_no_leak(token)
+
+
+_THREADS = 4
+
+
+def _in_threads(work: Callable[[int], Any]) -> list[Any]:
+    """Run `work(index)` in `_THREADS` threads at once, each result in order."""
+    barrier = threading.Barrier(_THREADS)
+
+    def run(index: int) -> Any:
+        barrier.wait()
+        return work(index)
+
+    with ThreadPoolExecutor(_THREADS) as pool:
+        return list(pool.map(run, range(_THREADS)))
+
+
+def _on_loops(call: Callable[[], Any], requests: int = 3) -> list[Any]:
+    """The outcomes of `requests` concurrent `call()`s on each of `_THREADS` event loops."""
+
+    async def one(outcomes: list[Any]) -> None:
+        try:
+            outcomes.append(await call())
+        except (HTTPException, OAuthDiscoveryError) as exc:
+            outcomes.append(exc)
+
+    async def main() -> list[Any]:
+        outcomes: list[Any] = []
+        with anyio.fail_after(10):
+            async with anyio.create_task_group() as group:
+                for _ in range(requests):
+                    group.start_soon(one, outcomes)
+        return outcomes
+
+    return [
+        outcome for loop in _in_threads(lambda _: anyio.run(main)) for outcome in loop
+    ]
+
+
+def _hammer(turn: Callable[[int, int], Any]) -> None:
+    """Await `turn(thread, count)` many times in a row on each of `_THREADS` event loops."""
+
+    async def main(thread: int) -> None:
+        for count in range(300):
+            await turn(thread, count)
+
+    _in_threads(lambda thread: anyio.run(main, thread))
+
+
+def _kid_token(key, kid: str) -> str:
+    return pyjwt.encode(_claims(), key, algorithm="RS256", headers={"kid": kid})
+
+
+class TestSharedAcrossThreads:
+    """One validator or source serving several threads, each with its own event loop."""
+
+    @staticmethod
+    def _jwks(monkeypatch, keys: list[dict] | None, delay: float = 0.05) -> list[str]:
+        """Serve `keys` as the JWKS, or fail when `None`; returns the fetch log."""
+        fetches: list[str] = []
+
+        async def get_json(url, *, error_cls, **kwargs):
+            fetches.append(url)
+            await anyio.sleep(delay)
+            if keys is None:
+                raise error_cls("provider down")
+            return {"keys": list(keys)}
+
+        monkeypatch.setattr("fastapi_multiauth.jwt._get_json", get_json)
+        return fetches
+
+    def test_jwks_cold_start(self, monkeypatch):
+        fetches = self._jwks(monkeypatch, [_jwk(_RSA_KEY_1, "key1")])
+        validator = _jwks_validator("https://idp.example.com/jwks")
+        token = _kid_token(_RSA_KEY_1, "key1")
+
+        answers = _on_loops(lambda: validator(token))
+
+        assert [claims["sub"] for claims in answers] == ["user-1"] * (_THREADS * 3)
+        assert 1 <= len(fetches) <= _THREADS
+
+    def test_jwks_cold_start_with_the_provider_down(self, monkeypatch):
+        fetches = self._jwks(monkeypatch, None)
+        validator = _jwks_validator("https://idp.example.com/jwks")
+        token = _kid_token(_RSA_KEY_1, "key1")
+
+        for _ in range(2):
+            refusals = _on_loops(lambda: validator(token))
+            assert [exc.status_code for exc in refusals] == [503] * (_THREADS * 3)
+        assert 1 <= len(fetches) <= _THREADS * 2
+
+    def test_jwks_unknown_kid_respects_the_cooldown(self, monkeypatch):
+        keys = [_jwk(_RSA_KEY_1, "key1")]
+        fetches = self._jwks(monkeypatch, keys, delay=0.01)
+        validator = _jwks_validator("https://idp.example.com/jwks")
+        anyio.run(validator, _kid_token(_RSA_KEY_1, "key1"))
+        junk = _kid_token(_RSA_KEY_2, "unknown")
+
+        for _ in range(3):
+            refusals = _on_loops(lambda: validator(junk))
+            assert [exc.status_code for exc in refusals] == [401] * (_THREADS * 3)
+        assert len(fetches) == 1
+
+        key_set = validator._key_set
+        assert key_set is not None
+        key_set._fetched_at -= 31
+        key_set._attempts.clear()
+        keys.append(_jwk(_RSA_KEY_2, "unknown"))
+        answers = _on_loops(lambda: validator(junk))
+        assert [claims["sub"] for claims in answers] == ["user-1"] * (_THREADS * 3)
+        assert 2 <= len(fetches) <= 1 + _THREADS
+
+    @pytest.mark.anyio
+    async def test_a_slower_older_jwks_never_replaces_a_newer_one(self, monkeypatch):
+        answers = [
+            (0.05, {"keys": [_jwk(_RSA_KEY_1, "old")]}),
+            (0.0, {"keys": [_jwk(_RSA_KEY_2, "new")]}),
+        ]
+
+        async def get_json(url, **kwargs):
+            delay, document = answers.pop(0)
+            await anyio.sleep(delay)
+            return document
+
+        monkeypatch.setattr("fastapi_multiauth.jwt._get_json", get_json)
+        key_set = _jwks_validator("https://idp.example.com/jwks")._key_set
+        assert key_set is not None
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(key_set._fetch)
+            await anyio.sleep(0.01)
+            group.start_soon(key_set._fetch)
+
+        assert list(key_set._keys) == ["new"]
+
+    def test_introspection_in_flight(self, monkeypatch):
+        lookups = []
+
+        async def request_json(method, url, **kwargs):
+            lookups.append(url)
+            await anyio.sleep(0.05)
+            return TestIntrospectionValidator._active()
+
+        monkeypatch.setattr(
+            "fastapi_multiauth.introspection._request_json", request_json
+        )
+        validator = TestIntrospectionValidator._validator()
+
+        answers = _on_loops(lambda: validator("opaque-token"))
+
+        assert [claims["sub"] for claims in answers] == ["user-1"] * (_THREADS * 3)
+        assert 1 <= len(lookups) <= _THREADS
+
+    def test_introspection_cache_eviction(self, monkeypatch):
+        async def request_json(method, url, **kwargs):
+            return TestIntrospectionValidator._active(sub=kwargs["data"]["token"])
+
+        monkeypatch.setattr(
+            "fastapi_multiauth.introspection._request_json", request_json
+        )
+        validator = TestIntrospectionValidator._validator(cache_size=2)
+
+        async def turn(thread: int, count: int) -> None:
+            token = f"token-{(count * (thread + 1)) % 6}"
+            assert (await validator(token))["sub"] == token
+
+        _hammer(turn)
+        assert len(validator._cache) <= 2
+
+    def test_dpop_key_cache_eviction(self, monkeypatch):
+        monkeypatch.setattr("fastapi_multiauth.sources.dpop._KEY_CACHE_SIZE", 1)
+        source = TestDPoP._source()
+        scopes = []
+        for key in (_EC_KEY, _EC_KEY_2):
+            token = TestDPoP._token(key)
+            scopes.append(
+                {
+                    "type": "http",
+                    "method": "GET",
+                    "scheme": "http",
+                    "path": "/me",
+                    "raw_path": b"/me",
+                    "query_string": b"",
+                    "root_path": "",
+                    "server": ("testserver", 80),
+                    "headers": [
+                        (b"authorization", f"DPoP {token}".encode()),
+                        (b"dpop", TestDPoP._proof(token, key).encode()),
+                    ],
+                }
+            )
+
+        async def turn(thread: int, count: int) -> None:
+            request = Request(dict(scopes[(count + thread) % 2]))
+            assert (await source.dispatch(request, []))["sub"] == "user-1"
+
+        _hammer(turn)
+        assert len(source._keys) == 1
+
+    def test_discovery(self, monkeypatch):
+        fetches = []
+
+        async def get_json(url, **kwargs):
+            fetches.append(url)
+            await anyio.sleep(0.05)
+            return _discovery_doc()
+
+        monkeypatch.setattr("fastapi_multiauth.oauth.client._get_json", get_json)
+        _clear_discovery_cache()
+
+        answers = _on_loops(lambda: oauth_resolve_provider_urls(DISCOVERY_URL))
+        _clear_discovery_cache()
+
+        assert [endpoints.issuer for endpoints in answers] == [
+            "https://auth.example.com"
+        ] * (_THREADS * 3)
+        assert 1 <= len(fetches) <= _THREADS
+
+    def test_discovery_with_the_provider_down(self, monkeypatch):
+        fetches = []
+
+        async def get_json(url, *, error_cls, **kwargs):
+            fetches.append(url)
+            await anyio.sleep(0.05)
+            raise error_cls("provider down")
+
+        monkeypatch.setattr("fastapi_multiauth.oauth.client._get_json", get_json)
+        _clear_discovery_cache()
+
+        failures = _on_loops(lambda: oauth_resolve_provider_urls(DISCOVERY_URL))
+
+        assert all(isinstance(exc, OAuthDiscoveryError) for exc in failures)
+        assert len(failures) == _THREADS * 3
+        assert 1 <= len(fetches) <= _THREADS
+
+    def test_the_discovery_cache_is_cleared_from_the_function(self):
+        assert (
+            vars(oauth_resolve_provider_urls)["cache_clear"] == _clear_discovery_cache
+        )
+
+
+class TestTTLCache:
+    def test_entries_expire(self):
+        cache = TTLCache(2)
+        cache.put("a", 1, 60)
+        assert cache.get("a") == 1
+        assert cache.get("b") is None
+        with patch("time.monotonic", return_value=time.monotonic() + 61):
+            assert cache.get("a") is None
+        assert len(cache) == 0
+
+    def test_the_entry_stored_first_is_evicted_first(self):
+        cache = TTLCache(2)
+        for key in ["a", "b", "a", "c"]:
+            cache.put(key, key, 60)
+        assert cache.get("b") is None
+        assert (cache.get("a"), cache.get("c")) == ("a", "c")
+        cache.clear()
+        assert len(cache) == 0
+
+
+@pytest.mark.skipif(
+    not sysconfig.get_config_var("Py_GIL_DISABLED"),
+    reason="needs a free-threaded Python build",
+)
+def test_free_threaded_build_keeps_the_gil_disabled():
+    import jwt.algorithms
+
+    import fastapi_multiauth.oauth
+    import fastapi_multiauth.totp  # noqa: F401
+
+    assert sys.version_info >= (3, 13)
+    assert jwt.algorithms.has_crypto
+    assert not sys._is_gil_enabled()

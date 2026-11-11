@@ -35,6 +35,7 @@ What the library takes care of, and what stays with you. To report a vulnerabili
 - **ID tokens are untrusted until validated** with `oauth_validate_id_token`.
 - **Introspection answers are cached.** A token revoked at the provider keeps working until its cached answer expires, `cache_ttl` seconds at most.
 - **The discovery URL is configuration.** Never build it from request input.
+- **Sources and validators can be shared across threads.** One instance can serve several threads, each with its own event loop, as on a free-threaded Python build. Requests on one loop share a provider fetch in flight; another loop makes its own. Your validators and `replay_check` run concurrently too, so keep them thread-safe.
 
 ## Status codes
 
