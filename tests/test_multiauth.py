@@ -105,6 +105,7 @@ from fastapi_multiauth.oauth import (
 )
 from fastapi_multiauth.oauth.client import _clear_discovery_cache
 from fastapi_multiauth.oauth.id_token import _key_set as _id_key_set
+from fastapi_multiauth.sources.cookie import _salt
 from fastapi_multiauth.sources.dpop import _jwk_thumbprint
 from fastapi_multiauth.utils import (
     TTLCache,
@@ -1156,6 +1157,43 @@ class TestCookieKeyRotation:
         signed = stock.sign(f".{VALID_COOKIE}".encode()).decode()
         with pytest.raises(UnauthorizedError):
             auth._verify(signed)
+
+    def test_a_name_ending_in_sid_is_not_the_session_id_layout_of_another(self):
+        """`auth` with session ids and a plain `auth.sid` never share a salt."""
+        plain = APIKeyCookieAuth("auth.sid", cookie_validator, secret_key=self.NEW)
+        with_sid = APIKeyCookieAuth(
+            "auth", sid_validator, secret_key=self.NEW, session_id=True
+        )
+        response = Response()
+        plain.set_cookie(response, "forged-sid.admin")
+        minted = _cookie_value(response)
+        assert plain._verify(minted) == "forged-sid.admin"
+        with pytest.raises(UnauthorizedError):
+            with_sid._verify(minted)
+
+        response = Response()
+        with_sid.set_cookie(response, VALID_COOKIE)
+        with pytest.raises(UnauthorizedError):
+            plain._verify(_cookie_value(response))
+
+    def test_only_a_plain_name_ending_in_sid_changes_salt(self):
+        """Every other cookie keeps the salt it was signed under."""
+        plain = APIKeyCookieAuth("session", cookie_validator, secret_key=self.NEW)
+        stock = _stock_signer(self.NEW, salt="session.v2")
+        signed = stock.sign(f".{VALID_COOKIE}".encode()).decode()
+        assert plain._verify(signed) == VALID_COOKIE
+        with_sid = APIKeyCookieAuth(
+            "session.sid", sid_validator, secret_key=self.NEW, session_id=True
+        )
+        stock = _stock_signer(self.NEW, salt="session.sid.sid.v2")
+        signed = stock.sign(f".abc.{VALID_COOKIE}".encode()).decode()
+        assert with_sid._verify(signed) == f"abc.{VALID_COOKIE}"
+        salts = {
+            _salt(name, session_id=sid)
+            for name in ["a", "a.sid", "a.sid.sid", "a.v2", "a.sid.v2"]
+            for sid in (False, True)
+        }
+        assert len(salts) == 10
 
 
 class TestSecurityScopes:
@@ -6637,6 +6675,108 @@ class TestHMACSignatureAuth:
                 assert response.status_code == 401, signature
         assert {r.auth_reason for r in caplog.records} == {"invalid_signature"}
 
+    @staticmethod
+    def _post(client: TestClient, path: str, body: bytes):
+        headers = {
+            "X-Hub-Signature-256": f"sha256={_hmac_hex(WEBHOOK_SECRET, body)}",
+            "Content-Type": "application/json",
+        }
+        return client.post(path, content=body, headers=headers)
+
+    def test_a_body_within_max_body_size_passes(self):
+        source = HMACSignatureAuth(WEBHOOK_SECRET, max_body_size=16, **self.GITHUB)
+        client = self._client(source)
+        assert self._post(client, "/hook", b"x" * 16).json() == {"body": "x" * 16}
+        typed = b'{"action":"go"}'
+        assert self._post(client, "/typed", typed).json() == {"action": "go"}
+
+    def test_a_body_over_max_body_size_is_refused(self, caplog):
+        caplog.set_level(logging.WARNING, logger="fastapi_multiauth")
+        source = HMACSignatureAuth(WEBHOOK_SECRET, max_body_size=16, **self.GITHUB)
+        client = self._client(source)
+        typed = b'{"action": "deploy"}'
+        for path, body in [("/hook", b"x" * 17), ("/typed", typed)]:
+            caplog.clear()
+            response = self._post(client, path, body)
+            assert response.status_code == 413, path
+            assert response.json() == {"detail": "Request body too large"}
+            assert [(r.auth_reason, r.auth_status) for r in caplog.records] == [
+                ("body_too_large", 413)
+            ], path
+
+    def test_a_declared_length_over_max_body_size_is_refused_unread(self):
+        source = HMACSignatureAuth(WEBHOOK_SECRET, max_body_size=16, **self.GITHUB)
+        client = self._client(source)
+        unread = AssertionError("the body must not be read")
+        with (
+            patch.object(Request, "stream", side_effect=unread),
+            patch.object(Request, "body", side_effect=unread),
+        ):
+            assert self._post(client, "/hook", b"x" * 17).status_code == 413
+
+    def test_a_body_without_a_length_stops_being_read_at_max_body_size(self):
+        source = HMACSignatureAuth(WEBHOOK_SECRET, max_body_size=16, **self.GITHUB)
+        app = FastAPI()
+
+        @app.post("/hook")
+        async def hook(request: Request, body: bytes = Security(source)):
+            return {"size": len(body), "again": len(await request.body())}
+
+        @app.post("/typed", dependencies=[Security(source)])
+        async def typed(event: dict[str, str]):
+            return event
+
+        async def post(chunks: list[bytes], path: str = "/hook") -> tuple[int, int]:
+            """Send `chunks` without a Content-Length: the status, and chunks read."""
+            pending = iter(chunks)
+            read = 0
+            sent: list[Any] = []
+
+            async def receive() -> dict[str, Any]:
+                nonlocal read
+                chunk = next(pending, None)
+                if chunk is None:
+                    return {"type": "http.request", "body": b"", "more_body": False}
+                read += 1
+                return {"type": "http.request", "body": chunk, "more_body": True}
+
+            async def send(message: Any) -> None:
+                sent.append(message)
+
+            signature = _hmac_hex(WEBHOOK_SECRET, b"".join(chunks))
+            scope = {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": path,
+                "raw_path": path.encode(),
+                "root_path": "",
+                "query_string": b"",
+                "server": ("testserver", 80),
+                "client": ("testclient", 1),
+                "headers": [
+                    (b"host", b"testserver"),
+                    (b"content-type", b"application/json"),
+                    (b"x-hub-signature-256", f"sha256={signature}".encode()),
+                ],
+            }
+            await app(scope, receive, send)
+            return sent[0]["status"], read
+
+        assert anyio.run(post, [b"x" * 8, b"x" * 8]) == (200, 2)
+        assert anyio.run(post, [b"x" * 8] * 100) == (413, 3)
+        # FastAPI reads a body parameter first: the limit can only refuse it.
+        assert anyio.run(post, [b'{"a":"b"}'], "/typed") == (200, 1)
+        assert anyio.run(post, [b'{"a":', b'"bbbbbbbbbbbb"}'], "/typed") == (413, 2)
+
+    def test_max_body_size_must_be_a_positive_integer(self):
+        sizes: list[Any] = [0, -1, 1.5, True, "16"]
+        for size in sizes:
+            with pytest.raises(ValueError, match="max_body_size"):
+                HMACSignatureAuth(WEBHOOK_SECRET, max_body_size=size, **self.GITHUB)
+
     def test_a_request_checked_twice_is_not_a_replay(self):
         seen, remember = _replay_store()
         source = HMACSignatureAuth(
@@ -7259,6 +7399,48 @@ class TestDPoP:
             ],
         )
         assert response.status_code == 401
+
+    def test_a_costly_rsa_proof_key_is_refused_unverified(self, caplog):
+        """The caller picks the key: an oversized one must not reach the verifier."""
+        caplog.set_level(logging.WARNING, logger="fastapi_multiauth")
+        client = _client(self._source())
+        jwk = _public_jwk(_RSA_KEY_1)
+
+        def member(size: int) -> str:
+            return base64.urlsafe_b64encode(b"\xff" * size).rstrip(b"=").decode()
+
+        token = self._token(_RSA_KEY_1)
+        proofs = {
+            "exponent": self._proof(
+                token, _RSA_KEY_1, alg="RS256", jwk={**jwk, "e": member(5)}
+            ),
+            "full-size exponent": self._proof(
+                token, _RSA_KEY_1, alg="RS256", jwk={**jwk, "e": jwk["n"]}
+            ),
+            "modulus": self._proof(
+                token, _RSA_KEY_1, alg="RS256", jwk={**jwk, "n": member(1025)}
+            ),
+        }
+        unverified = AssertionError("the proof must not be verified")
+        with patch.object(pyjwt, "decode", side_effect=unverified):
+            for case, proof in proofs.items():
+                caplog.clear()
+                response = self._get(client, token, proof)
+                assert response.status_code == 401, case
+                assert [r.auth_reason for r in caplog.records] == [
+                    "invalid_dpop_proof"
+                ], case
+
+    def test_rsa_proof_keys_up_to_8192_bits_pass(self):
+        key = rsa.generate_private_key(public_exponent=65537, key_size=8192)
+        client = _client(self._source())
+        token = self._token(key)
+        response = self._get(client, token, self._proof(token, key, alg="RS256"))
+        assert response.status_code == 200
+        assert _jwk_thumbprint({"kty": "RSA", "e": "AQAB", "n": "A" * 1366})
+        assert _jwk_thumbprint({"kty": "RSA", "e": "AQAB", "n": "A" * 1367}) is None
+        assert _jwk_thumbprint({"kty": "RSA", "e": "A" * 6, "n": "AA"})
+        assert _jwk_thumbprint({"kty": "RSA", "e": "A" * 7, "n": "AA"}) is None
 
     def test_the_token_must_be_bound_to_the_proof_key(self, caplog):
         caplog.set_level(logging.WARNING, logger="fastapi_multiauth")

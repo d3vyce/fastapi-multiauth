@@ -25,6 +25,8 @@ from ..utils import (
 
 _MIN_SECRET_KEY_BYTES = 32
 _SALT_PREFIX = "fastapi-multiauth.cookie."
+_PLAIN_SID_SALT_PREFIX = "fastapi-multiauth.cookie-plain."
+_SID_SUFFIX = ".sid"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _OPENED = "fastapi_multiauth.cookie"
 
@@ -101,6 +103,21 @@ class _Opened(NamedTuple):
     assurance: str
     value: str
     signed_at: float | None
+
+
+def _salt(name: str, *, session_id: bool) -> str:
+    """The signing salt binding a cookie to its name and payload layout.
+
+    A session-id cookie adds `.sid` to its name, which a plain cookie whose
+    name already ends in `.sid` would otherwise match: `auth` with session
+    ids and a plain `auth.sid` would accept each other's cookies. Such a
+    plain cookie is salted under a prefix no other salt starts with.
+    """
+    if session_id:
+        return f"{_SALT_PREFIX}{name}{_SID_SUFFIX}.v2"
+    if name.endswith(_SID_SUFFIX):
+        return f"{_PLAIN_SID_SALT_PREFIX}{name}.v2"
+    return f"{_SALT_PREFIX}{name}.v2"
 
 
 def _precomputed_signer(keys: list[str], salt: str) -> TimestampSigner:
@@ -204,7 +221,7 @@ class APIKeyCookieAuth(ValidatedAuthSource):
         # the last one, so reverse them to make the first configured key the signer.
         # The salt also separates the payload layouts.
         keys = list(reversed(self._secret_keys))
-        salt = f"{_SALT_PREFIX}{name}{'.sid' if session_id else ''}.v2"
+        salt = _salt(name, session_id=session_id)
         self._signer = _precomputed_signer(keys, salt) if keys else None
         self._ttl = ttl
         self._secure = secure

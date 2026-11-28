@@ -16,6 +16,12 @@ Form bodies are the exception: FastAPI consumes the raw body to parse `Form()` a
 
 A missing, malformed or wrong signature gets a **401**. Signatures are compared in constant time, and the secret must be at least 16 random bytes.
 
+## Body size
+
+The body has to be read before its signature can be checked, so anyone can make your app buffer a body of any size. Pass `max_body_size`, in bytes, to refuse a larger one with a **413**: a declared `Content-Length` over the limit is refused unread, and a body without one stops being read at the limit. Set it to what the sender documents, such as 25 MB for GitHub, unless your proxy already limits bodies.
+
+On a route that declares a body parameter, FastAPI reads the whole body before any dependency runs: the limit then refuses the request, but only a proxy limit keeps the body out of memory.
+
 ## Senders
 
 Senders differ in where they put the signature and what exactly they sign. Describe yours with the [constructor's arguments][fastapi_multiauth.HMACSignatureAuth]. Stripe and Slack, for instance:

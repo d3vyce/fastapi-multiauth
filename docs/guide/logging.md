@@ -39,6 +39,7 @@ Records never contain the credential, its hash, or the identity. Correlate with 
 | `expired` | a signed cookie past its `ttl`, a JWT past its `exp`, or a webhook timestamp outside its `tolerance` |
 | `malformed` | a Basic header, JWT header or webhook signature header that does not parse |
 | `replay` | a signed webhook sent a second time, with `replay_check` |
+| `body_too_large` | a signed webhook over its `max_body_size` (413) |
 | `stale` | outside the [`fresh()`](step-up.md#recent-login-fresh) window |
 | `insufficient_acr` | below the [`stepped_up()`](step-up.md#strong-login-stepped_up) level |
 | `cross_origin` | a cookie request from another origin, see [CSRF](cookie-sessions.md#csrf) (403) |

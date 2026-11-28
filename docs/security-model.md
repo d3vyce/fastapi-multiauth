@@ -25,6 +25,7 @@ What the library takes care of, and what stays with you. To report a vulnerabili
 - **Storage.** Hash passwords with argon2, scrypt or bcrypt. [`hash_token`][fastapi_multiauth.hash_token] (SHA-256) is for random tokens only.
 - **HTTPS** for your own app.
 - **TOTP secrets.** Encrypt them at rest: unlike a password, a TOTP secret cannot be stored as a hash. See the [two-factor recipe](recipes/two-factor.md).
+- **Body size limits.** Cap request bodies at your proxy. A webhook source only limits its own with [`max_body_size`](guide/webhooks.md#body-size).
 - **Rate limiting** on login, one-time code and token endpoints, with failed codes capped per account. Refusals are [logged](guide/logging.md) so you can act on them.
 - **CSRF** on cookie-authenticated routes where you pass [`csrf=False`](guide/cookie-sessions.md#csrf). Either way, keep `GET` routes free of side effects.
 
@@ -44,4 +45,5 @@ What the library takes care of, and what stays with you. To report a vulnerabili
 | 401 | no credential, or an invalid one; carries a `WWW-Authenticate` challenge where the scheme has one |
 | 401 `insufficient_user_authentication` | valid, but authenticated too long ago or too weakly ([step-up](guide/step-up.md)) |
 | 403 | authenticated, but not allowed, or sent from another origin ([CSRF](guide/cookie-sessions.md#csrf)) |
+| 413 | a signed webhook larger than its [`max_body_size`](guide/webhooks.md#body-size) |
 | 503 | a provider's keys cannot be fetched and none are cached, or its introspection endpoint is down; clients should retry |

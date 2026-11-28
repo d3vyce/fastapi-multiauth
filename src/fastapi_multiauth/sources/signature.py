@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.requests import HTTPConnection
 from fastapi.security import APIKeyHeader
 
@@ -33,6 +33,17 @@ _TIMESTAMP = "{timestamp}"
 def _malformed() -> UnauthorizedError:
     """The 401 for a signature header that does not parse."""
     return refusal(UnauthorizedError(), "malformed")
+
+
+def _too_large() -> HTTPException:
+    """The 413 for a body over `max_body_size`."""
+    return refusal(
+        HTTPException(
+            status_code=413,
+            detail="Request body too large",
+        ),
+        "body_too_large",
+    )
 
 
 def _split_template(signed_message: str, *, timestamped: bool) -> tuple[bytes, bytes]:
@@ -98,14 +109,22 @@ class HMACSignatureAuth(AuthSource):
             already recorded. It receives a SHA-256 digest of `scheme_name`
             and the signed message, the same whichever key signed it. Needs
             a timestamp.
+        max_body_size: Largest body accepted, in bytes; a larger one gets a
+            413. The body has to be read before its signature can be
+            checked, so without a limit anyone can make the app buffer a
+            body of any size. Set it to what the sender documents, unless
+            your proxy already limits bodies. On a route that declares a
+            body parameter FastAPI has read the body first: the limit then
+            only refuses it.
         scheme_name: Name of the security scheme in OpenAPI, `APIKeyHeader_{header}` by default.
         description: Description of the security scheme in OpenAPI.
 
     Raises:
         ValueError: On an invalid configuration, such as a short secret, a
             `tolerance` that is not positive, two timestamp sources, a
-            `signed_message` that leaves the timestamp unsigned, or a
-            `replay_check` without a timestamp.
+            `signed_message` that leaves the timestamp unsigned, a
+            `replay_check` without a timestamp, or a `max_body_size` that
+            is not a positive integer.
     """
 
     def __init__(
@@ -120,10 +139,18 @@ class HMACSignatureAuth(AuthSource):
         signed_message: str | None = None,
         tolerance: float = 300.0,
         replay_check: Callable[[str, float], Any] | None = None,
+        max_body_size: int | None = None,
         scheme_name: str | None = None,
         description: str | None = None,
     ) -> None:
         require_positive_seconds(tolerance, "tolerance")
+        if max_body_size is not None and (
+            isinstance(max_body_size, bool)
+            or not isinstance(max_body_size, int)
+            or max_body_size < 1
+        ):
+            raise ValueError("max_body_size must be a positive number of bytes")
+        self._max_body_size = max_body_size
         if signature_key is not None and prefix:
             raise ValueError(
                 "prefix and signature_key describe two header layouts: pass one"
@@ -230,6 +257,8 @@ class HMACSignatureAuth(AuthSource):
                 the timestamp is outside `tolerance` (`expired`), no
                 signature matches (`invalid_signature`), or `replay_check`
                 already saw it (`replay`).
+            HTTPException: 413 if the body is larger than `max_body_size`
+                (`body_too_large`).
             RuntimeError: If the route declares scopes, is a WebSocket, or
                 already consumed the body.
         """
@@ -263,7 +292,7 @@ class HMACSignatureAuth(AuthSource):
         if not candidates:  # refused before the body is read
             raise refusal(UnauthorizedError(), "invalid_signature")
         try:
-            body = await request.body()
+            body = await self._read_body(request)
         except RuntimeError as exc:
             raise RuntimeError(
                 f"{type(self).__name__} needs the raw body, but the route "
@@ -287,6 +316,37 @@ class HMACSignatureAuth(AuthSource):
                         raise refusal(UnauthorizedError(), "replay")
                 return body
         raise refusal(UnauthorizedError(), "invalid_signature")
+
+    async def _read_body(self, request: Request) -> bytes:
+        """The raw body, refused with a 413 once it passes `max_body_size`.
+
+        A declared `Content-Length` over the limit is refused unread, and a
+        body without one stops being read at the limit.
+
+        Raises:
+            RuntimeError: If the body stream was already consumed.
+        """
+        limit = self._max_body_size
+        if limit is None:
+            return await request.body()
+        declared = request.headers.get("content-length", "")
+        if declared.isascii() and declared.isdigit() and int(declared) > limit:
+            raise _too_large()
+        if hasattr(request, "_body"):  # FastAPI read it for a body parameter
+            body = await request.body()
+            if len(body) > limit:
+                raise _too_large()
+            return body
+        chunks: list[bytes] = []
+        size = 0
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > limit:
+                raise _too_large()
+            chunks.append(chunk)
+        # What Request.body() caches, so the route can still read the body.
+        body = request._body = b"".join(chunks)
+        return body
 
     def _enforces_scopes(self) -> bool:
         """A signature proves who sent the request, never what it may do."""

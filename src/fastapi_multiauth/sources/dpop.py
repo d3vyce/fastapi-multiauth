@@ -45,6 +45,11 @@ _PATH_SAFE = "/%:@!$&'()*+,;=-._~"
 _UNRESERVED = frozenset(string.ascii_letters + string.digits + "-._~")
 _PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
 _KEY_CACHE_SIZE = 1024
+# The caller picks the proof key, and the proof is verified before the token:
+# an RSA key with a huge modulus or public exponent makes each verification
+# cost many times a normal one. Lengths are of the base64url members.
+_MAX_RSA_MODULUS_CHARS = 1366  # 8192 bits
+_MAX_RSA_EXPONENT_CHARS = 6  # 4 bytes: 65537 takes 3
 
 
 class NoReplayCheck(enum.Enum):
@@ -57,10 +62,20 @@ class NoReplayCheck(enum.Enum):
 
 
 def _jwk_thumbprint(jwk: Mapping[str, Any]) -> str | None:
-    """The RFC 7638 SHA-256 thumbprint of a public JWK, `None` if it lacks a member."""
+    """The RFC 7638 SHA-256 thumbprint of a public JWK.
+
+    Returns:
+        The thumbprint, or `None` if the JWK lacks a member or is an RSA key
+        too costly to verify with.
+    """
     kty = jwk.get("kty")
     members = _THUMBPRINT_MEMBERS.get(kty) if isinstance(kty, str) else None
     if members is None or not all(isinstance(jwk.get(m), str) for m in members):
+        return None
+    if kty == "RSA" and (
+        len(jwk["n"]) > _MAX_RSA_MODULUS_CHARS
+        or len(jwk["e"]) > _MAX_RSA_EXPONENT_CHARS
+    ):
         return None
     canonical = json.dumps(
         {member: jwk[member] for member in members},
